@@ -85,7 +85,7 @@ The collision term has been tested once, on 48,000 agent pull requests, with a p
 
 Parameters, defaults and their sources are in [`reference/model.md`](plugins/carnot/skills/carnot/reference/model.md). α and β can't be read reliably from history. To fit them, run 1, 2, 4 and 8 agents on comparable work and use `carnot.py fit`.
 
-The model and its evidence are set out in the working paper *The Heat Death of the Codebase? Paying Maxwell's Demon a Day Rate* (Polymorphism, 2026).
+The model and its evidence are set out in the working paper *The Heat Death of the Codebase? On Paying Maxwell's Demon a Day Rate* (Polymorphism, 2026).
 
 ## Limits
 

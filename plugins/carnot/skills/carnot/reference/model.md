@@ -1,6 +1,6 @@
 # The Carnot model
 
-From Polymorphism's working paper *The Heat Death of the Codebase? Paying Maxwell's Demon a Day Rate* (2026). The best finished output the model allows is the fleet's Carnot limit.
+From Polymorphism's working paper *The Heat Death of the Codebase? On Paying Maxwell's Demon a Day Rate* (2026). The best finished output the model allows is the fleet's Carnot limit.
 
 ## Equations
 
