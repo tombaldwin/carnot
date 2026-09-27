@@ -1,0 +1,42 @@
+{
+  "n_pilot": 2,
+  "lambda_pilot": 5.3999999999999995,
+  "lambda_ci": [
+    2.4692238584270005,
+    10.250882070851501
+  ],
+  "attempts": 9,
+  "worker_hours": 1.6666666666666667,
+  "V": 10.363944987005542,
+  "V_ci": [
+    5.518364216879187,
+    17.722661564242394
+  ],
+  "reviews": 13,
+  "busy_hours": 1.2543486111031639,
+  "bounces": {
+    "review": 5,
+    "rebase_conflict": 0,
+    "visible_fail": 1,
+    "escaped_defect": 1,
+    "integration_failure": 0
+  },
+  "b_review": 0.38461538461538464,
+  "b_hidden": 0.14285714285714285,
+  "b_other": 0.14285714285714285,
+  "b": 0.5384615384615384,
+  "escape_rate": 0.14285714285714285,
+  "approvals_resolved": 7,
+  "r0": 0.5,
+  "n_resolved_first": 10,
+  "completion": 0.1111111111111111,
+  "ci_time_min": 2.3264880958057583,
+  "review_min_mean": 5.671149999973101,
+  "review_tokens_mean": 8786.846153846154,
+  "worker_tokens_per_attempt": 165481.02777777778,
+  "startup_min": 2.0,
+  "runs": [
+    "synth-11-T1",
+    "synth-11-T2"
+  ]
+}

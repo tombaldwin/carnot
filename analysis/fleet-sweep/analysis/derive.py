@@ -1,0 +1,437 @@
+#!/usr/bin/env python3
+"""Derive per-window quantities from runs/<id>/run.json + events.jsonl (PLAN-v3 section 6).
+
+    python derive.py runs/<id> [runs/<id> ...] --out derived.json [--csv-dir tables/]
+    python derive.py --pilot runs/<T1> runs/<T2> --out pilot.json
+
+Per window: attempts, reviews, V (reviews per reviewer-busy hour, all reviews), V per half-window,
+b_review, b_hidden, b (by cause), lambda (first attempts per worker-hour after warm-up), finished,
+censored, escaped defects, integration failures, and a per-PR table (first attempt: k, m, bounced at
+least once, first cause, queue depth at its first review, time in window).
+
+Definitions used (PLAN-v3 section 6; the choices where the text leaves room are listed in README.md):
+
+* Times are relative to window_start. The counting window for attempts and finished work is
+  [window_start + warm-up, window_end]; the analysis sees events up to window_end + grace.
+* Attempt: a task's first `submit` (attempt_no = 1). Counted if it falls in the counting window.
+* Finished: a counted attempt whose task has a `merge` by window_end + grace and whose merged head
+  passed hidden tests in `tests_post`.
+* Status at the end for everything not finished: `rework_open` if the task's last submit/bounce is
+  a bounce (sent back, not yet re-submitted), else `censored` (a head waiting for or in review or in
+  the merge queue). Censored changes are neither finished nor rework.
+* Review: a `review_end` by window_end + grace. Its queue depth is the queue_depth of the first
+  `review_start` for that head (the hand-over; a retry after `review_error` does not reset it).
+* V = reviews / reviewer-busy hours, busy time from reviewer_busy/reviewer_idle (clipped to
+  [window_start, window_end + grace]); falls back to summed review durations if those events are absent.
+  Half-windows split at the window midpoint; the second half includes the grace period; a review
+  belongs to the half in which it ended.
+* b_review = review bounces / reviews. b_hidden = (escaped + integration failures) / approvals with a
+  merge-queue outcome. b_other = (rebase conflicts + visible fails) / the same approvals. b = all
+  bounces / reviews.
+* Merge-queue ("CI") time per change: from max(approval, previous change's queue exit) to its merge or
+  queue bounce, FIFO.
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import math
+import sys
+from collections import defaultdict
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from common import BOUNCE_CAUSES, parse_t, rate_ci  # noqa: E402
+
+MQ_CAUSES = ("rebase_conflict", "visible_fail", "escaped_defect", "integration_failure")
+
+
+def load_run(run_dir):
+    d = Path(run_dir)
+    run = json.loads((d / "run.json").read_text())
+    events = [json.loads(line) for line in (d / "events.jsonl").read_text().splitlines() if line.strip()]
+    return run, events
+
+
+def _overlap(a0, a1, b0, b1):
+    return max(0.0, min(a1, b1) - max(a0, b0))
+
+
+def derive_window(run, events):
+    ws = parse_t(run["window_start"])
+    we = parse_t(run["window_end"]) - ws
+    warm = 60.0 * float(run["warmup_min"])
+    grace = 60.0 * float(run["grace_min"])
+    end_all = we + grace
+    hours = (we - warm) / 3600.0
+
+    tasks = {}
+    heads = {}
+    open_reviews = {}
+    reviews = []
+    busy_iv = []
+    busy_since = None
+    have_busy_events = False
+    wait_steps = []           # (t, +1/-1) waiting-for-review depth
+    first_review_seen = set()
+    hidden_pre = {}
+    tests_post = {}
+    merges = {}
+    mq_outcome = {}
+    worker_iv = defaultdict(list)
+    worker_alive = {}
+    restarts = defaultdict(int)
+    downs = 0
+    review_errors = 0
+    claim_races = 0
+    usage_tokens = defaultdict(float)
+    usage_cost = 0.0
+    first_claim = {}
+    worker_start_t = {}
+
+    def task_row(task):
+        if task not in tasks:
+            tasks[task] = dict(task=task, submits=[], bounces=[], reviews=[], merge_t=None, merge_head=None)
+        return tasks[task]
+
+    for e in events:
+        t = parse_t(e["t"]) - ws
+        typ = e["type"]
+        if typ in ("worker_start", "worker_restart"):
+            w = e["worker"]
+            if typ == "worker_restart":
+                restarts[w] += 1
+            if w not in worker_alive:
+                worker_alive[w] = max(t, 0.0)
+                worker_start_t.setdefault(w, max(t, 0.0))
+            continue
+        if typ == "worker_down":
+            w = e["worker"]
+            downs += 1
+            if w in worker_alive:
+                worker_iv[w].append((worker_alive.pop(w), max(t, 0.0)))
+            continue
+        if typ == "usage":
+            usage_tokens[e["worker"]] += (e.get("tokens_in") or 0) + (e.get("tokens_out") or 0)
+            usage_cost += e.get("cost_usd_est") or 0.0
+            continue
+        if t > end_all:
+            continue
+        if typ == "claim":
+            first_claim.setdefault(e["worker"], t)
+        elif typ == "claim_race":
+            claim_races += 1
+        elif typ == "submit":
+            if t > we:  # workers stop at window_end; a late submit is logged but not analysed
+                continue
+            row = task_row(e["task"])
+            row.setdefault("worker", e["worker"])
+            row["submits"].append(dict(t=t, head=e["head"], attempt_no=e["attempt_no"], k=e["k"], m=e["m"],
+                                       lines=e["lines_changed"], files=e["files"]))
+            heads[e["head"]] = (e["task"], e["attempt_no"])
+            wait_steps.append((t, +1))
+        elif typ == "review_start":
+            key = (e["task"], e["head"])
+            if key not in open_reviews:
+                open_reviews[key] = (t, e["queue_depth"])
+            if key not in first_review_seen and e["head"] in heads:
+                first_review_seen.add(key)
+                wait_steps.append((t, -1))
+        elif typ == "review_error":
+            review_errors += 1
+        elif typ == "review_end":
+            key = (e["task"], e["head"])
+            t0, depth = open_reviews.pop(key, (t - e.get("duration_s", 0.0), None))
+            rv = dict(task=e["task"], head=e["head"], attempt_no=heads.get(e["head"], (None, None))[1],
+                      t_start=t0, t_end=t, depth=depth, verdict=e["verdict"], duration_s=e.get("duration_s"),
+                      tokens=(e.get("tokens_in") or 0) + (e.get("tokens_out") or 0))
+            reviews.append(rv)
+            task_row(e["task"])["reviews"].append(rv)
+        elif typ == "reviewer_busy":
+            have_busy_events = True
+            if busy_since is None:
+                busy_since = t
+        elif typ == "reviewer_idle":
+            have_busy_events = True
+            if busy_since is not None:
+                busy_iv.append((busy_since, t))
+                busy_since = None
+        elif typ == "hidden_pre":
+            hidden_pre[e["head"]] = (t, e["passed"])
+        elif typ == "tests_post":
+            tests_post[e["head"]] = (t, e["visible_passed"], e["hidden_passed"])
+        elif typ == "bounce":
+            task_row(e["task"])["bounces"].append(dict(t=t, head=e["head"], cause=e["cause"]))
+            if e["cause"] in MQ_CAUSES:
+                mq_outcome[e["head"]] = (t, e["cause"])
+        elif typ == "merge":
+            row = task_row(e["task"])
+            if row["merge_t"] is None:
+                row["merge_t"], row["merge_head"] = t, e["head"]
+            merges[e["head"]] = t
+            mq_outcome[e["head"]] = (t, "merge")
+
+    if busy_since is not None:
+        busy_iv.append((busy_since, end_all))
+    for w, t0 in worker_alive.items():
+        worker_iv[w].append((t0, we))
+    if not have_busy_events:
+        busy_iv = [(r["t_start"], r["t_end"]) for r in reviews]
+    busy_iv = [(max(0.0, a), min(end_all, b)) for a, b in busy_iv if b > 0 and a < end_all]
+
+    # ------------------------------------------------------------------ reviewer
+    busy_h = sum(b - a for a, b in busy_iv) / 3600
+    n_rev = len(reviews)
+    V = n_rev / busy_h if busy_h > 0 else math.nan
+    mid = we / 2
+    halves = []
+    for h0, h1 in ((0.0, mid), (mid, end_all)):
+        n = sum(1 for r in reviews if (h0 <= r["t_end"] < h1) or (h1 == end_all and r["t_end"] == end_all))
+        bh = sum(_overlap(a, b, h0, h1) for a, b in busy_iv) / 3600
+        halves.append(dict(n=n, busy_h=bh, V=n / bh if bh > 0 else math.nan, V_ci=list(rate_ci(n, bh))))
+    util = sum(_overlap(a, b, warm, we) for a, b in busy_iv) / max(we - warm, 1e-9)
+
+    # waiting-queue depth over [warm, we]
+    wait_steps.sort()
+    depth, last, nonempty, area = 0, warm, 0.0, 0.0
+    for t, d in wait_steps:
+        if t > warm:
+            seg = min(t, we) - last
+            if seg > 0:
+                nonempty += seg * (depth >= 1)
+                area += seg * depth
+                last = min(t, we)
+        depth += d
+    if we > last:
+        nonempty += (we - last) * (depth >= 1)
+        area += (we - last) * depth
+    span = max(we - warm, 1e-9)
+
+    # ------------------------------------------------------------------ bounces
+    bounces = defaultdict(int)
+    for row in tasks.values():
+        for b in row["bounces"]:
+            bounces[b["cause"]] += 1
+    approvals = [r for r in reviews if r["verdict"] == "approve"]
+    appr_resolved = [r for r in approvals if r["head"] in mq_outcome]
+    n_ar = len(appr_resolved)
+    tot_b = sum(bounces.values())
+
+    # merge-queue time per change (FIFO)
+    ci_times = []
+    prev = -math.inf
+    for r in sorted(appr_resolved, key=lambda r: r["t_end"]):
+        fin = mq_outcome[r["head"]][0]
+        start = max(r["t_end"], prev)
+        if fin >= start:
+            ci_times.append(fin - start)
+            prev = fin
+
+    # ------------------------------------------------------------------ per-PR table
+    prs = []
+    for task, row in tasks.items():
+        if not row["submits"]:
+            continue
+        first = row["submits"][0]
+        if first["attempt_no"] != 1:
+            continue  # a task first submitted in an earlier run; not analysable here
+        rv1 = [r for r in row["reviews"] if r["head"] == first["head"]]
+        merged_green = (row["merge_t"] is not None
+                        and tests_post.get(row["merge_head"], (None, True, True))[2] is not False)
+        bounced = len(row["bounces"]) > 0
+        last_sub = row["submits"][-1]["t"]
+        last_b = row["bounces"][-1]["t"] if row["bounces"] else -math.inf
+        if merged_green:
+            status = "finished"
+        elif last_b >= last_sub:
+            status = "rework_open"
+        else:
+            status = "censored"
+        prs.append(dict(
+            run_id=run["run_id"], n_workers=run["n_workers"], task=task, worker=row.get("worker"),
+            t_submit_min=first["t"] / 60, counted=warm <= first["t"] <= we, k=first["k"], m=first["m"],
+            lines=first["lines"], n_files=len(first["files"]), attempts=len(row["submits"]),
+            reviews=len(row["reviews"]),
+            depth_first_review=rv1[0]["depth"] if rv1 else None,
+            t_first_review_min=rv1[0]["t_start"] / 60 if rv1 else None,
+            bounced=bounced, first_cause=row["bounces"][0]["cause"] if bounced else None,
+            n_bounces=len(row["bounces"]),
+            escaped=any(b["cause"] == "escaped_defect" for b in row["bounces"]),
+            integration_failure=any(b["cause"] == "integration_failure" for b in row["bounces"]),
+            finished=merged_green, status=status, resolved=bool(bounced or merged_green),
+            merge_min=row["merge_t"] / 60 if row["merge_t"] is not None else None))
+
+    appr_rows = []
+    for r in approvals:
+        if r["head"] not in hidden_pre:
+            continue
+        appr_rows.append(dict(run_id=run["run_id"], n_workers=run["n_workers"], task=r["task"], head=r["head"],
+                              attempt_no=r["attempt_no"], depth=r["depth"], t_review_min=r["t_start"] / 60,
+                              escaped=not hidden_pre[r["head"]][1]))
+
+    counted = [p for p in prs if p["counted"]]
+    worker_h_post = sum(_overlap(a, b, warm, we) for iv in worker_iv.values() for a, b in iv) / 3600
+    worker_h_all = sum(b - a for iv in worker_iv.values() for a, b in iv) / 3600
+    attempts = len(counted)
+    resolved_first = [p for p in prs if p["resolved"]]
+    startup = [first_claim[w] - worker_start_t[w] for w in first_claim if w in worker_start_t]
+
+    s = dict(
+        run_id=run["run_id"], kind=run["kind"], n_workers=run["n_workers"],
+        window_min=we / 60, warmup_min=warm / 60, grace_min=grace / 60, hours=hours,
+        attempts=attempts, attempts_all=len(prs),
+        worker_hours=worker_h_post, worker_hours_all=worker_h_all,
+        lam=attempts / worker_h_post if worker_h_post > 0 else math.nan,
+        attempts_per_hour=attempts / hours if hours > 0 else math.nan,
+        reviews=n_rev, first_reviews=sum(1 for r in reviews if r["attempt_no"] == 1),
+        re_reviews=sum(1 for r in reviews if (r["attempt_no"] or 1) > 1),
+        approvals=len(approvals), approvals_resolved=n_ar,
+        busy_hours=busy_h, V=V, V_ci=list(rate_ci(n_rev, busy_h)), V_half=halves,
+        reviewer_util=util, queue_nonempty_share=nonempty / span, mean_waiting_depth=area / span,
+        bounces={c: bounces.get(c, 0) for c in BOUNCE_CAUSES}, bounces_total=tot_b,
+        b_review=bounces.get("review", 0) / n_rev if n_rev else math.nan,
+        b_hidden=(bounces.get("escaped_defect", 0) + bounces.get("integration_failure", 0)) / n_ar if n_ar else math.nan,
+        b_other=(bounces.get("rebase_conflict", 0) + bounces.get("visible_fail", 0)) / n_ar if n_ar else math.nan,
+        b=tot_b / n_rev if n_rev else math.nan,
+        escaped=bounces.get("escaped_defect", 0), integration_failures=bounces.get("integration_failure", 0),
+        escape_rate=bounces.get("escaped_defect", 0) / n_ar if n_ar else math.nan,
+        finished=sum(1 for p in counted if p["finished"]),
+        finished_all=sum(1 for p in prs if p["finished"]),
+        censored=sum(1 for p in counted if p["status"] == "censored"),
+        rework_open=sum(1 for p in counted if p["status"] == "rework_open"),
+        censored_all=sum(1 for p in prs if p["status"] == "censored"),
+        r0_first=(sum(1 for p in resolved_first if p["bounced"]) / len(resolved_first)) if resolved_first else math.nan,
+        n_resolved_first=len(resolved_first), n_bounced_first=sum(1 for p in resolved_first if p["bounced"]),
+        ci_time_min=(sum(ci_times) / len(ci_times) / 60) if ci_times else math.nan, n_ci=len(ci_times),
+        review_min_mean=(sum(r["t_end"] - r["t_start"] for r in reviews) / n_rev / 60) if n_rev else math.nan,
+        review_tokens_mean=(sum(r["tokens"] for r in reviews) / n_rev) if n_rev else math.nan,
+        worker_tokens_per_attempt=(sum(usage_tokens.values()) / len(prs)) if prs and usage_tokens else math.nan,
+        worker_tokens_per_hour={w: usage_tokens[w] / (sum(b - a for a, b in worker_iv[w]) / 3600)
+                                for w in usage_tokens if sum(b - a for a, b in worker_iv[w]) > 0},
+        usage_cost_usd=usage_cost, startup_min_mean=(sum(startup) / len(startup) / 60) if startup else math.nan,
+        review_errors=review_errors, claim_races=claim_races, worker_downs=downs,
+        max_restarts=max(restarts.values()) if restarts else 0,
+        void_worker_restarts=(max(restarts.values()) if restarts else 0) > 2,
+    )
+    return dict(summary=s, prs=prs, approvals=appr_rows)
+
+
+def derive_dir(run_dir):
+    run, events = load_run(run_dir)
+    return derive_window(run, events)
+
+
+# ---------------------------------------------------------------------- pilot
+def pilot_params(derived, n_pilot=None):
+    """Pool trial + pilot windows into the pre-registered pilot outputs (PLAN-v3 section 3, T2).
+    lambda comes from kind == 'pilot' windows only (T1 is a throttling test at N = 1 then 9); V, b, r0,
+    CI time and review cost are pooled over every window given (T1's PRs are reviewed too)."""
+    S = [d["summary"] for d in derived]
+    pil = [s for s in S if s["kind"] == "pilot"] or S
+    ns = sorted({s["n_workers"] for s in pil})
+    if n_pilot is None:
+        if len(ns) != 1:
+            raise SystemExit(f"pilot windows have several sizes {ns}; pass --n-pilot")
+        n_pilot = ns[0]
+    att = sum(s["attempts"] for s in pil)
+    wh = sum(s["worker_hours"] for s in pil)
+    nrev = sum(s["reviews"] for s in S)
+    bh = sum(s["busy_hours"] for s in S)
+    nar = sum(s["approvals_resolved"] for s in S)
+    bc = {c: sum(s["bounces"][c] for s in S) for c in S[0]["bounces"]}
+    nci = sum(s["n_ci"] for s in S)
+    nres = sum(s["n_resolved_first"] for s in S)
+    lam_ci = rate_ci(att, wh)
+    out = dict(
+        n_pilot=n_pilot,
+        lambda_pilot=att / wh if wh else math.nan, lambda_ci=list(lam_ci), attempts=att, worker_hours=wh,
+        V=nrev / bh if bh else math.nan, V_ci=list(rate_ci(nrev, bh)), reviews=nrev, busy_hours=bh,
+        bounces=bc,
+        b_review=bc["review"] / nrev if nrev else math.nan,
+        b_hidden=(bc["escaped_defect"] + bc["integration_failure"]) / nar if nar else math.nan,
+        b_other=(bc["rebase_conflict"] + bc["visible_fail"]) / nar if nar else math.nan,
+        b=sum(bc.values()) / nrev if nrev else math.nan,
+        escape_rate=bc["escaped_defect"] / nar if nar else math.nan, approvals_resolved=nar,
+        r0=sum(s["n_bounced_first"] for s in S) / nres if nres else math.nan, n_resolved_first=nres,
+        completion=(sum(s["finished"] for s in pil) / att) if att else math.nan,
+        ci_time_min=(sum(s["ci_time_min"] * s["n_ci"] for s in S if s["n_ci"]) / nci) if nci else math.nan,
+        review_min_mean=(sum(s["review_min_mean"] * s["reviews"] for s in S if s["reviews"]) / nrev) if nrev else math.nan,
+        review_tokens_mean=(sum(s["review_tokens_mean"] * s["reviews"] for s in S if s["reviews"]) / nrev) if nrev else math.nan,
+        worker_tokens_per_attempt=_nanmean([s["worker_tokens_per_attempt"] for s in S]),
+        startup_min=_nanmean([s["startup_min_mean"] for s in S]),
+        runs=[s["run_id"] for s in S],
+    )
+    return out
+
+
+def _nanmean(xs):
+    xs = [x for x in xs if x is not None and not (isinstance(x, float) and math.isnan(x))]
+    return sum(xs) / len(xs) if xs else math.nan
+
+
+def _clean(o):
+    if isinstance(o, float) and (math.isnan(o) or math.isinf(o)):
+        return None
+    if isinstance(o, dict):
+        return {k: _clean(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [_clean(v) for v in o]
+    return o
+
+
+def write_csv(path, rows):
+    if not rows:
+        return
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        w.writeheader()
+        for r in rows:
+            w.writerow({k: (json.dumps(v) if isinstance(v, (list, dict)) else v) for k, v in r.items()})
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("runs", nargs="+", help="run directories (each with run.json + events.jsonl)")
+    ap.add_argument("--pilot", action="store_true", help="pool the runs into pilot parameters (T1 + T2)")
+    ap.add_argument("--n-pilot", type=int, default=None)
+    ap.add_argument("--out", default=None, help="write JSON here")
+    ap.add_argument("--csv-dir", default=None, help="also write per-window, per-PR and per-approval CSVs")
+    a = ap.parse_args()
+    derived = [derive_dir(r) for r in a.runs]
+    if a.pilot:
+        res = pilot_params(derived, a.n_pilot)
+    else:
+        res = dict(windows=[d["summary"] for d in derived], prs=[p for d in derived for p in d["prs"]],
+                   approvals=[x for d in derived for x in d["approvals"]])
+    if a.csv_dir:
+        cd = Path(a.csv_dir)
+        cd.mkdir(parents=True, exist_ok=True)
+        write_csv(cd / "prs.csv", [p for d in derived for p in d["prs"]])
+        write_csv(cd / "approvals.csv", [x for d in derived for x in d["approvals"]])
+        flat = []
+        for d in derived:
+            s = dict(d["summary"])
+            s.update({f"bounce_{k}": v for k, v in s.pop("bounces").items()})
+            s["V_half1"], s["V_half2"] = s["V_half"][0]["V"], s["V_half"][1]["V"]
+            s.pop("V_half")
+            s.pop("worker_tokens_per_hour")
+            flat.append(s)
+        write_csv(cd / "windows.csv", flat)
+    txt = json.dumps(_clean(res), indent=2)
+    if a.out:
+        Path(a.out).write_text(txt + "\n")
+    if a.pilot:
+        print(txt)
+    else:
+        print(f"{'run':28} {'N':>2} {'att':>4} {'lam':>5} {'rev':>4} {'V':>5} {'b_rev':>5} {'b_hid':>5} "
+              f"{'b':>5} {'fin':>4} {'cens':>4} {'esc':>3} {'intf':>4} {'q>0':>4}")
+        for d in derived:
+            s = d["summary"]
+            print(f"{s['run_id'][:28]:28} {s['n_workers']:>2} {s['attempts']:>4} {s['lam']:>5.2f} {s['reviews']:>4} "
+                  f"{s['V']:>5.1f} {s['b_review']:>5.2f} {s['b_hidden']:>5.2f} {s['b']:>5.2f} {s['finished']:>4} "
+                  f"{s['censored']:>4} {s['escaped']:>3} {s['integration_failures']:>4} {s['queue_nonempty_share']:>4.2f}")
+
+
+if __name__ == "__main__":
+    main()

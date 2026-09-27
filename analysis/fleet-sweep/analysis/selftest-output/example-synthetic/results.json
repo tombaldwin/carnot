@@ -1,0 +1,1289 @@
+{
+  "sizes": {
+    "N_low": 1,
+    "N_high": 5
+  },
+  "pilot": {
+    "n_pilot": 2,
+    "lambda_pilot": 5.3999999999999995,
+    "lambda_ci": [
+      2.4692238584270005,
+      10.250882070851501
+    ],
+    "attempts": 9,
+    "worker_hours": 1.6666666666666667,
+    "V": 10.363944987005542,
+    "V_ci": [
+      5.518364216879187,
+      17.722661564242394
+    ],
+    "reviews": 13,
+    "busy_hours": 1.2543486111031639,
+    "bounces": {
+      "review": 5,
+      "rebase_conflict": 0,
+      "visible_fail": 1,
+      "escaped_defect": 1,
+      "integration_failure": 0
+    },
+    "b_review": 0.38461538461538464,
+    "b_hidden": 0.14285714285714285,
+    "b_other": 0.14285714285714285,
+    "b": 0.5384615384615384,
+    "escape_rate": 0.14285714285714285,
+    "approvals_resolved": 7,
+    "r0": 0.5,
+    "n_resolved_first": 10,
+    "completion": 0.1111111111111111,
+    "ci_time_min": 2.3264880958057583,
+    "review_min_mean": 5.671149999973101,
+    "review_tokens_mean": 8786.846153846154,
+    "worker_tokens_per_attempt": 165481.02777777778,
+    "startup_min": 2.0,
+    "runs": [
+      "synth-11-T1",
+      "synth-11-T2"
+    ]
+  },
+  "params": {
+    "lambda_pilot": 5.3999999999999995,
+    "n_pilot": 2,
+    "V": 10.363944987005542,
+    "b_review": 0.38461538461538464,
+    "b_hidden": 0.14285714285714285,
+    "b_other": 0.14285714285714285,
+    "r0": 0.5,
+    "ci_time_min": 2.3264880958057583,
+    "window_min": 90.0,
+    "warmup_min": 10.0,
+    "alpha": 0.1,
+    "beta": 0.01,
+    "p": 0.005,
+    "rival_rework": "plan",
+    "completion": 0.1111111111111111,
+    "mq_cap": true
+  },
+  "cv": 0.3,
+  "windows": [
+    {
+      "run_id": "synth-11-N1-w1",
+      "kind": "sweep",
+      "n_workers": 1,
+      "window_min": 90.0,
+      "warmup_min": 10.0,
+      "grace_min": 10.0,
+      "hours": 1.3333333333333333,
+      "attempts": 6,
+      "attempts_all": 7,
+      "worker_hours": 1.3333333333333333,
+      "worker_hours_all": 1.4994161111116409,
+      "lam": 4.5,
+      "attempts_per_hour": 4.5,
+      "reviews": 8,
+      "first_reviews": 7,
+      "re_reviews": 1,
+      "approvals": 7,
+      "approvals_resolved": 7,
+      "busy_hours": 0.5296361111932331,
+      "V": 15.10471025470027,
+      "V_ci": [
+        6.521141787268357,
+        29.76230073262934
+      ],
+      "V_half": [
+        {
+          "n": 3,
+          "busy_h": 0.21271472228897942,
+          "V": 14.103396171725288,
+          "V_ci": [
+            2.9084593498663276,
+            41.21610848275803
+          ]
+        },
+        {
+          "n": 5,
+          "busy_h": 0.31692138890425364,
+          "V": 15.776783060579636,
+          "V_ci": [
+            5.122678515740378,
+            36.817748778855176
+          ]
+        }
+      ],
+      "reviewer_util": 0.3912616667151451,
+      "queue_nonempty_share": 0.07933583329121272,
+      "mean_waiting_depth": 0.07933583329121272,
+      "bounces": {
+        "review": 1,
+        "rebase_conflict": 0,
+        "visible_fail": 0,
+        "escaped_defect": 0,
+        "integration_failure": 0
+      },
+      "bounces_total": 1,
+      "b_review": 0.125,
+      "b_hidden": 0.0,
+      "b_other": 0.0,
+      "b": 0.125,
+      "escaped": 0,
+      "integration_failures": 0,
+      "escape_rate": 0.0,
+      "finished": 6,
+      "finished_all": 7,
+      "censored": 0,
+      "rework_open": 0,
+      "censored_all": 0,
+      "r0_first": 0.14285714285714285,
+      "n_resolved_first": 7,
+      "n_bounced_first": 1,
+      "ci_time_min": 2.7109999997275214,
+      "n_ci": 7,
+      "review_min_mean": 3.972270833949248,
+      "review_tokens_mean": 7833.625,
+      "worker_tokens_per_attempt": 108884.42857142857,
+      "worker_tokens_per_hour": {
+        "w1": 508325.2036253798
+      },
+      "usage_cost_usd": 5.6000000000000005,
+      "startup_min_mean": 2.0,
+      "review_errors": 0,
+      "claim_races": 0,
+      "worker_downs": 0,
+      "max_restarts": 0,
+      "void_worker_restarts": false
+    },
+    {
+      "run_id": "synth-11-N1-w4",
+      "kind": "sweep",
+      "n_workers": 1,
+      "window_min": 90.0,
+      "warmup_min": 10.0,
+      "grace_min": 10.0,
+      "hours": 1.3333333333333333,
+      "attempts": 5,
+      "attempts_all": 5,
+      "worker_hours": 1.3333333333333333,
+      "worker_hours_all": 1.498631666633818,
+      "lam": 3.75,
+      "attempts_per_hour": 3.75,
+      "reviews": 6,
+      "first_reviews": 5,
+      "re_reviews": 1,
+      "approvals": 5,
+      "approvals_resolved": 5,
+      "busy_hours": 0.4865202777253257,
+      "V": 12.332476722352393,
+      "V_ci": [
+        4.525801604376237,
+        26.842609898146236
+      ],
+      "V_half": [
+        {
+          "n": 1,
+          "busy_h": 0.04815722220473819,
+          "V": 20.765317313123802,
+          "V_ci": [
+            0.5257323164665191,
+            115.69694296841531
+          ]
+        },
+        {
+          "n": 5,
+          "busy_h": 0.4383630555205875,
+          "V": 11.406070691933976,
+          "V_ci": [
+            3.7035201066166827,
+            26.61796411074307
+          ]
+        }
+      ],
+      "reviewer_util": 0.36489020829399427,
+      "queue_nonempty_share": 0.047490000029404955,
+      "mean_waiting_depth": 0.05220500002304713,
+      "bounces": {
+        "review": 1,
+        "rebase_conflict": 0,
+        "visible_fail": 0,
+        "escaped_defect": 0,
+        "integration_failure": 0
+      },
+      "bounces_total": 1,
+      "b_review": 0.16666666666666666,
+      "b_hidden": 0.0,
+      "b_other": 0.0,
+      "b": 0.16666666666666666,
+      "escaped": 0,
+      "integration_failures": 0,
+      "escape_rate": 0.0,
+      "finished": 5,
+      "finished_all": 5,
+      "censored": 0,
+      "rework_open": 0,
+      "censored_all": 0,
+      "r0_first": 0.2,
+      "n_resolved_first": 5,
+      "n_bounced_first": 1,
+      "ci_time_min": 2.75714333375295,
+      "n_ci": 5,
+      "review_min_mean": 4.865202777253257,
+      "review_tokens_mean": 8401.333333333334,
+      "worker_tokens_per_attempt": 139489.2,
+      "worker_tokens_per_hour": {
+        "w1": 465388.53777631867
+      },
+      "usage_cost_usd": 5.6000000000000005,
+      "startup_min_mean": 2.0,
+      "review_errors": 0,
+      "claim_races": 0,
+      "worker_downs": 0,
+      "max_restarts": 0,
+      "void_worker_restarts": false
+    },
+    {
+      "run_id": "synth-11-N5-w2",
+      "kind": "sweep",
+      "n_workers": 5,
+      "window_min": 90.0,
+      "warmup_min": 10.0,
+      "grace_min": 10.0,
+      "hours": 1.3333333333333333,
+      "attempts": 12,
+      "attempts_all": 12,
+      "worker_hours": 6.666666666666667,
+      "worker_hours_all": 7.497344722151756,
+      "lam": 1.7999999999999998,
+      "attempts_per_hour": 9.0,
+      "reviews": 15,
+      "first_reviews": 12,
+      "re_reviews": 3,
+      "approvals": 11,
+      "approvals_resolved": 11,
+      "busy_hours": 1.1816186111503177,
+      "V": 12.694451372424938,
+      "V_ci": [
+        7.104988067689897,
+        20.937567027148464
+      ],
+      "V_half": [
+        {
+          "n": 2,
+          "busy_h": 0.4258908333381017,
+          "V": 4.6960390866460875,
+          "V_ci": [
+            0.5687121195954047,
+            16.963707838220834
+          ]
+        },
+        {
+          "n": 13,
+          "busy_h": 0.755727777812216,
+          "V": 17.201961316856945,
+          "V_ci": [
+            9.159319922105311,
+            29.41587774173719
+          ]
+        }
+      ],
+      "reviewer_util": 0.81732833335797,
+      "queue_nonempty_share": 0.6838816666603088,
+      "mean_waiting_depth": 1.3941249999403953,
+      "bounces": {
+        "review": 4,
+        "rebase_conflict": 0,
+        "visible_fail": 0,
+        "escaped_defect": 1,
+        "integration_failure": 0
+      },
+      "bounces_total": 5,
+      "b_review": 0.26666666666666666,
+      "b_hidden": 0.09090909090909091,
+      "b_other": 0.0,
+      "b": 0.3333333333333333,
+      "escaped": 1,
+      "integration_failures": 0,
+      "escape_rate": 0.09090909090909091,
+      "finished": 10,
+      "finished_all": 10,
+      "censored": 0,
+      "rework_open": 2,
+      "censored_all": 0,
+      "r0_first": 0.4166666666666667,
+      "n_resolved_first": 12,
+      "n_bounced_first": 5,
+      "ci_time_min": 2.4016833330645704,
+      "n_ci": 11,
+      "review_min_mean": 4.726474444601271,
+      "review_tokens_mean": 9419.6,
+      "worker_tokens_per_attempt": 324057.3333333333,
+      "worker_tokens_per_hour": {
+        "w2": 519607.81734311447,
+        "w3": 518791.4318095677,
+        "w1": 486458.64091187296,
+        "w4": 516377.02055398753,
+        "w5": 552151.8064260194
+      },
+      "usage_cost_usd": 27.999999999999982,
+      "startup_min_mean": 2.0,
+      "review_errors": 0,
+      "claim_races": 0,
+      "worker_downs": 0,
+      "max_restarts": 0,
+      "void_worker_restarts": false
+    },
+    {
+      "run_id": "synth-11-N5-w3",
+      "kind": "sweep",
+      "n_workers": 5,
+      "window_min": 90.0,
+      "warmup_min": 10.0,
+      "grace_min": 10.0,
+      "hours": 1.3333333333333333,
+      "attempts": 22,
+      "attempts_all": 23,
+      "worker_hours": 6.666666666666667,
+      "worker_hours_all": 7.496111944384045,
+      "lam": 3.3,
+      "attempts_per_hour": 16.5,
+      "reviews": 18,
+      "first_reviews": 15,
+      "re_reviews": 3,
+      "approvals": 11,
+      "approvals_resolved": 11,
+      "busy_hours": 1.49115194439888,
+      "V": 12.07120445881606,
+      "V_ci": [
+        7.15416079526358,
+        19.077707254706343
+      ],
+      "V_half": [
+        {
+          "n": 6,
+          "busy_h": 0.5744852777322134,
+          "V": 10.44413187346604,
+          "V_ci": [
+            3.832812325814252,
+            22.732478148214856
+          ]
+        },
+        {
+          "n": 12,
+          "busy_h": 0.9166666666666666,
+          "V": 13.090909090909092,
+          "V_ci": [
+            6.764263754969694,
+            22.867183688920303
+          ]
+        }
+      ],
+      "reviewer_util": 0.9669599999984105,
+      "queue_nonempty_share": 0.965242083321015,
+      "mean_waiting_depth": 4.947666666756073,
+      "bounces": {
+        "review": 7,
+        "rebase_conflict": 0,
+        "visible_fail": 0,
+        "escaped_defect": 1,
+        "integration_failure": 0
+      },
+      "bounces_total": 8,
+      "b_review": 0.3888888888888889,
+      "b_hidden": 0.09090909090909091,
+      "b_other": 0.0,
+      "b": 0.4444444444444444,
+      "escaped": 1,
+      "integration_failures": 0,
+      "escape_rate": 0.09090909090909091,
+      "finished": 9,
+      "finished_all": 10,
+      "censored": 9,
+      "rework_open": 4,
+      "censored_all": 9,
+      "r0_first": 0.4666666666666667,
+      "n_resolved_first": 15,
+      "n_bounced_first": 7,
+      "ci_time_min": 2.346518182032036,
+      "n_ci": 11,
+      "review_min_mean": 4.773802777572914,
+      "review_tokens_mean": 8910.777777777777,
+      "worker_tokens_per_attempt": 159234.21739130435,
+      "worker_tokens_per_hour": {
+        "w3": 484393.45538231527,
+        "w4": 507412.10377949354,
+        "w5": 479372.7899154756,
+        "w2": 471522.1513715207,
+        "w1": 500158.6104356076
+      },
+      "usage_cost_usd": 27.999999999999982,
+      "startup_min_mean": 2.0,
+      "review_errors": 0,
+      "claim_races": 2,
+      "worker_downs": 0,
+      "max_restarts": 0,
+      "void_worker_restarts": false
+    }
+  ],
+  "rivals": {
+    "windows": [
+      {
+        "run_id": "synth-11-N1-w1",
+        "N": 1,
+        "finished": 6,
+        "pred_carnot": 6.27904810553573,
+        "ll_carnot": -2.0512576487472343,
+        "pred_usl": 4.032,
+        "ll_usl": -2.3415205797947447,
+        "pred_amdahl": 3.9599999999999995,
+        "ll_amdahl": -2.3680804596510123,
+        "pred_linear": 3.5999999999999996,
+        "ll_linear": -2.526251787566113
+      },
+      {
+        "run_id": "synth-11-N1-w4",
+        "N": 1,
+        "finished": 5,
+        "pred_carnot": 6.27904810553573,
+        "ll_carnot": -2.0203212540751236,
+        "pred_usl": 4.032,
+        "ll_usl": -2.005987090015526,
+        "pred_amdahl": 3.9599999999999995,
+        "ll_amdahl": -2.01929444085248,
+        "pred_linear": 3.5999999999999996,
+        "ll_linear": -2.106332262717788
+      },
+      {
+        "run_id": "synth-11-N5-w2",
+        "N": 5,
+        "finished": 10,
+        "pred_carnot": 6.154405865041198,
+        "ll_carnot": -3.012012387771896,
+        "pred_usl": 12.600000000000001,
+        "ll_usl": -2.543856802241729,
+        "pred_amdahl": 14.142857142857142,
+        "ll_amdahl": -2.719562673113944,
+        "pred_linear": 17.999999999999996,
+        "ll_linear": -3.3086041772715538
+      },
+      {
+        "run_id": "synth-11-N5-w3",
+        "N": 5,
+        "finished": 9,
+        "pred_carnot": 6.154405865041198,
+        "ll_carnot": -2.6791567008652466,
+        "pred_usl": 12.600000000000001,
+        "ll_usl": -2.610297215603282,
+        "pred_amdahl": 14.142857142857142,
+        "ll_amdahl": -2.838476433182521,
+        "pred_linear": 17.999999999999996,
+        "ll_linear": -3.5265433696783957
+      }
+    ],
+    "ll": {
+      "carnot": -9.7627479914595,
+      "usl": -9.501661687655282,
+      "amdahl": -9.945414006799957,
+      "linear": -11.46773159723385
+    },
+    "best": "usl",
+    "tie": false,
+    "log_lr_vs_carnot": {
+      "carnot": 0.0,
+      "usl": 0.26108630380421793,
+      "amdahl": -0.18266601534045712,
+      "linear": -1.7049836057743502
+    },
+    "lr_best_vs_next": 1.2983397122549218
+  },
+  "rivals_by_reading": {
+    "plan": {
+      "windows": [
+        {
+          "run_id": "synth-11-N1-w1",
+          "N": 1,
+          "finished": 6,
+          "pred_carnot": 6.27904810553573,
+          "ll_carnot": -2.0512576487472343,
+          "pred_usl": 4.032,
+          "ll_usl": -2.3415205797947447,
+          "pred_amdahl": 3.9599999999999995,
+          "ll_amdahl": -2.3680804596510123,
+          "pred_linear": 3.5999999999999996,
+          "ll_linear": -2.526251787566113
+        },
+        {
+          "run_id": "synth-11-N1-w4",
+          "N": 1,
+          "finished": 5,
+          "pred_carnot": 6.27904810553573,
+          "ll_carnot": -2.0203212540751236,
+          "pred_usl": 4.032,
+          "ll_usl": -2.005987090015526,
+          "pred_amdahl": 3.9599999999999995,
+          "ll_amdahl": -2.01929444085248,
+          "pred_linear": 3.5999999999999996,
+          "ll_linear": -2.106332262717788
+        },
+        {
+          "run_id": "synth-11-N5-w2",
+          "N": 5,
+          "finished": 10,
+          "pred_carnot": 6.154405865041198,
+          "ll_carnot": -3.012012387771896,
+          "pred_usl": 12.600000000000001,
+          "ll_usl": -2.543856802241729,
+          "pred_amdahl": 14.142857142857142,
+          "ll_amdahl": -2.719562673113944,
+          "pred_linear": 17.999999999999996,
+          "ll_linear": -3.3086041772715538
+        },
+        {
+          "run_id": "synth-11-N5-w3",
+          "N": 5,
+          "finished": 9,
+          "pred_carnot": 6.154405865041198,
+          "ll_carnot": -2.6791567008652466,
+          "pred_usl": 12.600000000000001,
+          "ll_usl": -2.610297215603282,
+          "pred_amdahl": 14.142857142857142,
+          "ll_amdahl": -2.838476433182521,
+          "pred_linear": 17.999999999999996,
+          "ll_linear": -3.5265433696783957
+        }
+      ],
+      "ll": {
+        "carnot": -9.7627479914595,
+        "usl": -9.501661687655282,
+        "amdahl": -9.945414006799957,
+        "linear": -11.46773159723385
+      },
+      "best": "usl",
+      "tie": false,
+      "log_lr_vs_carnot": {
+        "carnot": 0.0,
+        "usl": 0.26108630380421793,
+        "amdahl": -0.18266601534045712,
+        "linear": -1.7049836057743502
+      },
+      "lr_best_vs_next": 1.2983397122549218
+    },
+    "recovered": {
+      "windows": [
+        {
+          "run_id": "synth-11-N1-w1",
+          "N": 1,
+          "finished": 6,
+          "pred_carnot": 6.27904810553573,
+          "ll_carnot": -2.0512576487472343,
+          "pred_usl": 8.064,
+          "ll_usl": -2.222013442408194,
+          "pred_amdahl": 7.919999999999999,
+          "ll_amdahl": -2.201139638701827,
+          "pred_linear": 7.199999999999999,
+          "ll_linear": -2.1130760366241503
+        },
+        {
+          "run_id": "synth-11-N1-w4",
+          "N": 1,
+          "finished": 5,
+          "pred_carnot": 6.27904810553573,
+          "ll_carnot": -2.0203212540751236,
+          "pred_usl": 8.064,
+          "ll_usl": -2.343559707774907,
+          "pred_amdahl": 7.919999999999999,
+          "ll_amdahl": -2.312205473439251,
+          "pred_linear": 7.199999999999999,
+          "ll_linear": -2.167398718363305
+        },
+        {
+          "run_id": "synth-11-N5-w2",
+          "N": 5,
+          "finished": 10,
+          "pred_carnot": 6.154405865041198,
+          "ll_carnot": -3.012012387771896,
+          "pred_usl": 25.200000000000003,
+          "ll_usl": -4.609518839137502,
+          "pred_amdahl": 28.285714285714285,
+          "ll_amdahl": -5.176242879857315,
+          "pred_linear": 35.99999999999999,
+          "ll_linear": -6.539788013834716
+        },
+        {
+          "run_id": "synth-11-N5-w3",
+          "N": 5,
+          "finished": 9,
+          "pred_carnot": 6.154405865041198,
+          "ll_carnot": -2.6791567008652466,
+          "pred_usl": 25.200000000000003,
+          "ll_usl": -4.9429264089408065,
+          "pred_amdahl": 28.285714285714285,
+          "ll_amdahl": -5.543601883059072,
+          "pred_linear": 35.99999999999999,
+          "ll_linear": -6.969485435330642
+        }
+      ],
+      "ll": {
+        "carnot": -9.7627479914595,
+        "usl": -14.118018398261409,
+        "amdahl": -15.233189875057466,
+        "linear": -17.789748204152815
+      },
+      "best": "carnot",
+      "tie": false,
+      "log_lr_vs_carnot": {
+        "carnot": 0.0,
+        "usl": -4.355270406801909,
+        "amdahl": -5.470441883597966,
+        "linear": -8.027000212693315
+      },
+      "lr_best_vs_next": 77.88788390310363
+    },
+    "completion": {
+      "windows": [
+        {
+          "run_id": "synth-11-N1-w1",
+          "N": 1,
+          "finished": 6,
+          "pred_carnot": 0.8959999999999999,
+          "ll_carnot": -7.395408957252673,
+          "pred_usl": 0.8959999999999999,
+          "ll_usl": -7.395408957252673,
+          "pred_amdahl": 0.8799999999999999,
+          "ll_amdahl": -7.4807034819617275,
+          "pred_linear": 0.7999999999999998,
+          "ll_linear": -7.938023411624231
+        },
+        {
+          "run_id": "synth-11-N1-w4",
+          "N": 1,
+          "finished": 5,
+          "pred_carnot": 0.8959999999999999,
+          "ll_carnot": -5.787844720234828,
+          "pred_usl": 0.8959999999999999,
+          "ll_usl": -5.787844720234828,
+          "pred_amdahl": 0.8799999999999999,
+          "ll_amdahl": -5.856454171744859,
+          "pred_linear": 0.7999999999999998,
+          "ll_linear": -6.225157884865837
+        },
+        {
+          "run_id": "synth-11-N5-w2",
+          "N": 5,
+          "finished": 10,
+          "pred_carnot": 2.8,
+          "ll_carnot": -6.3270066324139815,
+          "pred_usl": 2.8,
+          "ll_usl": -6.3270066324139815,
+          "pred_amdahl": 3.142857142857143,
+          "ll_amdahl": -5.685879706792063,
+          "pred_linear": 3.999999999999999,
+          "ll_linear": -4.507041764505573
+        },
+        {
+          "run_id": "synth-11-N5-w3",
+          "N": 5,
+          "finished": 9,
+          "pred_carnot": 2.8,
+          "ll_carnot": -5.422625529200914,
+          "pred_usl": 2.8,
+          "ll_usl": -5.422625529200914,
+          "pred_amdahl": 3.142857142857143,
+          "ll_amdahl": -4.872664030119953,
+          "pred_linear": 3.999999999999999,
+          "ll_linear": -3.876593178161185
+        }
+      ],
+      "ll": {
+        "carnot": -24.932885839102397,
+        "usl": -24.932885839102397,
+        "amdahl": -23.8957013906186,
+        "linear": -22.546816239156826
+      },
+      "best": "linear",
+      "tie": false,
+      "log_lr_vs_carnot": {
+        "carnot": 0.0,
+        "usl": 0.0,
+        "amdahl": 1.0371844484837958,
+        "linear": 2.3860695999455714
+      },
+      "lr_best_vs_next": 3.853127481764718
+    }
+  },
+  "pooled": {
+    "finished_low_mean": 5.5,
+    "finished_high_mean": 9.5,
+    "ratio": 1.7272727272727273,
+    "queue_nonempty_share_high": 0.8245618749906619,
+    "queue_nonempty_share_low": 0.06341291666030884,
+    "carnot_predicted_ratio": 0.9801495006250001,
+    "ratio_over_predicted": 1.7622543562704651
+  },
+  "V": {
+    "low": {
+      "reviews": 14,
+      "busy_hours": 1.0161563889185588,
+      "V": 13.777406856536578,
+      "V_ci": [
+        7.532236533439767,
+        23.11614765010171
+      ],
+      "ratio_to_pilot": 1.3293593196230664,
+      "ratio_to_pilot_ci": [
+        0.5795535028508854,
+        3.0715708142118094
+      ],
+      "in_band": false,
+      "off_band_significant": 0.0,
+      "half1": 15.333193486033641,
+      "half2": 13.240044957651852,
+      "drift_ratio": 0.8634890683217198,
+      "drift_ci": [
+        0.24905302799535725,
+        3.771882165586002
+      ],
+      "drift_in_band": true,
+      "drift_off_band_significant": false
+    },
+    "high": {
+      "reviews": 33,
+      "busy_hours": 2.6727705555491976,
+      "V": 12.346738829296628,
+      "V_ci": [
+        8.498926900241257,
+        17.33941178487973
+      ],
+      "ratio_to_pilot": 1.1913165155524408,
+      "ratio_to_pilot_ci": [
+        0.6105418664872518,
+        2.466304853061612
+      ],
+      "in_band": true,
+      "off_band_significant": false,
+      "half1": 7.996992242688301,
+      "half2": 14.948626553103617,
+      "drift_ratio": 1.8692811121295307,
+      "drift_ci": [
+        0.8173176837979141,
+        4.794474855988298
+      ],
+      "drift_in_band": false,
+      "drift_off_band_significant": 0.0
+    },
+    "high_over_low": 0.8961583959784725,
+    "high_over_low_ci": [
+      0.4666776803182367,
+      1.8125083628874687
+    ],
+    "high_low_in_band": true,
+    "high_low_off_band_significant": false,
+    "per_window": [
+      {
+        "run_id": "synth-11-N1-w1",
+        "N": 1,
+        "V": 15.10471025470027,
+        "V_ci": [
+          6.521141787268357,
+          29.76230073262934
+        ],
+        "ratio": 1.4574286406999233,
+        "in_band": false,
+        "halves": [
+          {
+            "V": 14.103396171725288,
+            "n": 3,
+            "ratio": 1.3608134922954842,
+            "in_band": false
+          },
+          {
+            "V": 15.776783060579636,
+            "n": 5,
+            "ratio": 1.5222758399779992,
+            "in_band": false
+          }
+        ]
+      },
+      {
+        "run_id": "synth-11-N1-w4",
+        "N": 1,
+        "V": 12.332476722352393,
+        "V_ci": [
+          4.525801604376237,
+          26.842609898146236
+        ],
+        "ratio": 1.1899403883188326,
+        "in_band": true,
+        "halves": [
+          {
+            "V": 20.765317313123802,
+            "n": 1,
+            "ratio": 2.003611302371794,
+            "in_band": false
+          },
+          {
+            "V": 11.406070691933976,
+            "n": 5,
+            "ratio": 1.100552994659376,
+            "in_band": true
+          }
+        ]
+      },
+      {
+        "run_id": "synth-11-N5-w2",
+        "N": 5,
+        "V": 12.694451372424938,
+        "V_ci": [
+          7.104988067689897,
+          20.937567027148464
+        ],
+        "ratio": 1.2248667267475288,
+        "in_band": true,
+        "halves": [
+          {
+            "V": 4.6960390866460875,
+            "n": 2,
+            "ratio": 0.4531130850785146,
+            "in_band": false
+          },
+          {
+            "V": 17.201961316856945,
+            "n": 13,
+            "ratio": 1.6597889450807586,
+            "in_band": false
+          }
+        ]
+      },
+      {
+        "run_id": "synth-11-N5-w3",
+        "N": 5,
+        "V": 12.07120445881606,
+        "V_ci": [
+          7.15416079526358,
+          19.077707254706343
+        ],
+        "ratio": 1.1647306574814034,
+        "in_band": true,
+        "halves": [
+          {
+            "V": 10.44413187346604,
+            "n": 6,
+            "ratio": 1.0077371007431086,
+            "in_band": true
+          },
+          {
+            "V": 13.090909090909092,
+            "n": 12,
+            "ratio": 1.263120279712277,
+            "in_band": false
+          }
+        ]
+      }
+    ]
+  },
+  "b": {
+    "low": {
+      "reviews": 14,
+      "bounces": 2,
+      "b": 0.14285714285714285,
+      "b_review": 0.14285714285714285,
+      "b_hidden": 0.0,
+      "approvals_resolved": 12
+    },
+    "high": {
+      "reviews": 33,
+      "bounces": 13,
+      "b": 0.3939393939393939,
+      "b_review": 0.3333333333333333,
+      "b_hidden": 0.09090909090909091,
+      "approvals_resolved": 22
+    },
+    "p_rising": 0.08602611833812969
+  },
+  "attempts": {
+    "low": {
+      "attempts": 11,
+      "hours": 2.6666666666666665,
+      "worker_hours": 2.6666666666666665,
+      "per_hour": 4.125,
+      "per_agent_hour": 4.125
+    },
+    "high": {
+      "attempts": 34,
+      "hours": 2.6666666666666665,
+      "worker_hours": 13.333333333333334,
+      "per_hour": 12.75,
+      "per_agent_hour": 2.55
+    },
+    "total_ratio": 3.090909090909091,
+    "p_total_rising": 0.00041204117979987126,
+    "p_total_falling": 0.9998764561076996,
+    "per_agent_ratio": 0.6181818181818182,
+    "p_per_agent_rising": 0.9391476339142978,
+    "p_per_agent_falling": 0.1176938515790564,
+    "usl_predicted_per_agent_ratio": 0.6250000000000001
+  },
+  "escape": {
+    "n": 34,
+    "events": 2,
+    "min_events": 8,
+    "model": "clogit_task",
+    "descriptive_only": true,
+    "by_depth": [
+      {
+        "depth": "0",
+        "approvals": 17,
+        "escaped": 0,
+        "rate": 0.0
+      },
+      {
+        "depth": "1-2",
+        "approvals": 8,
+        "escaped": 0,
+        "rate": 0.0
+      },
+      {
+        "depth": "3-5",
+        "approvals": 5,
+        "escaped": 1,
+        "rate": 0.2
+      },
+      {
+        "depth": "6+",
+        "approvals": 4,
+        "escaped": 1,
+        "rate": 0.25
+      }
+    ],
+    "coef_depth": 5.999999896921793,
+    "se_depth": null,
+    "or_per_depth": 403.42875190802044,
+    "coef_time": -0.8495691927734583,
+    "p_one_sided": 0.49792917318900015,
+    "p_two_sided": 0.9958583463780003,
+    "fit_ok": true,
+    "informative_strata": 2,
+    "informative_rows": 4,
+    "events_informative": 2,
+    "dropped": [
+      "w[synth-11-N5-w2]"
+    ],
+    "separated": false,
+    "n_used": 34
+  },
+  "escape_sensitivity": {
+    "clogit_task_first": {
+      "n": 34,
+      "events": 2,
+      "min_events": 8,
+      "model": "clogit_task_first",
+      "descriptive_only": true,
+      "by_depth": [
+        {
+          "depth": "0",
+          "approvals": 17,
+          "escaped": 0,
+          "rate": 0.0
+        },
+        {
+          "depth": "1-2",
+          "approvals": 8,
+          "escaped": 0,
+          "rate": 0.0
+        },
+        {
+          "depth": "3-5",
+          "approvals": 5,
+          "escaped": 1,
+          "rate": 0.2
+        },
+        {
+          "depth": "6+",
+          "approvals": 4,
+          "escaped": 1,
+          "rate": 0.25
+        }
+      ],
+      "coef_depth": 4.499999894935769,
+      "se_depth": null,
+      "or_per_depth": 90.01712184294162,
+      "coef_time": 0.8325341527282148,
+      "p_one_sided": 0.49862142475126003,
+      "p_two_sided": 0.9972428495025201,
+      "fit_ok": true,
+      "informative_strata": 1,
+      "informative_rows": 2,
+      "events_informative": 1,
+      "dropped": [
+        "w[synth-11-N5-w2]"
+      ],
+      "separated": false,
+      "n_used": 33
+    },
+    "logit_cluster_task": {
+      "n": 34,
+      "events": 2,
+      "min_events": 8,
+      "model": "logit_cluster_task",
+      "descriptive_only": true,
+      "by_depth": [
+        {
+          "depth": "0",
+          "approvals": 17,
+          "escaped": 0,
+          "rate": 0.0
+        },
+        {
+          "depth": "1-2",
+          "approvals": 8,
+          "escaped": 0,
+          "rate": 0.0
+        },
+        {
+          "depth": "3-5",
+          "approvals": 5,
+          "escaped": 1,
+          "rate": 0.2
+        },
+        {
+          "depth": "6+",
+          "approvals": 4,
+          "escaped": 1,
+          "rate": 0.25
+        }
+      ],
+      "coef_depth": 0.6474579399831696,
+      "se_depth": 0.5640950603978608,
+      "se_depth_cluster": 0.4185637803199008,
+      "or_per_depth": 1.910677593199392,
+      "coef_time": 0.03793129782394163,
+      "p_one_sided": 0.062905604527202,
+      "p_two_sided": 0.125811209054404,
+      "p_one_sided_wald_cluster": 0.06094897355215273,
+      "fit_ok": true,
+      "separated": false,
+      "n_used": 34
+    }
+  },
+  "collision": {
+    "n_resolved": 39,
+    "n_all": 47,
+    "n_censored_excluded": 8,
+    "events": 14,
+    "fit_ok": true,
+    "coef_k": 0.07041958850231024,
+    "se_k": 0.19028635111321995,
+    "or_k": 1.0729582877788622,
+    "p_k_two_sided": 0.7101599540734065,
+    "p_k_one_sided": 0.35507997703670324,
+    "coef_m": -0.4292042249260273,
+    "se_m": 0.4752685308237172,
+    "or_m": 0.6510269596709699,
+    "p_m_two_sided": 0.3548298170664139,
+    "p_m_one_sided": 0.822585091466793,
+    "mean_k": 3.051282051282051,
+    "mean_m": 0.5641025641025641,
+    "p_hat": 0.0,
+    "p_ci": [
+      0.0,
+      0.11830277983462134
+    ],
+    "p_m_hat": 0.0
+  },
+  "collision_naive_not_finished": {
+    "fit_ok": true,
+    "coef_k": 0.3423723673460391,
+    "p_k_one_sided": 0.0016694827548085578,
+    "p_k_two_sided": 0.0033389655096171156
+  },
+  "alpha_beta_descriptive": {
+    "a": 0.0,
+    "b": 0.0565,
+    "single_agent_rate": 5.489,
+    "sse": 2.7559,
+    "usl_peak_agents": 4.2,
+    "rows_N_attempts_per_hour": [
+      [
+        2.0,
+        10.799999999999999
+      ],
+      [
+        1.0,
+        4.125
+      ],
+      [
+        5.0,
+        12.75
+      ]
+    ],
+    "note": "descriptive only (PLAN-v3 section 7); three sizes cannot identify alpha and beta."
+  },
+  "O2_detail": {
+    "observed_high_total": 19,
+    "predicted_high_total": 12.308811730082397,
+    "interval95": [
+      5,
+      22
+    ]
+  },
+  "outcomes": [
+    {
+      "id": "S1",
+      "statement": "finished(high) >= 1.3 x finished(low) while the queue is non-empty (reviewer scales with load)",
+      "value": 1.7272727272727273,
+      "rule": "FAIL if ratio >= 1.3 and queue non-empty >= 50% of the N_high windows (post warm-up)",
+      "code": "FAIL",
+      "note": "queue non-empty 82% of the N_high windows"
+    },
+    {
+      "id": "S2",
+      "statement": "finished(high) <= 0.7 x finished(low) while the queue is non-empty (re-review churn / slowing)",
+      "value": 1.7272727272727273,
+      "rule": "FAIL if ratio <= 0.7 and queue non-empty >= 50% of the N_high windows",
+      "code": "PASS",
+      "note": "queue non-empty 82% of the N_high windows"
+    },
+    {
+      "id": "S1r",
+      "statement": "S1 relative to the prediction: observed ratio >= 1.3 x Carnot's predicted ratio, queue non-empty",
+      "value": 1.7622543562704651,
+      "rule": "FAIL if (observed ratio / predicted ratio) >= 1.3 and queue non-empty >= 50% of the N_high windows",
+      "code": "FAIL",
+      "note": "observed ratio 1.73 vs Carnot-predicted 0.98; queue non-empty 82% of the N_high windows"
+    },
+    {
+      "id": "S2r",
+      "statement": "S2 relative to the prediction: observed ratio <= 0.7 x Carnot's predicted ratio, queue non-empty",
+      "value": 1.7622543562704651,
+      "rule": "FAIL if (observed ratio / predicted ratio) <= 0.7 and queue non-empty >= 50% of the N_high windows",
+      "code": "PASS",
+      "note": "observed ratio 1.73 vs Carnot-predicted 0.98; queue non-empty 82% of the N_high windows"
+    },
+    {
+      "id": "S3",
+      "statement": "b rises with fleet size",
+      "value": [
+        0.14285714285714285,
+        0.3939393939393939,
+        0.08602611833812969
+      ],
+      "rule": "FAIL if b(high) > b(low) with one-sided Fisher exact p < 0.05 (bounces per review, pooled per size)",
+      "code": "PASS",
+      "note": ""
+    },
+    {
+      "id": "S4",
+      "statement": "V outside +/-25% of the pilot",
+      "value": [
+        1.3293593196230664,
+        1.1913165155524408
+      ],
+      "rule": "FAIL if pooled V at N_low or at N_high is outside [0.75, 1.25] x pilot V",
+      "code": "FAIL",
+      "note": ""
+    },
+    {
+      "id": "S4n",
+      "statement": "V outside +/-25% of the pilot, noise-aware",
+      "value": {
+        "low": [
+          1.3293593196230664,
+          [
+            0.5795535028508854,
+            3.0715708142118094
+          ]
+        ],
+        "high": [
+          1.1913165155524408,
+          [
+            0.6105418664872518,
+            2.466304853061612
+          ]
+        ]
+      },
+      "rule": "FAIL if, at either size, pooled V / pilot V is outside [0.75, 1.25] AND its exact 95% interval excludes 1",
+      "code": "PASS",
+      "note": ""
+    },
+    {
+      "id": "S5",
+      "statement": "escape rate flat or falling with queue depth while V rises",
+      "value": 5.999999896921793,
+      "rule": "FAIL if V(high)/V(low) > 1.25 and the depth coefficient is not positive at one-sided p < 0.05 (needs >= 8 escaped defects)",
+      "code": "PASS",
+      "note": "V(high)/V(low) = 0.90, not rising beyond the band"
+    },
+    {
+      "id": "O1",
+      "statement": "V is a property of the reviewer: V(low), V(high) within +/-25% of the pilot and of each other; second-half / first-half within +/-25% at each size",
+      "value": {
+        "low": 1.3293593196230664,
+        "high": 1.1913165155524408,
+        "high_over_low": 0.8961583959784725,
+        "drift_low": 0.8634890683217198,
+        "drift_high": 1.8692811121295307
+      },
+      "rule": "PASS if all five ratios are in [0.75, 1.25] (pooled per size)",
+      "code": "FAIL",
+      "note": "per-window and per-half-window ratios are reported, not coded (n per cell is small)"
+    },
+    {
+      "id": "O1n",
+      "statement": "O1, noise-aware",
+      "value": null,
+      "rule": "FAIL if any of the five ratios is outside [0.75, 1.25] AND its exact 95% interval excludes 1",
+      "code": "PASS",
+      "note": ""
+    },
+    {
+      "id": "O2",
+      "statement": "finished at N_high ~ (1 - b_hidden)(1 - b_review) V hours (Carnot point prediction from the pilot)",
+      "value": {
+        "observed_high_total": 19,
+        "predicted_high_total": 12.308811730082397,
+        "interval95": [
+          5,
+          22
+        ]
+      },
+      "rule": "PASS if the N_high windows' total finished count lies in its 95% predictive interval (Poisson-gamma, CV 0.3 per window)",
+      "code": "PASS",
+      "note": ""
+    },
+    {
+      "id": "O3",
+      "statement": "attempts keep rising with fleet size (fleet attempt rate, first attempts per hour)",
+      "value": {
+        "total_ratio": 3.090909090909091,
+        "per_agent_ratio": 0.6181818181818182,
+        "usl_per_agent_ratio": 0.6250000000000001
+      },
+      "rule": "PASS if high/low attempt rate > 1 at one-sided exact p < 0.05; FAIL if < 1 at p < 0.05",
+      "code": "PASS",
+      "note": "a per-agent-hour fall is expected under USL (drag); its size vs USL is reported"
+    },
+    {
+      "id": "O4",
+      "statement": "escaped defects rise with queue depth",
+      "value": 5.999999896921793,
+      "rule": "PASS if depth coefficient > 0 at one-sided p < 0.05 (clogit_task); descriptive only if < 8 events",
+      "code": "N/A",
+      "note": "2 escaped defects < 8: descriptive only"
+    },
+    {
+      "id": "O5",
+      "statement": "collisions: bounce vs k and m (study 1 replication)",
+      "value": {
+        "p_hat": 0.0,
+        "p_ci": [
+          0.0,
+          0.11830277983462134
+        ],
+        "or_k": 1.0729582877788622,
+        "p_k": 0.7101599540734065,
+        "or_m": 0.6510269596709699,
+        "p_m": 0.3548298170664139
+      },
+      "rule": "descriptive: p-hat and its interval against study 1 (p ~ 0-0.004; prediction uses 0.005)",
+      "code": "DESCRIPTIVE",
+      "note": ""
+    }
+  ]
+}
