@@ -1,0 +1,60 @@
+# Real-window configuration. Everything marked UNVERIFIED must be checked against
+# PLAN-v3 section 10 before a real run; `python -m harness run` refuses to start while
+# a template it needs still has verified = false.
+
+[run]
+kind = "sweep"                  # sweep | pilot | trial
+n_workers = 3                   # set per window from the pilot gate (N_low / N_high)
+window_min = 90
+warmup_min = 10
+grace_min = 10
+task_order_seed = 1234          # pass --seed per window to `reset`; the seed used is recorded
+worker_model = "claude-sonnet-5"
+reviewer_model = "claude-opus-5-5"
+output_dir = "../runs"          # -> analysis/fleet-sweep/runs/<run_id>/
+poll_interval_s = 15
+end_grace_early_when_idle = false   # real windows always run the full grace period
+grace_reviews = true            # reviews of already-submitted changes continue during grace
+
+[repo]
+remote_url = "git@github.com:OWNER/carnot-sandbox.git"   # FILL IN: the private sandbox repo
+work_dir = "../work/sandbox"    # orchestrator's own clone
+base_ref = "study2-base"        # frozen tag main is reset to
+branch_prefix = "claude/task-"
+race_prefix = "claude/race-"
+tasks_file_name = "TASKS.json"
+
+[tasks]
+task_file = "FILL-IN/tasks.json"          # FILL IN (kept off the remote)
+hidden_tests_dir = "FILL-IN/hidden"              # FILL IN: <dir>/<task id>/test_*.py
+reference_dir = "FILL-IN/reference"           # FILL IN: <dir>/<task id>.patch
+
+[tests]
+python = ""                     # "" = the harness interpreter; point at the sandbox venv if it needs deps
+timeout_s = 300
+post_hidden_scope = "merged"    # this task's hidden tests + those of every task merged this window
+hidden_subdir = "tests/_hidden_acceptance"   # under tests/ so the sandbox's tests/conftest.py fixtures apply
+hidden_pythonpath = ["tests", "."]           # hidden tests use `from helpers import` and `from tests.helpers import`
+
+[reviewer]
+mode = "command"
+# UNVERIFIED: exact `claude -p` flags (model selection, output format, tool/permission lockdown,
+# no session persistence). Placeholders: {model} {prompt_file} {workdir}.
+command = ["sh", "-c", "claude -p --model {model} < {prompt_file}"]
+output_format = "text"          # UNVERIFIED: "json" if the CLI's JSON output (result + usage) is used
+verified = false
+prompt_template = "prompts/reviewer.md"
+timeout_s = 900
+retries = 1
+retry_backoff_s = 60
+max_downtime_min = 10
+
+[launcher]
+mode = "manual"                 # manual: operator starts sessions by hand; command: start_command below
+# UNVERIFIED: how to start one cloud session from a script, and how to stop it.
+# Placeholders: {worker} {prompt_file} {remote_url} {model} {run_id}; stop: {worker} {session_id}
+start_command = []
+stop_command = []
+session_id_regex = "(?P<session_id>\\S+)"   # UNVERIFIED
+verified = false
+worker_prompt = "prompts/worker.md"

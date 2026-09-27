@@ -1,0 +1,180 @@
+"""The event log contract of SCHEMA.md, and a validator for it.
+
+Every event has exactly ``t`` and ``type`` plus the fields SCHEMA.md lists for
+its type: no more, no fewer. ``EventLog.emit`` refuses anything else, so the
+harness cannot write a log the analysis does not expect.
+"""
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+
+STR, INT, BOOL, NUM, LIST_STR = "str", "int", "bool", "num", "list[str]"
+OPT = "?"  # suffix: value may be null
+
+EVENT_FIELDS: dict[str, dict[str, str]] = {
+    "worker_start": {"worker": STR, "session_id": STR + OPT},
+    "worker_down": {"worker": STR, "reason": STR},
+    "worker_restart": {"worker": STR, "reason": STR},
+    "claim": {"worker": STR, "task": STR, "branch": STR},
+    "claim_race": {"worker": STR, "task": STR},
+    "submit": {
+        "worker": STR, "task": STR, "branch": STR, "head": STR, "attempt_no": INT,
+        "lines_changed": INT, "files": LIST_STR, "k": INT, "m": INT,
+    },
+    "review_start": {"task": STR, "head": STR, "queue_depth": INT},
+    "review_end": {
+        "task": STR, "head": STR, "verdict": STR, "reason": STR,
+        "tokens_in": INT + OPT, "tokens_out": INT + OPT, "duration_s": NUM,
+    },
+    "review_error": {"task": STR, "head": STR, "error": STR},
+    "hidden_pre": {"task": STR, "head": STR, "passed": BOOL},
+    "rebase": {"task": STR, "head": STR, "new_head": STR + OPT, "conflict": BOOL},
+    "tests_post": {"task": STR, "head": STR, "visible_passed": BOOL, "hidden_passed": BOOL},
+    "bounce": {"task": STR, "head": STR, "cause": STR},
+    "merge": {"task": STR, "head": STR, "main_sha": STR},
+    "queue_idle": {},
+    "queue_busy": {},
+    "reviewer_idle": {},
+    "reviewer_busy": {},
+    "usage": {"worker": STR, "tokens_in": INT + OPT, "tokens_out": INT + OPT, "cost_usd_est": NUM + OPT},
+    "meter": {"credits_left_usd": NUM, "source": STR},
+    "note": {"text": STR},
+}
+
+ENUMS = {
+    ("review_end", "verdict"): {"approve", "request_changes"},
+    ("bounce", "cause"): {"review", "rebase_conflict", "visible_fail", "escaped_defect", "integration_failure"},
+}
+
+RUN_FIELDS: dict[str, str] = {
+    "run_id": STR, "kind": STR, "n_workers": INT, "window_start": STR, "window_end": STR,
+    "warmup_min": NUM, "grace_min": NUM, "task_order_seed": INT, "sandbox_commit": STR,
+    "harness_commit": STR, "worker_model": STR, "reviewer_model": STR, "notes": STR,
+}
+RUN_KINDS = {"sweep", "pilot", "trial", "dry-run"}
+
+T_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
+
+
+def _type_ok(value, spec: str) -> bool:
+    optional = spec.endswith(OPT)
+    base = spec.rstrip(OPT)
+    if value is None:
+        return optional
+    if base == STR:
+        return isinstance(value, str)
+    if base == INT:
+        return isinstance(value, int) and not isinstance(value, bool)
+    if base == BOOL:
+        return isinstance(value, bool)
+    if base == NUM:
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if base == LIST_STR:
+        return isinstance(value, list) and all(isinstance(x, str) for x in value)
+    raise ValueError(spec)
+
+
+def check_event(ev: dict) -> list[str]:
+    """Problems with one event (empty list = valid)."""
+    errs = []
+    if not isinstance(ev, dict):
+        return ["event is not an object"]
+    typ = ev.get("type")
+    if typ not in EVENT_FIELDS:
+        return [f"unknown type {typ!r}"]
+    if not isinstance(ev.get("t"), str) or not T_RE.match(ev["t"]):
+        errs.append(f"{typ}: bad t {ev.get('t')!r}")
+    spec = EVENT_FIELDS[typ]
+    extra = set(ev) - set(spec) - {"t", "type"}
+    missing = set(spec) - set(ev)
+    if extra:
+        errs.append(f"{typ}: unexpected fields {sorted(extra)}")
+    if missing:
+        errs.append(f"{typ}: missing fields {sorted(missing)}")
+    for k, s in spec.items():
+        if k in ev and not _type_ok(ev[k], s):
+            errs.append(f"{typ}: field {k}={ev[k]!r} is not {s}")
+    for (et, field), allowed in ENUMS.items():
+        if typ == et and ev.get(field) not in allowed:
+            errs.append(f"{typ}: {field}={ev.get(field)!r} not in {sorted(allowed)}")
+    return errs
+
+
+def validate_events(path: Path | str, semantic: bool = True) -> list[str]:
+    """Validate an events.jsonl file. Structural checks always; with ``semantic``
+    also ordering and the invariants the harness is meant to keep."""
+    errs: list[str] = []
+    events = []
+    for i, line in enumerate(Path(path).read_text().splitlines(), 1):
+        if not line.strip():
+            errs.append(f"line {i}: blank line")
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError as e:
+            errs.append(f"line {i}: not JSON ({e})")
+            continue
+        errs += [f"line {i}: {e}" for e in check_event(ev)]
+        events.append((i, ev))
+    if not semantic or errs:
+        return errs
+
+    last_t = ""
+    reviewing = None  # (task, head) under review
+    approved: set[tuple[str, str]] = set()
+    attempts: dict[str, int] = {}
+    for i, ev in events:
+        typ = ev["type"]
+        if ev["t"] < last_t:
+            errs.append(f"line {i}: time goes backwards")
+        last_t = ev["t"]
+        key = (ev.get("task"), ev.get("head"))
+        if typ == "submit":
+            n = attempts.get(ev["task"], 0) + 1
+            if ev["attempt_no"] != n:
+                errs.append(f"line {i}: attempt_no {ev['attempt_no']} for task {ev['task']}, expected {n}")
+            attempts[ev["task"]] = n
+            if ev["m"] > ev["k"] or ev["k"] < 0:
+                errs.append(f"line {i}: need 0 <= m <= k")
+        elif typ == "review_start":
+            if reviewing is not None:
+                errs.append(f"line {i}: review_start while {reviewing} still under review (reviews must be serial)")
+            reviewing = key
+        elif typ in ("review_end", "review_error"):
+            if reviewing != key:
+                errs.append(f"line {i}: {typ} for {key} but under review is {reviewing}")
+            reviewing = None
+            if typ == "review_end" and ev["verdict"] == "approve":
+                approved.add(key)
+        elif typ == "hidden_pre":
+            if key not in approved:
+                errs.append(f"line {i}: hidden_pre on a head that was never approved")
+        elif typ == "merge":
+            if key not in approved:
+                errs.append(f"line {i}: merge of a head that was never approved")
+    return errs
+
+
+def validate_run_json(path: Path | str) -> list[str]:
+    try:
+        run = json.loads(Path(path).read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        return [f"run.json unreadable: {e}"]
+    errs = []
+    extra = set(run) - set(RUN_FIELDS)
+    missing = set(RUN_FIELDS) - set(run)
+    if extra:
+        errs.append(f"run.json: unexpected fields {sorted(extra)}")
+    if missing:
+        errs.append(f"run.json: missing fields {sorted(missing)}")
+    for k, s in RUN_FIELDS.items():
+        if k in run and not _type_ok(run[k], s):
+            errs.append(f"run.json: {k}={run[k]!r} is not {s}")
+    if run.get("kind") not in RUN_KINDS:
+        errs.append(f"run.json: kind {run.get('kind')!r} not in {sorted(RUN_KINDS)}")
+    for k in ("window_start", "window_end"):
+        if isinstance(run.get(k), str) and not T_RE.match(run[k]):
+            errs.append(f"run.json: {k} not ISO with ms")
+    return errs

@@ -1,0 +1,47 @@
+# Dry run: simulated workers and reviewer against a generated toy sandbox (local bare repo).
+# No model is called. The [repo] and [tasks] paths are filled in by the dry-run itself.
+
+[run]
+kind = "dry-run"
+n_workers = 4
+window_min = 90
+warmup_min = 10
+grace_min = 10
+task_order_seed = 1234
+worker_model = "sim-worker"
+reviewer_model = "sim-reviewer"
+output_dir = "runs"
+poll_interval_s = 15
+end_grace_early_when_idle = true
+grace_reviews = true
+
+[tests]
+timeout_s = 120
+post_hidden_scope = "merged"
+
+[reviewer]
+mode = "sim"
+retry_backoff_s = 60
+max_downtime_min = 10
+
+[launcher]
+mode = "sim"
+
+[sim]
+time_scale = 90.0               # a 90-min window plays in ~1 real minute
+seed = 7
+n_toy_tasks = 30                # 10 templates, repeated under new module names beyond 10
+rate_per_hour = 4.0             # lambda per worker
+rework_factor = 0.5
+p_wrong = 0.15
+p_conflict = 0.12
+p_semantic = 0.08
+p_visible_break = 0.05
+review_mean_s = 240             # V ~ 15 reviews per busy hour
+review_cv = 0.4
+p_catch_wrong = 0.7
+catch_drop_per_depth = 0.08
+p_catch_wrong_min = 0.1
+p_false_reject = 0.15
+p_catch_visible_fail = 0.9
+p_review_crash = 0.03

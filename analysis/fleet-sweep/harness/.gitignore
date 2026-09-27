@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+# dry-run and scratch output; real runs are written wherever config output_dir points
+runs/
+toy/
