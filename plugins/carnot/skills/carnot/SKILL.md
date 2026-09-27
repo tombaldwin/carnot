@@ -45,7 +45,7 @@ The model and its sources are in [reference/model.md](reference/model.md). Read 
    - The estimate, if asked for.
    - Which inputs were measured and which were defaults or guesses. Don't present defaults as findings.
 
-   Keep the rule of thumb handy for conversation. Let q = what reviewers can check per day ÷ what one agent produces per day. Then **agents ≈ q ÷ (1 − αq − βq²)**, but never more than **(1 − α) ÷ (p + √β)**, and finished work ≈ (1 − r₀) × what reviewers can check. In words: enough agents to keep reviewers busy, a few more for drag, and stop there. Collisions (p) are usually small: a pre-registered test on 48,000 agent PRs found concurrency barely raised rejection.
+   Keep the rule of thumb handy for conversation. Let q = what reviewers can check per day ÷ what one agent produces per day. Then **agents ≈ q ÷ (1 − αq − βq²)**, but never more than **(1 − α) ÷ (p + √β)**, and finished work ≈ (1 − b) × what reviewers can check, where b is the share of reviews that send a change back (use r₀ if you don't know it). In words: enough agents to keep reviewers busy, a few more for drag, and stop there. Collisions (p) are usually small: a pre-registered test on 48,000 agent PRs found concurrency barely raised rejection.
 
 ## Improving the estimate: a fleet sweep
 

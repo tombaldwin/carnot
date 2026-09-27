@@ -15,7 +15,7 @@ With N agents working in parallel:
 - Finished changes per day:
   `U(N) = (1 − r(N)) × min(λ·X(N), cap)`
 
-The best fleet size is the N that maximises U. Rule of thumb, with q = cap ÷ λ (review capacity in single-agent outputs): `N ≈ q / (1 − αq − βq²)`, but never more than `(1 − α) / (p + √β)` (if αq + βq² ≥ 1, review never binds and the cap decides). Finished work ≈ (1 − r₀) × cap when review binds, else ≈ (1 − r₀) × λN / (2 + αN). Tested over 1,050 combinations (α 0.02–0.4, β 0.001–0.035, p 0–0.05, q 0.5 to unlimited): within one agent of the best in 91% of cases; running at the rule's size gets at least 92% of the best output in every case and 98% in nine out of ten; the finished-work estimate is within 15% in three cases out of four.
+The best fleet size is the N that maximises U. Rule of thumb, with q = cap ÷ λ (review capacity in single-agent outputs): `N ≈ q / (1 − αq − βq²)`, but never more than `(1 − α) / (p + √β)` (if αq + βq² ≥ 1, review never binds and the cap decides). Finished work ≈ (1 − b) × cap when review binds, where b is the share of reviews that send a change back and cap counts re-reviews too (b ≈ r when rework is caught at review); else ≈ (1 − r₀) × λN / (2 + αN). Tested over 1,050 combinations (α 0.02–0.4, β 0.001–0.035, p 0–0.05, q 0.5 to unlimited): within one agent of the best in 91% of cases; running at the rule's size gets at least 92% of the best output in every case and 98% in nine out of ten; the finished-work estimate is within 15% in three cases out of four.
 
 ## Parameters
 

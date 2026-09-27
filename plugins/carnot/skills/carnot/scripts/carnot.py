@@ -6,7 +6,8 @@ Model (Polymorphism, "The Heat Death of the Codebase?", 2026):
   r(N) = 1 - (1 - r0)(1 - p)^(N-1)             rework rises with concurrent changes
   U(N) = (1 - r(N)) * min(lam X(N), V / h)      finished changes/day, capped by review
   Rule of thumb: q = review capacity / one agent's output; N* ~ q / (1 - a q - b q^2),
-  capped at (1 - a) / (p + sqrt(b)); finished ~ (1 - r0) x review capacity when review binds.
+  capped at (1 - a) / (p + sqrt(b)); finished ~ (1 - b) x review capacity when review binds (b = share of reviews
+  bounced; r0 is used as its estimate).
 
 Subcommands:
   calibrate  measure r0, p, lam, h (and review evidence) from git / GitHub history

@@ -79,7 +79,7 @@ r(N) = 1 − (1 − r₀)(1 − p)^(N−1)          rework rises with concurrent
 U(N) = (1 − r(N)) × min(λ·X(N), V / h)     finished changes per day, capped by review capacity V
 ```
 
-Rule of thumb, with q = what reviewers can check per day ÷ what one agent produces per day: **agents ≈ q ÷ (1 − αq − βq²)**, but never more than **(1 − α) ÷ (p + √β)**; finished work ≈ (1 − r₀) × what reviewers can check. In words: enough agents to keep reviewers busy, a few more for drag, and stop there.
+Rule of thumb, with q = what reviewers can check per day ÷ what one agent produces per day: **agents ≈ q ÷ (1 − αq − βq²)**, but never more than **(1 − α) ÷ (p + √β)**; finished work ≈ (1 − b) × what reviewers can check, where b is the share of reviews that send a change back. In words: enough agents to keep reviewers busy, a few more for drag, and stop there.
 
 The collision term has been tested once, on 48,000 agent pull requests, with a pre-registered analysis: see [`analysis/aidev`](analysis/aidev/RESULTS.md). It mostly failed, which is why the default collision chance is 1% and the rule leads with review capacity.
 
