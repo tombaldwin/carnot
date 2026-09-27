@@ -5,7 +5,8 @@ Model (Polymorphism, "The Heat Death of the Codebase?", 2026):
   X(N) = N / (1 + a(N-1) + b N(N-1))            coordination drag (Gunther USL)
   r(N) = 1 - (1 - r0)(1 - p)^(N-1)             rework rises with concurrent changes
   U(N) = (1 - r(N)) * min(lam X(N), V / h)      finished changes/day, capped by review
-  Rule of thumb: N* ~ (1 - a) / (p + sqrt(b)); output ~ 1/2 * N* * (1 - r0)
+  Rule of thumb: q = review capacity / one agent's output; N* ~ q / (1 - a q - b q^2),
+  capped at (1 - a) / (p + sqrt(b)); finished ~ (1 - r0) x review capacity when review binds.
 
 Subcommands:
   calibrate  measure r0, p, lam, h (and review evidence) from git / GitHub history
@@ -21,7 +22,7 @@ import argparse, json, math, os, re, subprocess, sys, statistics, itertools, ran
 from datetime import datetime, timezone, timedelta
 
 DEFAULTS = {
-    "a": 0.10, "b": 0.01, "r0": 0.40, "p": 0.05,
+    "a": 0.10, "b": 0.01, "r0": 0.40, "p": 0.01,
     "lam": 6.0, "loc": 150.0,
     "reviewers": 2, "rate": 200.0, "hours": 4.0, "auto": 0.5, "rho": 0.75,
 }
@@ -29,7 +30,7 @@ SOURCES = {
     "a": "default (Khailo 2026 fit 0.12; Cursor lock anecdote ~0.37)",
     "b": "default (Khailo 2026 fit 0.032; range 0.002-0.035)",
     "r0": "default for autonomous agents (METR 2026: ~half of test-passing agent PRs not mergeable)",
-    "p": "default (Uber 5% for two changes to the same area; 20-42% textual conflicts for agent PRs open together)",
+    "p": "default (chance a concurrent change forces a redo; AIDev test: under 1% even though 20-42% of concurrent agent PRs conflict textually)",
     "lam": "default (assumed changes per agent per day)",
     "loc": "default",
     "reviewers": "default (ask the user)",
@@ -86,7 +87,10 @@ def run_model(s, nmax=30, backlog=None, plan=None):
     pts = [model_point(s, n) for n in range(1, nmax + 1)]
     best = max(pts, key=lambda q: q["finished_per_day"] + 1e-12 * (nmax - q["agents"]))
     one = pts[0]["finished_per_day"]
-    rule_n = (1 - s["a"]) / (s["p"] + math.sqrt(s["b"])) if (s["p"] + s["b"]) > 0 else float("inf")
+    q = pts[0]["review_cap"] / s["lam"]
+    dq = 1 - s["a"] * q - s["b"] * q * q
+    ceil_n = (1 - s["a"]) / (s["p"] + math.sqrt(s["b"])) if (s["p"] + s["b"]) > 0 else float("inf")
+    rule_n = min(q / dq if dq > 0 else float("inf"), ceil_n)
     out = {
         "params": s,
         "best_agents": best["agents"],
@@ -96,7 +100,9 @@ def run_model(s, nmax=30, backlog=None, plan=None):
         "review_keeps_up_with_agents": round(pts[0]["review_cap"] / s["lam"], 1),
         "rework_at_best": round(best["rework"], 3),
         "rule_of_thumb_agents": round(rule_n, 1) if math.isfinite(rule_n) else None,
-        "rule_of_thumb_output": round(0.5 * rule_n * (1 - s["r0"]) * s["lam"], 2) if math.isfinite(rule_n) else None,
+        "rule_of_thumb_output": (round((1 - s["r0"]) * pts[0]["review_cap"], 2) if rule_n < ceil_n else
+                                 round((1 - s["r0"]) * min(pts[0]["review_cap"], s["lam"] * rule_n / (2 + s["a"] * rule_n)), 2))
+                                if math.isfinite(rule_n) else None,
         "curve": [{"agents": q["agents"], "finished_per_day": round(q["finished_per_day"], 2),
                    "rework": round(q["rework"], 3), "review_limited": q["review_limited"]} for q in pts[:16]],
     }
@@ -642,7 +648,7 @@ def to_markdown(res, src, ev):
              f"({res['speedup_vs_one_agent']}× one agent). Limited by **{res['limited_by']}**. "
              f"Rework at that size: {round(100 * res['rework_at_best'])}%.\n")
     rule = res['rule_of_thumb_agents']
-    L.append((f"Rule of thumb (1 − α) ÷ (p + √β) = {rule} agents. " if rule else "Rule of thumb: no collision or coordination limit. ")
+    L.append((f"Rule of thumb q ÷ (1 − αq − βq²), capped at (1 − α) ÷ (p + √β): {rule} agents, about {res['rule_of_thumb_output']} finished/day. " if rule else "Rule of thumb: no review, collision or coordination limit. ")
              + f"Review capacity keeps up with about {res['review_keeps_up_with_agents']} agents' worth of raw output.\n")
     if "estimate" in res:
         e = res["estimate"]

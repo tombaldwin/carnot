@@ -7,7 +7,7 @@
       "name": "carnot",
       "source": "./plugins/carnot",
       "description": "Size a fleet of parallel AI coding agents: measures rework, collisions and output from git/PR history, then finds the best fleet size and what limits it.",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "license": "MIT",
       "keywords": ["agents", "estimation", "code review", "scalability"]
     }

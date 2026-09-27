@@ -47,13 +47,14 @@ Everything runs locally. No repository data leaves your machine, apart from the 
 With the default values and two reviewers:
 
 ```
-Best fleet size: 4 agents, finishing about 8.23 changes/day (2.29× one agent).
-Limited by review. Rework at that size: 49%.
+Best fleet size: 4 agents, finishing about 9.31 changes/day (2.59× one agent).
+Limited by review. Rework at that size: 42%.
 
-Rule of thumb (1 − α) ÷ (p + √β) = 6.0 agents.
+Rule of thumb q ÷ (1 − αq − βq²), capped at (1 − α) ÷ (p + √β): 4.0 agents,
+about 9.6 finished/day.
 
-Estimate: 120 changes with 4 agents ≈ 14.6 working days
-(58.3 agent-days; one agent: 33.3 days).
+Estimate: 120 changes with 4 agents ≈ 12.9 working days
+(51.5 agent-days; one agent: 33.3 days).
 ```
 
 It also lists which change would help most, such as adding a reviewer, automating more checks, or cutting collisions.
@@ -78,7 +79,9 @@ r(N) = 1 − (1 − r₀)(1 − p)^(N−1)          rework rises with concurrent
 U(N) = (1 − r(N)) × min(λ·X(N), V / h)     finished changes per day, capped by review capacity V
 ```
 
-Rule of thumb: **agents ≈ (1 − α) ÷ (p + √β)**, output ≈ ½ × agents × (1 − r₀), and never more agents than your reviewers can check.
+Rule of thumb, with q = what reviewers can check per day ÷ what one agent produces per day: **agents ≈ q ÷ (1 − αq − βq²)**, but never more than **(1 − α) ÷ (p + √β)**; finished work ≈ (1 − r₀) × what reviewers can check. In words: enough agents to keep reviewers busy, a few more for drag, and stop there.
+
+The collision term has been tested once, on 48,000 agent pull requests, with a pre-registered analysis: see [`analysis/aidev`](analysis/aidev/RESULTS.md). It mostly failed, which is why the default collision chance is 1% and the rule leads with review capacity.
 
 Parameters, defaults and their sources are in [`reference/model.md`](plugins/carnot/skills/carnot/reference/model.md). α and β can't be read reliably from history. To fit them, run 1, 2, 4 and 8 agents on comparable work and use `carnot.py fit`.
 

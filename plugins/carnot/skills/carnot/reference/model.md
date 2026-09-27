@@ -15,14 +15,14 @@ With N agents working in parallel:
 - Finished changes per day:
   `U(N) = (1 − r(N)) × min(λ·X(N), cap)`
 
-The best fleet size is the N that maximises U. Rule of thumb when review is not the limit: `N ≈ (1 − α) / (p + √β)`. Tested over 140 combinations of α (0.02–0.4), β (0.001–0.03) and p (0.004–0.4): median error in the best size 6%, worst 61%, and running at the rule's size gets at least 95% of the best output. Output at that size ≈ ½ × N × (1 − r₀), slightly generous (median 45%).
+The best fleet size is the N that maximises U. Rule of thumb, with q = cap ÷ λ (review capacity in single-agent outputs): `N ≈ q / (1 − αq − βq²)`, but never more than `(1 − α) / (p + √β)` (if αq + βq² ≥ 1, review never binds and the cap decides). Finished work ≈ (1 − r₀) × cap when review binds, else ≈ (1 − r₀) × λN / (2 + αN). Tested over 1,050 combinations (α 0.02–0.4, β 0.001–0.035, p 0–0.05, q 0.5 to unlimited): within one agent of the best in 91% of cases; running at the rule's size gets at least 92% of the best output in every case and 98% in nine out of ten; the finished-work estimate is within 15% in three cases out of four.
 
 ## Parameters
 
 | Symbol | Meaning | Default | Published range |
 |---|---|---|---|
 | r₀ | Share of changes needing rework at N = 1 | 0.40 (agents) | ~0.07–0.11 human changes (Capers Jones; Śliwerski et al. 2005); ~0.5 of test-passing agent PRs not mergeable (METR 2026) |
-| p | Chance a pair of changes open at the same time collides badly enough to need rework | 0.05 | Uber: 5% real conflicts for two changes to the same area, 40% at 16 (EuroSys 2019); 0.198 same-agent / 0.417 cross-agent textual conflicts for agent PRs open together (Xu et al., arXiv 2607.04697) |
+| p | Chance a pair of changes open at the same time collides badly enough to need rework | 0.01 | Textual conflicts are common (0.198 same-agent / 0.417 cross-agent for agent PRs open together, Xu et al.; Uber 5% real conflicts for two changes to the same area) but rarely force a redo: the pre-registered AIDev test (analysis/aidev in this repo) found p ≈ 0–0.004 |
 | α | Share of work that must happen one at a time | 0.10 | 0.12 (Khailo 2026 fit); ~0.37 implied by Cursor's lock-based fleet |
 | β | Coordination cost per pair of agents | 0.01 | 0.002–0.035 (0.032 in Khailo's fit, measured across separate repos) |
 | λ | Changes one agent submits per day | 6 | measure it |
