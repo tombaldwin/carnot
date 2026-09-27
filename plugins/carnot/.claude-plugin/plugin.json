@@ -1,0 +1,10 @@
+{
+  "name": "carnot",
+  "version": "0.1.0",
+  "description": "Size a fleet of parallel AI coding agents from your repository's own history.",
+  "author": { "name": "Tom Baldwin", "url": "https://github.com/tombaldwin" },
+  "homepage": "https://github.com/tombaldwin/carnot",
+  "repository": "https://github.com/tombaldwin/carnot",
+  "license": "MIT",
+  "keywords": ["agents", "estimation", "code review", "scalability"]
+}
