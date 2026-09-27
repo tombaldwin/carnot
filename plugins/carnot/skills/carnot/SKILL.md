@@ -57,6 +57,18 @@ python3 <skill-dir>/scripts/carnot.py fit sweep.csv
 
 Then pass the fitted `--a` and `--b` into `run`.
 
+## Measuring a change: before and after
+
+When the user has adopted something meant to raise the limit (a verification tool such as an effect checker, a merge queue, stricter task partitioning, a new review process), measure it:
+
+```bash
+python3 <skill-dir>/scripts/carnot.py compare --repo . --pivot 2026-06-15 --before 90 --after-set auto=0.7
+```
+
+`--pivot` is the date it took effect. Carnot measures rework, collisions, change size and output separately for each side, runs the model for both, and tests whether the differences in rework and collisions are bigger than noise. History can't show how much checking is automated, so ask the user and pass it per period with `--before-set` / `--after-set` (any parameter works: `auto`, `reviewers`, `hours`…).
+
+Report the change in the best fleet size and finished output, and say plainly when a difference could be noise. Before/after isn't a controlled experiment. Suggest running the same comparison on a similar repo that didn't change, and wait until the after period has at least a few weeks of changes older than the 14-day rework window.
+
 ## Cautions
 
 - The model is a planning aid, not a law of nature. Its defaults rest on few published studies.

@@ -58,6 +58,16 @@ Estimate: 120 changes with 4 agents ≈ 14.6 working days
 
 It also lists which change would help most, such as adding a reviewer, automating more checks, or cutting collisions.
 
+## Before and after
+
+Adopted something meant to raise the limit, such as an effect checker, a merge queue or a new way of splitting work? Measure it:
+
+```bash
+python3 plugins/carnot/skills/carnot/scripts/carnot.py compare --repo . --pivot 2026-06-15 --after-set auto=0.7
+```
+
+Carnot measures each side of the date separately, runs the model for both, and reports whether the changes in rework and collisions are bigger than noise, with 95% ranges. Parameters history can't show, like how much checking is automated, can be set per period.
+
 ## The model
 
 With N agents:

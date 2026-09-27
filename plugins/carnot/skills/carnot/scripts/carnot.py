@@ -12,6 +12,7 @@ Subcommands:
   model      run the model for given parameters
   run        calibrate then model (the usual entry point)
   fit        fit a and b from a fleet sweep (CSV of agents,finished_per_day)
+  compare    measure before and after a date, e.g. adopting a verification tool
 
 Standard library only. Needs `git`; uses `gh` (GitHub CLI) when available.
 Nothing leaves the machine except the gh API calls the user's own gh makes.
@@ -127,10 +128,10 @@ def run_model(s, nmax=30, backlog=None, plan=None):
 
 
 # ----------------------------------------------------------------------------- git calibration
-def git_changes(repo, days):
-    since = f"{days}.days"
+def git_changes(repo, since, until=None):
     fmt = "%x1e%H%x1f%an%x1f%ae%x1f%at%x1f%ct%x1f%s%x1f%B%x1d"
-    r = sh(["git", "log", f"--since={since}", "--no-merges", f"--format={fmt}", "--numstat", "-M"], repo)
+    r = sh(["git", "log", f"--since={since.isoformat()}"] + ([f"--until={until.isoformat()}"] if until else [])
+           + ["--no-merges", f"--format={fmt}", "--numstat", "-M"], repo)
     out = []
     for rec in r.stdout.split("\x1e")[1:]:
         head, _, stat = rec.partition("\x1d")
@@ -158,9 +159,10 @@ def git_changes(repo, days):
     return out
 
 
-def merge_changes(repo, days):
+def merge_changes(repo, since, until=None):
     """Treat each merged branch (second parent of a merge commit) as one change, like a PR."""
-    r = sh(["git", "log", "--merges", "--first-parent", f"--since={days}.days", "--format=%H%x1f%P%x1f%ct%x1f%s"], repo)
+    r = sh(["git", "log", "--merges", "--first-parent", f"--since={since.isoformat()}"]
+           + ([f"--until={until.isoformat()}"] if until else []) + ["--format=%H%x1f%P%x1f%ct%x1f%s"], repo)
     out = []
     for line in r.stdout.splitlines():
         sha, parents, ct, subj = line.split("\x1f", 3)
@@ -281,10 +283,10 @@ def gh_available(repo):
         return False
 
 
-def github_changes(repo, days, limit):
-    since = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
+def github_changes(repo, since, until=None, limit=1000):
+    rng = f"created:{since.date().isoformat()}..{until.date().isoformat()}" if until else f"created:>={since.date().isoformat()}"
     fields = "number,title,author,createdAt,mergedAt,closedAt,state,additions,deletions,files,headRefName,body,reviews,isDraft"
-    r = sh(["gh", "pr", "list", "--state", "all", "--limit", str(limit), "--search", f"created:>={since}",
+    r = sh(["gh", "pr", "list", "--state", "all", "--limit", str(limit), "--search", rng,
             "--json", fields], repo)
     prs = json.loads(r.stdout)
     out = []
@@ -310,45 +312,65 @@ def github_changes(repo, days, limit):
     return out
 
 
-def calibrate(repo, days=90, window=14, source="auto", replay=150, limit=1000, agents_used=None):
+def collect(repo, since, until=None, source="auto", limit=1000):
+    """Fetch changes in [since, until) from the best available source."""
     repo = os.path.abspath(repo)
     sh(["git", "rev-parse", "--git-dir"], repo)
-    s = dict(DEFAULTS)
-    src = dict(SOURCES)
-    ev = {"repo": repo, "days": days, "rework_window_days": window}
+    note = {}
     use_gh = source == "github" or (source == "auto" and gh_available(repo))
-    changes = []
+    changes, mode = [], None
     if use_gh:
         try:
-            changes = github_changes(repo, days, limit)
+            changes = github_changes(repo, since, until, limit)
         except Exception as e:  # fall back to git
-            ev["github_error"] = str(e)[:300]
+            note["github_error"] = str(e)[:300]
             changes = []
-        human_or_agent = [c for c in changes if not c["bot"]]
-        if len(human_or_agent) < 15:
-            ev["github_note"] = f"only {len(human_or_agent)} non-bot PRs in window; using git history instead"
-            use_gh = False
-    mode = "github" if use_gh else None
-    if not use_gh and source in ("auto", "merges"):
-        merged = merge_changes(repo, days)
+        if len([c for c in changes if not c["bot"]]) < 15:
+            note["github_note"] = "fewer than 15 non-bot PRs in range; using git history instead"
+        else:
+            mode = "github"
+    if mode is None and source in ("auto", "merges"):
+        merged = merge_changes(repo, since, until)
         if len(merged) >= 15 or source == "merges":
             changes, mode = merged, "merges"
     if mode is None:
-        changes, mode = git_changes(repo, days), "commits"
+        changes, mode = git_changes(repo, since, until), "commits"
+    return repo, changes, mode, note
+
+
+def calibrate(repo, days=90, window=14, source="auto", replay=150, limit=1000, agents_used=None):
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    repo, changes, mode, note = collect(repo, since, None, source, limit)
+    s, src, ev = measure(repo, changes, mode, None, window, replay, agents_used)
+    ev.update(note)
+    ev["days"] = days
+    return s, src, ev
+
+
+def measure(repo, changes, mode, period=None, window=14, replay=150, agents_used=None):
+    """Measure parameters for changes finishing within period=(start, end); None means all.
+    Rework attribution always uses the whole history, so a fix landing after the
+    period still counts against the change it fixes."""
+    s = dict(DEFAULTS)
+    src = dict(SOURCES)
+    use_gh = mode == "github"
     unit = {"github": "pull request", "merges": "merged branch", "commits": "commit"}[mode]
-    ev["unit"] = unit
-    ev["source"] = mode
-    real = [c for c in changes if not c["bot"]]
+    all_real = [c for c in changes if not c["bot"]]
+    real = [c for c in all_real if period is None or period[0] <= c["end"] < period[1]]
+    ev = {"repo": repo, "rework_window_days": window, "unit": unit, "source": mode}
+    if period:
+        ev["period"] = [period[0].date().isoformat(), period[1].date().isoformat()]
     ev["changes"] = len(real)
     ev["agent_share"] = round(sum(c["agent"] for c in real) / len(real), 2) if real else 0
     if len(real) < 15:
         ev["warning"] = "too little history to calibrate; defaults used throughout"
         return s, src, ev
+    span_days = max(1, (max(c["end"] for c in real) - min(c["end"] for c in real)).days)
 
-    now = max(c["end"] for c in real)
+    now = max(c["end"] for c in all_real)
     # ---- rework r0
     if use_gh:
-        merged = [c for c in real if c["merged"]]
+        merged = [c for c in all_real if c["merged"]]
         reverts = set()
         by_num = {c["num"]: c for c in merged}
         for c in merged:
@@ -364,39 +386,36 @@ def calibrate(repo, days=90, window=14, source="auto", replay=150, limit=1000, a
         rejected_after_review = [c for c in closed_unmerged if c["reviewed"]]
         needs = {c["id"] for c in observable if c["id"] in post or c["changes_requested"]} | {c["id"] for c in rejected_after_review}
         denom = [c for c in observable if c["merged"] or c in rejected_after_review]
-        r0 = len(needs & {c["id"] for c in denom}) / len(denom) if denom else None
+        k_r0 = len(needs & {c["id"] for c in denom})
         ev["rework"] = {
-            "observed_changes": len(denom),
+            "observed_changes": len(denom), "reworked": k_r0,
             "fixed_or_reverted_after_merge": len(post & {c["id"] for c in denom}),
             "changes_requested_in_review": sum(c["changes_requested"] for c in denom),
             "closed_unmerged_after_review": len(rejected_after_review),
             "closed_unmerged_without_review_excluded": len(closed_unmerged) - len(rejected_after_review),
             "fix_prs_seen": fixes,
         }
-        agents = [c for c in denom if c["agent"]]
-        humans = [c for c in denom if not c["agent"]]
-        for label, grp in (("agent", agents), ("human", humans)):
-            if len(grp) >= 10:
-                ev["rework"][f"r0_{label}"] = round(sum(c["id"] in needs for c in grp) / len(grp), 3)
+        is_rework = lambda c: c["id"] in needs
     else:
         explicit = set()
-        ids = [c["id"] for c in real]
-        for c in real:
+        ids = [c["id"] for c in all_real]
+        for c in all_real:
             for sha in REVERT_SHA_RE.findall(c["body"]):
                 explicit.update(i for i in ids if i.startswith(sha))
-        post, fixes = attribute_rework(real, window, explicit)
+        post, fixes = attribute_rework(all_real, window, explicit)
         denom = [c for c in real if (now - c["end"]).days >= window]
-        r0 = sum(c["id"] in post for c in denom) / len(denom) if denom else None
-        ev["rework"] = {"observed_changes": len(denom), "reworked": sum(c["id"] in post for c in denom),
+        k_r0 = sum(c["id"] in post for c in denom)
+        ev["rework"] = {"observed_changes": len(denom), "reworked": k_r0,
                         "fix_commits_seen": fixes, "explicit_reverts": len(explicit),
                         "method": "fix/revert commits attributed to the latest earlier commit touching the same file within the window"}
-        agents = [c for c in denom if c["agent"]]
-        humans = [c for c in denom if not c["agent"]]
-        for label, grp in (("agent", agents), ("human", humans)):
-            if len(grp) >= 10:
-                ev["rework"][f"r0_{label}"] = round(sum(c["id"] in post for c in grp) / len(grp), 3)
-    if r0 is not None and len(denom) >= 15:
-        s["r0"] = round(min(0.8, r0), 3)
+        is_rework = lambda c: c["id"] in post
+    for label, grp in (("agent", [c for c in denom if c["agent"]]), ("human", [c for c in denom if not c["agent"]])):
+        if len(grp) >= 10:
+            ev["rework"][f"r0_{label}"] = round(sum(map(is_rework, grp)) / len(grp), 3)
+    if denom:
+        ev["rework"]["r0_ci95"] = [round(x, 3) for x in wilson(k_r0, len(denom))]
+    if len(denom) >= 15:
+        s["r0"] = round(min(0.8, k_r0 / len(denom)), 3)
         src["r0"] = f"measured: share of {PLURAL[unit]} needing rework within {window} days (n={len(denom)})"
 
     # ---- collision chance p
@@ -415,6 +434,7 @@ def calibrate(repo, days=90, window=14, source="auto", replay=150, limit=1000, a
                                      "skipped_already_rebased_or_stacked": skipped,
                                      "textual_conflict_rate_raw": round(k / tested, 3) if tested else None,
                                      "textual_conflict_rate_smoothed": round(p_replay, 3) if p_replay is not None else None,
+                                     "ci95": [round(x, 3) for x in wilson(k, tested)] if tested else None,
                                      "note": "textual conflicts only; semantic conflicts (clean merge, broken tests) are not counted"})
         if p_replay is not None and ev["collisions"]["replayed_pairs"] >= 20:
             s["p"] = round(p_replay, 3)
@@ -468,7 +488,7 @@ def calibrate(repo, days=90, window=14, source="auto", replay=150, limit=1000, a
 
     # ---- review evidence
     if use_gh:
-        weeks = max(1, days / 7)
+        weeks = max(1, span_days / 7)
         counts = {}
         for c in real:
             for rv in c["reviewers"]:
@@ -489,6 +509,111 @@ def calibrate(repo, days=90, window=14, source="auto", replay=150, limit=1000, a
     except RuntimeError:
         pass
     return s, src, ev
+
+
+def wilson(k, n, z=1.96):
+    """95% Wilson score interval for a proportion k/n."""
+    if not n:
+        return (0.0, 1.0)
+    ph = k / n
+    d = 1 + z * z / n
+    c = (ph + z * z / (2 * n)) / d
+    h = z * math.sqrt(ph * (1 - ph) / n + z * z / (4 * n * n)) / d
+    return (max(0.0, c - h), min(1.0, c + h))
+
+
+def two_prop_p(k1, n1, k2, n2):
+    """Two-sided p-value for a difference in proportions (normal approximation)."""
+    if not n1 or not n2:
+        return None
+    pp = (k1 + k2) / (n1 + n2)
+    se = math.sqrt(pp * (1 - pp) * (1 / n1 + 1 / n2))
+    if se == 0:
+        return 1.0
+    z = abs(k1 / n1 - k2 / n2) / se
+    return math.erfc(z / math.sqrt(2))
+
+
+def parse_date(v):
+    d = datetime.fromisoformat(v)
+    return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+
+def compare(repo, pivot, before_days=90, after_days=None, window=14, source="auto", replay=150, limit=1000,
+            overrides=None, before_set=None, after_set=None, nmax=30):
+    """Measure the same repo before and after a date (e.g. adopting a verification tool)."""
+    now = datetime.now(timezone.utc)
+    start = pivot - timedelta(days=before_days)
+    end = min(now, pivot + timedelta(days=after_days)) if after_days else now
+    repo, changes, mode, note = collect(repo, start, end, source, limit)
+    out = {"repo": repo, "pivot": pivot.date().isoformat(), "source": mode, "note": note}
+    sides = {}
+    for name, period, extra in (("before", (start, pivot), before_set), ("after", (pivot, end + timedelta(seconds=1)), after_set)):
+        s, src, ev = measure(repo, changes, mode, period, window, replay)
+        for k, v in (overrides or {}).items():
+            s[k] = v; src[k] = "set by user"
+        for k, v in (extra or {}).items():
+            s[k] = v; src[k] = f"set by user for the {name} period"
+        sides[name] = {"params": s, "sources": src, "evidence": ev, "result": run_model(s, nmax)}
+    out.update(sides)
+    b, a = sides["before"]["evidence"], sides["after"]["evidence"]
+    tests = {}
+    rb, ra = b.get("rework", {}), a.get("rework", {})
+    if rb.get("observed_changes") and ra.get("observed_changes"):
+        tests["r0"] = {"before": [rb["reworked"], rb["observed_changes"]], "after": [ra["reworked"], ra["observed_changes"]],
+                       "p_value": round(two_prop_p(rb["reworked"], rb["observed_changes"], ra["reworked"], ra["observed_changes"]), 3)}
+    cb, ca = b.get("collisions", {}), a.get("collisions", {})
+    if cb.get("replayed_pairs") and ca.get("replayed_pairs"):
+        tests["p"] = {"before": [cb["conflicting_pairs"], cb["replayed_pairs"]], "after": [ca["conflicting_pairs"], ca["replayed_pairs"]],
+                      "p_value": round(two_prop_p(cb["conflicting_pairs"], cb["replayed_pairs"], ca["conflicting_pairs"], ca["replayed_pairs"]), 3)}
+    out["tests"] = tests
+    unobs = (now - pivot).days < window + 14
+    out["warnings"] = ([f"the after period is short: changes in the last {window} days can't show rework yet"] if unobs else []) + \
+        ["before/after is not a controlled experiment: team, workload and agents may also have changed. "
+         "Compare with a repo that didn't change, if you have one."]
+    return out
+
+
+def compare_markdown(c):
+    b, a = c["before"], c["after"]
+    L = [f"## Carnot compare for `{os.path.basename(c['repo'])}`: before and after {c['pivot']}\n",
+         f"Source: {PLURAL[b['evidence']['unit']]}. Before: {b['evidence'].get('period', ['?', '?'])[0]} to {c['pivot']} "
+         f"({b['evidence']['changes']} changes). After: {c['pivot']} to {a['evidence'].get('period', ['?', '?'])[1]} ({a['evidence']['changes']} changes).\n"]
+    rb, ra = b["result"], a["result"]
+    L.append("| | Before | After | Change |\n|---|---|---|---|")
+    def row(label, x, y, fmt="{}", pct=False):
+        if isinstance(x, (int, float)) and isinstance(y, (int, float)) and x:
+            ch = f"{100 * (y / x - 1):+.0f}%"
+        else:
+            ch = ""
+        L.append(f"| {label} | {fmt.format(x)} | {fmt.format(y)} | {ch} |")
+    def ci(ev, key):
+        v = ev.get("rework", {}).get("r0_ci95") if key == "r0" else ev.get("collisions", {}).get("ci95")
+        return f" ({round(100 * v[0])}–{round(100 * v[1])}%)" if v else ""
+    L.append(f"| Rework r₀ (95% range) | {round(100 * b['params']['r0'])}%{ci(b['evidence'], 'r0')} | "
+             f"{round(100 * a['params']['r0'])}%{ci(a['evidence'], 'r0')} | {100 * (a['params']['r0'] - b['params']['r0']):+.0f} pts |")
+    L.append(f"| Collision chance p (95% range) | {round(100 * b['params']['p'], 1)}%{ci(b['evidence'], 'p')} | "
+             f"{round(100 * a['params']['p'], 1)}%{ci(a['evidence'], 'p')} | {100 * (a['params']['p'] - b['params']['p']):+.1f} pts |")
+    row("Lines per change", b["params"]["loc"], a["params"]["loc"], "{:.0f}")
+    row("Finished changes per active day", b["evidence"].get("throughput", {}).get("finished_per_active_day"),
+        a["evidence"].get("throughput", {}).get("finished_per_active_day"))
+    L.append(f"| Verification automated | {b['params']['auto']:.0%} | {a['params']['auto']:.0%} | {100 * (a['params']['auto'] - b['params']['auto']):+.0f} pts |")
+    row("Best fleet size", rb["best_agents"], ra["best_agents"])
+    row("Finished changes/day at best", rb["finished_per_day_at_best"], ra["finished_per_day_at_best"])
+    L.append(f"| Limited by | {rb['limited_by']} | {ra['limited_by']} | |")
+    L.append("")
+    for k, t in c["tests"].items():
+        verdict = "unlikely to be noise" if t["p_value"] < 0.05 else "could be noise"
+        L.append(f"- {k}: {t['before'][0]}/{t['before'][1]} before vs {t['after'][0]}/{t['after'][1]} after, p = {t['p_value']} ({verdict}).")
+    if b["sources"]["p"].split(":")[0] != a["sources"]["p"].split(":")[0] or ("replayed" in b["sources"]["p"]) != ("replayed" in a["sources"]["p"]):
+        L.append("- ⚠ collision chance was measured differently in the two periods (too few concurrent pairs in one); don't read the change in p as real.")
+    for side, x in (("before", b), ("after", a)):
+        n = x["evidence"].get("rework", {}).get("observed_changes", 0)
+        if n < 50:
+            L.append(f"- ⚠ only {n} changes in the {side} period could be checked for rework; differences smaller than about 15 points won't be distinguishable from noise.")
+    for w in c["warnings"]:
+        L.append(f"- ⚠ {w}")
+    return "\n".join(L)
 
 
 # ----------------------------------------------------------------------------- fit
@@ -551,9 +676,11 @@ def main():
         p.add_argument("--format", choices=["json", "md"], default="md")
 
     pc = sub.add_parser("calibrate"); pr = sub.add_parser("run"); pm = sub.add_parser("model"); pf = sub.add_parser("fit")
+    pcmp = sub.add_parser("compare", help="measure before and after a date, e.g. adopting a verification tool")
     for p in (pc, pr):
-        p.add_argument("--repo", default=".")
         p.add_argument("--days", type=int, default=90)
+    for p in (pc, pr, pcmp):
+        p.add_argument("--repo", default=".")
         p.add_argument("--window", type=int, default=14, help="days after a change in which a fix counts as its rework")
         p.add_argument("--source", choices=["auto", "github", "merges", "commits"], default="auto",
                        help="auto: GitHub PRs if gh works, else merged branches, else commits")
@@ -561,6 +688,17 @@ def main():
         p.add_argument("--limit", type=int, default=1000, help="max PRs to fetch")
         p.add_argument("--agents-used", type=int, help="typical concurrent agents during the window (to back-solve λ)")
     add_params(pr); add_params(pm)
+    pcmp.add_argument("--pivot", required=True, help="date the change took effect (YYYY-MM-DD)")
+    pcmp.add_argument("--before", type=int, default=90, help="days before the pivot to measure")
+    pcmp.add_argument("--after", type=int, help="days after the pivot to measure (default: up to today)")
+    pcmp.add_argument("--before-set", action="append", default=[], metavar="KEY=VALUE",
+                      help="parameter for the before period only, e.g. auto=0.5 (repeatable)")
+    pcmp.add_argument("--after-set", action="append", default=[], metavar="KEY=VALUE",
+                      help="parameter for the after period only, e.g. auto=0.7 (repeatable)")
+    for k, v in DEFAULTS.items():
+        pcmp.add_argument(f"--{k}", type=float, default=None, help=f"override for both periods (default {v})")
+    pcmp.add_argument("--nmax", type=int, default=30)
+    pcmp.add_argument("--format", choices=["json", "md"], default="md")
     pc.add_argument("--format", choices=["json"], default="json")
     pf.add_argument("csv", help="file with lines: agents,finished_per_day")
     a = ap.parse_args()
@@ -572,6 +710,20 @@ def main():
             if len(parts) >= 2 and parts[0].replace(".", "").isdigit():
                 rows.append((float(parts[0]), float(parts[1])))
         print(json.dumps(fit_usl(rows), indent=2)); return
+
+    if a.cmd == "compare":
+        def kv(items):
+            out = {}
+            for it in items:
+                k, _, v = it.partition("=")
+                if k not in DEFAULTS:
+                    ap.error(f"unknown parameter {k!r}; choose from {', '.join(DEFAULTS)}")
+                out[k] = int(float(v)) if k == "reviewers" else float(v)
+            return out
+        both = {k: (int(getattr(a, k)) if k == "reviewers" else getattr(a, k)) for k in DEFAULTS if getattr(a, k) is not None}
+        c = compare(a.repo, parse_date(a.pivot), a.before, a.after, a.window, a.source, a.replay, a.limit,
+                    both, kv(a.before_set), kv(a.after_set), a.nmax)
+        print(json.dumps(c, indent=2, default=str) if a.format == "json" else compare_markdown(c)); return
 
     if a.cmd == "calibrate":
         s, src, ev = calibrate(a.repo, a.days, a.window, a.source, a.replay, a.limit, a.agents_used)
