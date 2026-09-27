@@ -363,8 +363,10 @@ class SimLauncher:
         self.threads: list[threading.Thread] = []
 
     def start_all(self, orch=None):
-        for i in range(1, self.cfg.run.n_workers + 1):
-            wid = f"w{i}"
+        self.start([f"w{i}" for i in range(1, self.cfg.run.n_workers + 1)], orch)
+
+    def start(self, ids, orch=None):
+        for wid in ids:
             w = SimWorker(wid, self.cfg, self.clock, self.oracle, self.clones_dir / wid,
                           random.Random(f"{self.seed}-{wid}"), self.stop)
             self.workers.append(w)

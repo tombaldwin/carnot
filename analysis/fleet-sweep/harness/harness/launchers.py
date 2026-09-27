@@ -21,9 +21,9 @@ class NotVerified(SystemExit):
 def require_verified(cfg: Config) -> None:
     problems = []
     if cfg.reviewer.mode == "command" and not cfg.reviewer.verified:
-        problems.append("[reviewer] command is UNVERIFIED (set verified = true after checking PLAN-v3 s10)")
+        problems.append("[reviewer] command is UNVERIFIED (set verified = true after the CLI check, PLAN-v4 s7)")
     if cfg.launcher.mode == "command" and not cfg.launcher.verified:
-        problems.append("[launcher] start_command is UNVERIFIED (set verified = true after checking PLAN-v3 s10)")
+        problems.append("[launcher] start_command is UNVERIFIED (set verified = true after the product check, PLAN-v4 s7)")
     if cfg.launcher.mode == "command" and not cfg.launcher.start_command:
         problems.append("[launcher] start_command is empty")
     if cfg.launcher.mode == "sim" or cfg.reviewer.mode == "sim":
@@ -56,12 +56,13 @@ class ManualLauncher:
         self.sessions: dict[str, str] = {}
 
     def start_all(self, orch=None):
-        n = self.cfg.run.n_workers
-        print(f"Start {n} worker sessions now, each with its own prompt file:")
-        for wid, p in self.prompts.items():
-            print(f"  {wid}: {p}")
-        for i in range(1, n + 1):
-            wid = f"w{i}"
+        self.start([f"w{i}" for i in range(1, self.cfg.run.n_workers + 1)], orch)
+
+    def start(self, ids, orch=None):
+        print(f"Start {len(ids)} worker session(s) now, each with its own prompt file:")
+        for wid in ids:
+            print(f"  {wid}: {self.prompts[wid]}")
+        for wid in ids:
             sid = self.input(f"session id for {wid} (Enter once it is running): ").strip() or None
             self.sessions[wid] = sid or ""
             self.log.emit("worker_start", worker=wid, session_id=sid)
@@ -81,9 +82,11 @@ class CommandLauncher:
         return [c.format(**kw) for c in tpl]
 
     def start_all(self, orch=None):
+        self.start([f"w{i}" for i in range(1, self.cfg.run.n_workers + 1)], orch)
+
+    def start(self, ids, orch=None):
         lc = self.cfg.launcher
-        for i in range(1, self.cfg.run.n_workers + 1):
-            wid = f"w{i}"
+        for wid in ids:
             cmd = self._fmt(lc.start_command, worker=wid, prompt_file=str(self.prompts[wid]),
                             remote_url=self.cfg.repo.remote_url, model=self.cfg.run.worker_model,
                             run_id=self.run_id)

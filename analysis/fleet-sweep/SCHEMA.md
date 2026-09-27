@@ -6,10 +6,10 @@ only this file plus `runs/<run_id>/run.json`. Times are UTC ISO 8601 with millis
 ## run.json
 
 ```json
-{"run_id": "2026-10-02-N8-r1", "kind": "sweep|pilot|trial|dry-run", "n_workers": 8,
+{"run_id": "2026-10-02-N12-r1", "kind": "sweep|pilot|trial|dry-run", "n_workers": 12,
  "window_start": "...", "window_end": "...", "warmup_min": 10, "grace_min": 10,
  "task_order_seed": 1234, "sandbox_commit": "sha", "harness_commit": "sha",
- "worker_model": "claude-sonnet-5", "reviewer_model": "claude-opus-5-5",
+ "worker_model": "claude-haiku-4-5", "reviewer_model": "claude-opus-5-5",
  "notes": "free text"}
 ```
 
@@ -32,9 +32,9 @@ only this file plus `runs/<run_id>/run.json`. Times are UTC ISO 8601 with millis
 | `merge` | task, head, main_sha | merged to main |
 | `queue_idle` / `queue_busy` | | merge queue state changes (for utilisation) |
 | `reviewer_idle` / `reviewer_busy` | | reviewer state changes (for V per busy hour) |
-| `usage` | worker, tokens_in, tokens_out, cost_usd_est | periodic per-worker usage, if the product exposes it |
+| `usage` | worker, tokens_in, tokens_out, cost_usd_est | per-worker usage increment, if a product token source exists (none is known; PLAN-v4 section 7.5). If logged in T1, `harness throttle` uses it for abort rule 1 |
 | `meter` | credits_left_usd, source | credit meter reading entered by the operator |
-| `note` | text | anything else |
+| `note` | text | anything else. Operator readings for abort rule 1 use `plan_usage pct=<%> src=<where read>` (PLAN-v4 section 7.5); the harness's own prefixes are listed in harness/README.md |
 
 Derived by the analysis, never logged: finished (merged by window end + grace, and hidden tests
 green), censored (submitted, not finished, not bounced at end), V, b_review, b_hidden, b, λ.

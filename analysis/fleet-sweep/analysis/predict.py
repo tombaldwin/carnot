@@ -59,7 +59,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import (ALPHA, BETA, CV_OVERDISPERSION, P_COLLISION, PLAN_V4, RIVAL_LABEL, RIVALS,  # noqa: E402
+from common import (UNCAPPED_TRUTH_FOOTNOTE, ALPHA, BETA, CV_OVERDISPERSION, P_COLLISION, PLAN_V4, RIVAL_LABEL, RIVALS,  # noqa: E402
                     V4_OC, X_for, X_usl, nb_interval, pooled_interval, rate_ci)
 
 N_MAX_BUDGET = 8   # PLAN-v3 gate only (superseded)
@@ -451,15 +451,25 @@ def oc_statement_md():
     pc = oc["primary_correct"]
     cm = oc["confusion"]
     L = [f"### Operating characteristics (simulated; PLAN-v4.1 section 6.8, {oc['source']})", ""]
-    L.append(f"- **Confirmatory, primary: review is the binding limit.** Carnot's review-capped prediction has a higher "
-             f"likelihood than the best uncapped rival (USL, Amdahl, linear); the likelihood ratio is reported. Correct "
-             f"{pc['carnot']:.2f} under Carnot truth; {pc['usl']:.2f} / {pc['amdahl']:.2f} / {pc['linear']:.2f} under USL / Amdahl / "
-             f"linear truth. If agents are 30% slower than assumed: {pc['carnot_lambda_30pct_low']:.2f} under Carnot, "
-             f"{pc['usl_lambda_30pct_low']:.2f} under USL. At 1.5x credit burn with the degrade rule (2 x 120-min windows per "
-             f"size): {pc['burn_1_5x']:.2f} under Carnot, {pc['usl_burn_1_5x']:.2f} under USL.")
-    L.append("- **Confirmatory, secondary** (not identities of the harness): O2, finished at N = 12 inside Carnot's 95% "
-             "predictive interval; S3, the review-bounce share b_review does not rise with N (one-sided Fisher exact); "
-             "O3, attempts rise with N (exact rate-ratio test).")
+    L.append("Framing (PLAN-v4 section 7, v4.2): a measurement and calibration study. O2 is the primary quantitative "
+             "confirmatory test; P1 is a confirmatory manipulation check; Vdur is conditionally confirmatory; everything else "
+             "is descriptive.")
+    L.append("")
+    L.append(f"- **Confirmatory, primary quantitative test (O2):** finished at N = 12 inside Carnot's 95% predictive interval, "
+             f"(1 - b_review)(1 - b_hidden(12))(1 - b_other) x V x hours with V and b from the pilot at N = 1. False-alarm rate "
+             f"under Carnot's own truth {oc['O2_false_alarm']['service_cv_1']:.2f} at review-time CV 1, "
+             f"{oc['O2_false_alarm']['service_cv_0_5']:.2f} at CV 0.5 (above the nominal 0.05); it fails under USL / Amdahl / "
+             f"linear truth with probability {oc['O2_power']['usl']:.2f} / {oc['O2_power']['amdahl']:.2f} / "
+             f"{oc['O2_power']['linear']:.2f}*.")
+    L.append(f"- **Confirmatory, manipulation check (P1): the harness's fixed-capacity reviewer caps output.** Carnot's "
+             f"review-capped prediction has a higher likelihood than the best uncapped rival (USL, Amdahl, linear); the "
+             f"likelihood ratio is reported. The reviewer is the binding limit by design, so a FAIL indicates a harness or "
+             f"calibration fault, not support for a rival. Correct {pc['carnot']:.2f} under Carnot truth; {pc['usl']:.2f} / "
+             f"{pc['amdahl']:.2f} / {pc['linear']:.2f} under USL / Amdahl / linear truth*. If agents are 30% slower than "
+             f"assumed: {pc['carnot_lambda_30pct_low']:.2f} under Carnot, {pc['usl_lambda_30pct_low']:.2f} under USL*. At 1.5x "
+             f"credit burn with the degrade design (2 x 120-min windows per size, about $199): {pc['burn_1_5x']:.2f} under "
+             f"Carnot, {pc['usl_burn_1_5x']:.2f} under USL*.")
+    L.append(f"  - *{UNCAPPED_TRUTH_FOOTNOTE}")
     L.append(f"- **Conditionally confirmatory: the reviewer's pace does not change with load (Vdur).** Welch test on log "
              f"review durations, N = 1 against N = 12; fails iff two-sided p < 0.05. Confirmatory only if the pilot's live "
              f"(T1 + T2) review-time CV <= {PLAN_V4['review_cv_max']} (`review_cv_ok`), else descriptive. Power against a "
@@ -468,10 +478,10 @@ def oc_statement_md():
              f"{oc['Vdur_fpr']['service_cv_1']:.2f}. Probability that `review_cv_ok` is set: "
              f"{oc['review_cv_ok_prob']['cv_0_3']:.2f} / {oc['review_cv_ok_prob']['cv_0_5']:.2f} / "
              f"{oc['review_cv_ok_prob']['cv_0_7']:.2f} at true CV 0.3 / 0.5 / 0.7 (near 0.5 it is close to a coin toss).")
-    L.append(f"- **O2 false-alarm rate** under Carnot's own truth: {oc['O2_false_alarm']['service_cv_1']:.2f} at review-time CV 1, "
-             f"{oc['O2_false_alarm']['service_cv_0_5']:.2f} at CV 0.5 (above the nominal 0.05). S3 false-alarm rate "
-             f"{oc['S3_false_alarm']:.2f}; O3 power {oc['O3_power']:.2f}.")
     L.append("- **Descriptive** (reported whatever they show; a null result is not evidence):")
+    L.append(f"  - S3, the review-bounce share b_review does not rise with N (one-sided Fisher exact; false-alarm rate "
+             f"{oc['S3_false_alarm']:.2f}); O3, attempts rise with N (exact rate-ratio test; passes under every truth, "
+             f"{oc['O3_power']:.2f}, so it is uninformative);")
     L.append("  - V(12)/V(1) with its exact 95% interval; no equivalence claim (the interval is about 0.7-1.45 at this design);")
     L.append("  - four-way ranking of the rivals (USL vs Amdahl is not claimed). Simulated confusion matrix, rows = truth, "
              "columns = family with the highest likelihood:")
@@ -509,7 +519,7 @@ def to_markdown_v4(P: Params, pred, pilot, ar4, credits=None):
     if ar4["evaluated"]:
         L.append(f"- Abort rule 4 (calibrated V within +/-30% of 2 x pilot lambda = {ar4['target']:.1f}/h; {ar4['source']}): "
                  f"calibrated V = {ar4['V']:.2f} ({ar4['V_ci'][0]:.1f}-{ar4['V_ci'][1]:.1f}), V / target = {ar4['ratio']:.2f} -> "
-                 f"**{'OK' if ar4['ok'] else 'FAIL: redefine the review job and recalibrate before any sweep window'}**. "
+                 f"**{'OK' if ar4['ok'] else 'FAIL: apply the pre-registered consequence (PLAN-v4 section 7.3): accept the measured q and re-run oc_v41.py at that q before any sweep window, or redefine the review job AND re-run the pilot; never recalibrate offline and keep the old pilot'}**. "
                  f"(Live pilot V = {ar4['V_live_preview']:.2f}; the calibration reviews are not pooled into it.)")
     else:
         L.append(f"- Abort rule 4 (calibrated V within +/-30% of 2 x pilot lambda = {ar4['target']:.1f}/h): **NOT EVALUATED**, "
@@ -543,13 +553,18 @@ def to_markdown_v4(P: Params, pred, pilot, ar4, credits=None):
         L.append(f"| {RIVAL_LABEL[t['rival']]} | {t['N']} | {t['finished_total']:.1f} | {t['finished_total_95'][0]}-"
                  f"{t['finished_total_95'][1]} | {t['attempts_total']:.1f} |")
     hi = max(pred["sizes"])
-    L.append(f"\n**O2 (confirmatory, secondary):** the total finished over the {pred['reps']} N = {hi} windows is predicted "
+    L.append(f"\n**O2 (confirmatory, primary quantitative test):** the total finished over the {pred['reps']} N = {hi} windows is predicted "
              f"at {pred['O2_point']:.1f}, 95% predictive interval {pred['O2_interval'][0]}-{pred['O2_interval'][1]} "
              "(score.py recomputes it from each window's actual hours).\n")
     f = {(r["rival"], r["N"]): r["finished"] for r in pred["rows"]}
     lo = min(pred["sizes"])
     L.append(f"Predicted ratio finished(N = {hi}) / finished(N = {lo}) (descriptive only; S1r/S2r compare the observed ratio "
              "with Carnot's): " + ", ".join(f"{RIVAL_LABEL[r]} {f[(r, hi)] / f[(r, lo)]:.2f}" for r in RIVALS) + ".\n")
+    L.append("Completion share (PLAN-v4 sections 6.7 and 7.6): c is measured in the 60-min pilot windows and applied to "
+             "120-min sweep windows. Censoring at the window end is heavier in a 60-min window, so c is biased low, and every "
+             "prediction that uses c is expected to be LOW: all four rivals at N = 1 (the N = 1 sweep windows are expected to "
+             "run above every prediction) and the uncapped rivals at N = 12 (which moves them towards the cap, so it works "
+             "against a P1 PASS). Carnot's capped branch at N = 12, and so O2, does not use c.\n")
     L.append("Also predicted by Carnot: V is a property of the reviewer (V(12)/V(1) = 1, review durations unchanged); "
              "b_review the same at both sizes; attempts rising with N as lambda1 X(N). The uncapped rivals imply a reviewer "
              "that keeps up with demand, i.e. V rising with load.\n")

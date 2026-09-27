@@ -1885,6 +1885,11 @@
       "service_cv_1": 0.1,
       "service_cv_0_5": 0.04
     },
+    "O2_power": {
+      "usl": 0.63,
+      "amdahl": 0.99,
+      "linear": 1.0
+    },
     "S3_false_alarm": 0.06,
     "O3_power": 1.0,
     "S1r_false_alarm": 0.05,
@@ -1920,24 +1925,11 @@
   },
   "outcomes": [
     {
-      "id": "P1",
-      "grade": "confirmatory",
-      "counts_as": "confirmatory",
-      "statement": "Review is the binding limit: Carnot's review-capped prediction has a higher likelihood than the best uncapped rival (USL, Amdahl, linear)",
-      "value": {
-        "log_lr": 1.3970320217033336,
-        "lr": 4.043182064612971,
-        "best_uncapped": "usl"
-      },
-      "rule": "PASS if log L(Carnot) > max log L(USL, Amdahl, linear), `completion` reading, NB CV 0.3",
-      "code": "PASS",
-      "note": "best uncapped rival: USL, no review limit; log LR (Carnot - best uncapped) = +1.40, LR = 4.04. Simulated: correct 0.97 under Carnot truth, 0.80 / 1.00 / 1.00 under USL / Amdahl / linear."
-    },
-    {
       "id": "O2",
       "grade": "confirmatory",
       "counts_as": "confirmatory",
-      "statement": "Finished at N = 12 lies inside Carnot's 95% predictive interval",
+      "role": "primary",
+      "statement": "Primary quantitative test: finished at N = 12 lies inside Carnot's 95% predictive interval, (1 - b) x V x hours with V and b from the pilot",
       "value": {
         "observed_high_total": 43,
         "predicted_high_total": 35.45798822822975,
@@ -1951,19 +1943,10 @@
       "note": "observed 43, predicted 35.5 (20-54); simulated false-alarm rate under Carnot truth 0.10 at review-time CV 1, 0.04 at 0.5"
     },
     {
-      "id": "P1-nf",
-      "grade": "confirmatory",
-      "counts_as": "confirmatory",
-      "statement": "P1 without the windows that ran out of tasks before minute 110 (reported beside P1)",
-      "value": null,
-      "rule": "as P1, on the unflagged windows only",
-      "code": "N/A",
-      "note": "no window flagged: identical to P1"
-    },
-    {
       "id": "O2-nf",
       "grade": "confirmatory",
       "counts_as": "confirmatory",
+      "role": "primary",
       "statement": "O2 without the N = 12 windows that ran out of tasks before minute 110 (reported beside O2)",
       "value": null,
       "rule": "as O2, on the unflagged windows only",
@@ -1971,38 +1954,36 @@
       "note": "no window flagged: identical to O2"
     },
     {
-      "id": "S3",
+      "id": "P1",
       "grade": "confirmatory",
       "counts_as": "confirmatory",
-      "statement": "The review-bounce share b_review does not rise with fleet size",
+      "role": "manipulation check",
+      "statement": "Manipulation check: the harness's fixed-capacity reviewer caps output (Carnot's review-capped prediction has a higher likelihood than the best uncapped rival: USL, Amdahl, linear)",
       "value": {
-        "low": 0.37777777777777777,
-        "high": 0.21686746987951808,
-        "p_one_sided": 0.9836666979169885
+        "log_lr": 1.3970320217033336,
+        "lr": 4.043182064612971,
+        "best_uncapped": "usl"
       },
-      "rule": "FAIL if b_review(high) > b_review(low) at one-sided Fisher exact p < 0.05 (review bounces / reviews, pooled per size); other bounce causes reported separately (BOUNCE)",
+      "rule": "PASS if log L(Carnot) > max log L(USL, Amdahl, linear), `completion` reading, NB CV 0.3",
       "code": "PASS",
-      "note": "b_review 17/45 = 0.38 at N = 1, 18/83 = 0.22 at N = 12; one-sided p = 0.984"
+      "note": "best uncapped rival: USL, no review limit; log LR (Carnot - best uncapped) = +1.40, LR = 4.04. Simulated: correct 0.97 under Carnot truth, 0.80 / 1.00 / 1.00 under USL / Amdahl / linear. Manipulation check: the harness's fixed-capacity reviewer is the binding limit by design, so a FAIL indicates a harness or calibration fault, not support for an uncapped rival. The P1 rates under USL, Amdahl and linear truth come from a synthetic reviewer that speeds up with queue depth (synth.py, reviewer_load = 2); the real harness cannot produce such a reviewer (a fresh call per change that never sees the queue), so those rows describe a counterfactual, not a result the study can observe."
     },
     {
-      "id": "O3",
+      "id": "P1-nf",
       "grade": "confirmatory",
       "counts_as": "confirmatory",
-      "statement": "Attempts rise with fleet size (fleet first-attempt rate)",
-      "value": {
-        "total_ratio": 5.03448275862069,
-        "p_one_sided": 2.8086975308606526e-20,
-        "per_agent_ratio": 0.41954022988505746,
-        "usl_per_agent_ratio": 0.2923976608187135
-      },
-      "rule": "PASS if the high/low first-attempt rate ratio > 1 at one-sided exact p < 0.05; FAIL if < 1 at p < 0.05; else INCONCLUSIVE",
-      "code": "PASS",
-      "note": "ratio 5.03, p = 2.81e-20"
+      "role": "manipulation check",
+      "statement": "P1 without the windows that ran out of tasks before minute 110 (reported beside P1)",
+      "value": null,
+      "rule": "as P1, on the unflagged windows only",
+      "code": "N/A",
+      "note": "no window flagged: identical to P1"
     },
     {
       "id": "Vdur",
       "grade": "conditional",
       "counts_as": "descriptive",
+      "role": null,
       "statement": "The reviewer's pace does not change with load (Welch t-test on log review durations, N = 12 vs N = 1)",
       "value": {
         "p": 0.23445468925119814,
@@ -2015,9 +1996,41 @@
       "note": "geometric-mean duration ratio 0.76, p = 0.234, n = 45 / 83; simulated power vs a +/-25% reviewer 0.73 at review-time CV 0.5, 0.18 at CV 1; review_cv_ok = false in pilot.json: descriptive"
     },
     {
+      "id": "S3",
+      "grade": "descriptive",
+      "counts_as": "descriptive",
+      "role": null,
+      "statement": "The review-bounce share b_review does not rise with fleet size",
+      "value": {
+        "low": 0.37777777777777777,
+        "high": 0.21686746987951808,
+        "p_one_sided": 0.9836666979169885
+      },
+      "rule": "FAIL if b_review(high) > b_review(low) at one-sided Fisher exact p < 0.05 (review bounces / reviews, pooled per size); other bounce causes reported separately (BOUNCE)",
+      "code": "PASS",
+      "note": "b_review 17/45 = 0.38 at N = 1, 18/83 = 0.22 at N = 12; one-sided p = 0.984"
+    },
+    {
+      "id": "O3",
+      "grade": "descriptive",
+      "counts_as": "descriptive",
+      "role": null,
+      "statement": "Attempts rise with fleet size (fleet first-attempt rate)",
+      "value": {
+        "total_ratio": 5.03448275862069,
+        "p_one_sided": 2.8086975308606526e-20,
+        "per_agent_ratio": 0.41954022988505746,
+        "usl_per_agent_ratio": 0.2923976608187135
+      },
+      "rule": "PASS if the high/low first-attempt rate ratio > 1 at one-sided exact p < 0.05; FAIL if < 1 at p < 0.05; else INCONCLUSIVE",
+      "code": "PASS",
+      "note": "ratio 5.03, p = 2.81e-20"
+    },
+    {
       "id": "Vratio",
       "grade": "descriptive",
       "counts_as": "descriptive",
+      "role": null,
       "statement": "V(N = 12) / V(N = 1) with its exact 95% interval (no equivalence claim)",
       "value": {
         "ratio": 1.114973588065971,
@@ -2034,6 +2047,7 @@
       "id": "S1r",
       "grade": "descriptive",
       "counts_as": "descriptive",
+      "role": null,
       "statement": "Surprise: finished ratio >= 1.3 x Carnot's predicted ratio with the queue non-empty",
       "value": 1.2111070931667334,
       "rule": "FAIL if (observed / predicted ratio) >= 1.3 and queue non-empty >= 50% of the N_high windows",
@@ -2044,6 +2058,7 @@
       "id": "S2r",
       "grade": "descriptive",
       "counts_as": "descriptive",
+      "role": null,
       "statement": "Surprise: finished ratio <= 0.7 x Carnot's predicted ratio (not a criterion)",
       "value": 1.2111070931667334,
       "rule": "FAIL if (observed / predicted ratio) <= 0.7 and queue non-empty >= 50% of the N_high windows",
@@ -2054,6 +2069,7 @@
       "id": "RANK",
       "grade": "descriptive",
       "counts_as": "descriptive",
+      "role": null,
       "statement": "Four-way ranking of the rivals (USL vs Amdahl is not claimed)",
       "value": {
         "order": [
@@ -2077,6 +2093,7 @@
       "id": "ESC",
       "grade": "descriptive",
       "counts_as": "descriptive",
+      "role": null,
       "statement": "Escaped defects vs reviewer queue depth",
       "value": -0.10153320101852321,
       "rule": "`logit_cluster_task`, window FE, task-clustered; modelled only with >= 8 events",
@@ -2087,6 +2104,7 @@
       "id": "COLL",
       "grade": "descriptive",
       "counts_as": "descriptive",
+      "role": null,
       "statement": "Collisions: bounced at least once vs changes in flight (k) and file overlap (m)",
       "value": null,
       "rule": "logistic with window FE, censored first attempts excluded; p-hat in the model form",
@@ -2097,6 +2115,7 @@
       "id": "BOUNCE",
       "grade": "descriptive",
       "counts_as": "descriptive",
+      "role": null,
       "statement": "Bounce causes other than review (rebase conflict, visible fail, escaped defect, integration failure) per approval with a merge-queue result",
       "value": {
         "rebase_conflict": 1.0,

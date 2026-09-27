@@ -26,7 +26,7 @@ from .clock import Clock, iso
 from .config import Config
 from .events import EventLog
 from .gitops import GitError, Repo
-from .review import ReviewError, ReviewPacket, Reviewer
+from .review import ReviewError, ReviewPacket, Reviewer, make_packet
 from .tasks import Task, TestResult, TestRunner
 
 FEEDBACK_FILE = "FEEDBACK.md"
@@ -288,10 +288,11 @@ class Orchestrator:
     # ------------------------------------------------------------------ review
     def _packet(self, ch: Change) -> ReviewPacket:
         base = self.repo.out("merge-base", "origin/main", ch.head)
-        diff = self.repo.out("diff", "--no-color", base, ch.head, "--", ".", f":(exclude){FEEDBACK_FILE}")
         task = self.tasks.get(ch.task) or Task(ch.task, "", "(task not in catalogue)", [])
         vis = ch.visible or TestResult(False, "not run", 0.0)
-        return ReviewPacket(task, ch.head, base, diff, ch.files, vis.passed, vis.output)
+        pk = make_packet(self.cfg, self.repo, task, ch.head, base, vis.passed, vis.output)
+        pk.files = ch.files          # as logged at submit
+        return pk
 
     def _review_allowed(self) -> bool:
         return self.phase == "window" or (self.phase == "grace" and self.cfg.run.grace_reviews)
@@ -567,7 +568,7 @@ class Orchestrator:
         self.log.note("window_start")
         self.log.note(f"task_supply n={len(self.supply_ids)}")
         self.start_threads()
-        launcher.start_all(self)
+        self._start_workers(launcher)
 
         self.clock.sleep_until(warm_end)
         self.log.note("warmup_end")
@@ -600,6 +601,31 @@ class Orchestrator:
         self._check_claude_dir()
         self._check_downtime()
         return self.write_run_json()
+
+    def _start_workers(self, launcher) -> None:
+        """All workers at window start, or, with ``[run] start_schedule`` (T1: [[0, 1], [30, 12]]),
+        each group at its minute from a launcher thread, so the window's own timing (warm-up end,
+        window end) is never held up by the operator typing session ids."""
+        sched = self.cfg.run.start_schedule
+        if not sched:
+            launcher.start_all(self)
+            return
+        stages, started = [], 0
+        for minute, upto in sched:
+            ids = [f"w{i}" for i in range(started + 1, int(upto) + 1)]
+            started = int(upto)
+            stages.append((self.window_start + dt.timedelta(minutes=float(minute)), minute, ids))
+
+        def run_stages():
+            for at, minute, ids in stages:
+                if self.clock.sleep_until(at, self.stop):
+                    return
+                if self.phase != "window":
+                    self.log.note(f"start_schedule: minute {minute} group {ids} not started (window over)")
+                    return
+                self.log.note(f"start_schedule minute={minute} workers={','.join(ids)}")
+                launcher.start(ids, self)
+        self._run_thread("launcher", run_stages)
 
     def _check_claude_dir(self) -> None:
         try:

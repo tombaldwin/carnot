@@ -61,19 +61,24 @@ q = V / lambda1 = 2.33 (target 2). Review demand lambda1 X(N) / (1 - b) as a sha
 | Amdahl, alpha only, no review limit | 12 | 108.4 | 70-154 | 169.7 |
 | Linear | 12 | 227.7 | 152-317 | 356.4 |
 
-**O2 (confirmatory, secondary):** the total finished over the 3 N = 12 windows is predicted at 35.5, 95% predictive interval 20-54 (score.py recomputes it from each window's actual hours).
+**O2 (confirmatory, primary quantitative test):** the total finished over the 3 N = 12 windows is predicted at 35.5, 95% predictive interval 20-54 (score.py recomputes it from each window's actual hours).
 
 Predicted ratio finished(N = 12) / finished(N = 1) (descriptive only; S1r/S2r compare the observed ratio with Carnot's): Carnot, review-capped 1.87, USL, no review limit 3.51, Amdahl, alpha only, no review limit 5.71, Linear 12.00.
+
+Completion share (PLAN-v4 sections 6.7 and 7.6): c is measured in the 60-min pilot windows and applied to 120-min sweep windows. Censoring at the window end is heavier in a 60-min window, so c is biased low, and every prediction that uses c is expected to be LOW: all four rivals at N = 1 (the N = 1 sweep windows are expected to run above every prediction) and the uncapped rivals at N = 12 (which moves them towards the cap, so it works against a P1 PASS). Carnot's capped branch at N = 12, and so O2, does not use c.
 
 Also predicted by Carnot: V is a property of the reviewer (V(12)/V(1) = 1, review durations unchanged); b_review the same at both sizes; attempts rising with N as lambda1 X(N). The uncapped rivals imply a reviewer that keeps up with demand, i.e. V rising with load.
 
 ### Operating characteristics (simulated; PLAN-v4.1 section 6.8, OPERATING-CHARACTERISTICS.md, design-search/oc_v41.py, 2000 simulated studies per cell)
 
-- **Confirmatory, primary: review is the binding limit.** Carnot's review-capped prediction has a higher likelihood than the best uncapped rival (USL, Amdahl, linear); the likelihood ratio is reported. Correct 0.97 under Carnot truth; 0.80 / 1.00 / 1.00 under USL / Amdahl / linear truth. If agents are 30% slower than assumed: 0.76 under Carnot, 0.66 under USL. At 1.5x credit burn with the degrade rule (2 x 120-min windows per size): 0.95 under Carnot, 0.75 under USL.
-- **Confirmatory, secondary** (not identities of the harness): O2, finished at N = 12 inside Carnot's 95% predictive interval; S3, the review-bounce share b_review does not rise with N (one-sided Fisher exact); O3, attempts rise with N (exact rate-ratio test).
+Framing (PLAN-v4 section 7, v4.2): a measurement and calibration study. O2 is the primary quantitative confirmatory test; P1 is a confirmatory manipulation check; Vdur is conditionally confirmatory; everything else is descriptive.
+
+- **Confirmatory, primary quantitative test (O2):** finished at N = 12 inside Carnot's 95% predictive interval, (1 - b_review)(1 - b_hidden(12))(1 - b_other) x V x hours with V and b from the pilot at N = 1. False-alarm rate under Carnot's own truth 0.10 at review-time CV 1, 0.04 at CV 0.5 (above the nominal 0.05); it fails under USL / Amdahl / linear truth with probability 0.63 / 0.99 / 1.00*.
+- **Confirmatory, manipulation check (P1): the harness's fixed-capacity reviewer caps output.** Carnot's review-capped prediction has a higher likelihood than the best uncapped rival (USL, Amdahl, linear); the likelihood ratio is reported. The reviewer is the binding limit by design, so a FAIL indicates a harness or calibration fault, not support for a rival. Correct 0.97 under Carnot truth; 0.80 / 1.00 / 1.00 under USL / Amdahl / linear truth*. If agents are 30% slower than assumed: 0.76 under Carnot, 0.66 under USL*. At 1.5x credit burn with the degrade design (2 x 120-min windows per size, about $199): 0.95 under Carnot, 0.75 under USL*.
+  - *The P1 rates under USL, Amdahl and linear truth come from a synthetic reviewer that speeds up with queue depth (synth.py, reviewer_load = 2); the real harness cannot produce such a reviewer (a fresh call per change that never sees the queue), so those rows describe a counterfactual, not a result the study can observe.
 - **Conditionally confirmatory: the reviewer's pace does not change with load (Vdur).** Welch test on log review durations, N = 1 against N = 12; fails iff two-sided p < 0.05. Confirmatory only if the pilot's live (T1 + T2) review-time CV <= 0.5 (`review_cv_ok`), else descriptive. Power against a +/-25% reviewer: 0.73 at review-time CV 0.5, 0.18 at CV 1; false-positive rate 0.05 / 0.04. Probability that `review_cv_ok` is set: 1.00 / 0.53 / 0.00 at true CV 0.3 / 0.5 / 0.7 (near 0.5 it is close to a coin toss).
-- **O2 false-alarm rate** under Carnot's own truth: 0.10 at review-time CV 1, 0.04 at CV 0.5 (above the nominal 0.05). S3 false-alarm rate 0.06; O3 power 1.00.
 - **Descriptive** (reported whatever they show; a null result is not evidence):
+  - S3, the review-bounce share b_review does not rise with N (one-sided Fisher exact; false-alarm rate 0.06); O3, attempts rise with N (exact rate-ratio test; passes under every truth, 1.00, so it is uninformative);
   - V(12)/V(1) with its exact 95% interval; no equivalence claim (the interval is about 0.7-1.45 at this design);
   - four-way ranking of the rivals (USL vs Amdahl is not claimed). Simulated confusion matrix, rows = truth, columns = family with the highest likelihood:
 

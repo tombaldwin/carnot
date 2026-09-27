@@ -47,7 +47,8 @@ import numpy as np
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from common import CONDITIONAL, CONFIRMATORY, DESCRIPTIVE, V4_OC, iso  # noqa: E402
+from common import (CONDITIONAL, CONFIRMATORY, DESCRIPTIVE, ROLE_MANIPULATION, ROLE_PRIMARY,  # noqa: E402
+                    UNCAPPED_TRUTH_FOOTNOTE, V4_OC, iso)
 from derive import derive_window, pilot_params  # noqa: E402
 from predict import Params  # noqa: E402
 from score import score  # noqa: E402
@@ -233,8 +234,9 @@ def unit_v41():
 
 V4_SYNTH = ["--truth", "carnot", "--v4", "--set", "lam1=6.8", "V0=13.6", "defect_p=0.49", "cv_window=0.3",
             "rework_min=3.53", "ci_hidden_min=0.25", "ci_post_min=0.5", "n_tasks=220"]
-V4_IDS = {"P1": CONFIRMATORY, "O2": CONFIRMATORY, "P1-nf": CONFIRMATORY, "O2-nf": CONFIRMATORY, "S3": CONFIRMATORY,
-          "O3": CONFIRMATORY, "Vdur": CONDITIONAL, "Vratio": DESCRIPTIVE, "S1r": DESCRIPTIVE, "S2r": DESCRIPTIVE,
+# PLAN-v4 section 7 (v4.2): O2 primary quantitative test, P1 manipulation check, Vdur conditional, the rest descriptive.
+V4_IDS = {"P1": CONFIRMATORY, "O2": CONFIRMATORY, "P1-nf": CONFIRMATORY, "O2-nf": CONFIRMATORY, "S3": DESCRIPTIVE,
+          "O3": DESCRIPTIVE, "Vdur": CONDITIONAL, "Vratio": DESCRIPTIVE, "S1r": DESCRIPTIVE, "S2r": DESCRIPTIVE,
           "RANK": DESCRIPTIVE, "ESC": DESCRIPTIVE, "COLL": DESCRIPTIVE, "BOUNCE": DESCRIPTIVE}
 
 
@@ -271,6 +273,9 @@ def unit_cli(outdir=None):
         out["predict: all four rivals at N = 1 and 12, 120-min windows"] = (
             {(x["rival"], x["N"]) for x in rows} == {(r_, n) for r_ in ("carnot", "usl", "amdahl", "linear") for n in (1, 12)}
             and pj2.get("params", {}).get("window_min") == 120.0 and pj2.get("params", {}).get("rival_rework") == "completion")
+        out["predict: v4.2 framing (O2 primary, P1 manipulation check, footnote, completion-share bias)"] = (
+            "O2 (confirmatory, primary quantitative test)" in md and "Confirmatory, manipulation check (P1)" in md
+            and UNCAPPED_TRUTH_FOOTNOTE in md and "biased low" in md and "Confirmatory, secondary" not in md)
         out["predict: O2 interval and operating-characteristics statement"] = ("O2 (confirmatory" in md
                                                                              and "Operating characteristics" in md
                                                                              and f"{V4_OC['primary_correct']['carnot']:.2f}" in md
@@ -290,9 +295,17 @@ def unit_cli(outdir=None):
             res_md = (td / "res" / "RESULTS-draft.md").read_text()
             ids = {o["id"]: o["grade"] for o in R["outcomes"]}
             out["score: the PLAN-v4 results, each with its pre-set grade"] = ids == V4_IDS
+            from score import V4_ORDER
+            out["score: v4.2 order (O2 first, then P1) and roles"] = (
+                [o["id"] for o in R["outcomes"]] == [i for i in V4_ORDER if i in ids]
+                and {o["id"]: o.get("role") for o in R["outcomes"] if o.get("role")} ==
+                {"O2": ROLE_PRIMARY, "O2-nf": ROLE_PRIMARY, "P1": ROLE_MANIPULATION, "P1-nf": ROLE_MANIPULATION})
             heads = [ln for ln in res_md.splitlines() if ln.startswith("## ") and not ln.startswith("## Summary")]
             out["RESULTS-draft.md: every section labelled confirmatory / conditional / descriptive"] = all(
-                any(t in h for t in ("[confirmatory]", "[conditional", "[descriptive]")) for h in heads)
+                any(t in h for t in ("[confirmatory", "[conditional", "[descriptive]")) for h in heads)
+            out["RESULTS-draft.md: O2 section before P1; P1 a manipulation check with the footnote"] = (
+                res_md.index("## O2 [confirmatory, primary]") < res_md.index("## P1 [confirmatory, manipulation check]")
+                and UNCAPPED_TRUTH_FOOTNOTE in res_md)
             cv_ok = R["review_cv_ok"]
             vc = {o["id"]: o["counts_as"] for o in R["outcomes"] if o["grade"] == CONDITIONAL}
             out["Vdur counts as confirmatory iff review_cv_ok"] = set(vc) == {"Vdur"} and all(

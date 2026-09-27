@@ -71,16 +71,18 @@ def test_command_reviewer_with_fake_command(tmp_path):
                           "usage": {"input_tokens": 100, "output_tokens": 7}}))
         """))
     cfg = config_mod.from_dict({"reviewer": {
+        "job": "diff", "prompt_on_stdin": False,
         "command": [sys.executable, str(fake), "{model}", "{prompt_file}"],
-        "output_format": "json", "prompt_template": "prompts/reviewer.md"}},
+        "output_format": "json", "prompt_template": "prompts/reviewer-diff.md"}},
         base_dir=tmp_path.parent)
-    cfg.reviewer.prompt_template = str(__import__("pathlib").Path(__file__).parent.parent / "prompts/reviewer.md")
+    cfg.reviewer.prompt_template = str(__import__("pathlib").Path(__file__).parent.parent / "prompts/reviewer-diff.md")
     r = CommandReviewer(cfg).review(_packet())
     assert (r.verdict, r.reason, r.tokens_in, r.tokens_out) == ("request_changes", "needs work", 100, 7)
 
 
 def test_command_reviewer_failure_is_review_error(tmp_path):
-    cfg = config_mod.from_dict({"reviewer": {"command": [sys.executable, "-c", "import sys; sys.exit(3)"]}})
+    cfg = config_mod.from_dict({"reviewer": {"job": "diff",
+                                             "command": [sys.executable, "-c", "import sys; sys.exit(3)"]}})
     cfg.reviewer.prompt_template = str(__import__("pathlib").Path(__file__).parent.parent / "prompts/reviewer.md")
     with pytest.raises(ReviewError):
         CommandReviewer(cfg).review(_packet())
@@ -88,7 +90,7 @@ def test_command_reviewer_failure_is_review_error(tmp_path):
 
 def test_real_run_refuses_unverified_templates():
     from pathlib import Path
-    cfg = config_mod.load(Path(__file__).parent.parent / "config.toml")
+    cfg = config_mod.load(Path(__file__).parent.parent / "config.t2.toml")
     with pytest.raises(NotVerified):
         require_verified(cfg)
     cfg.reviewer.verified = True

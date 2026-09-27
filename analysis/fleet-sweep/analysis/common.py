@@ -35,10 +35,22 @@ PLAN_V4 = dict(sizes=(1, 12), reps=3, order="ABBAAB", window_min=120.0, warmup_m
                review_cv_max=0.5, min_escape_events=8, alpha_test=0.05,
                sweep_session_hours=78.0, balance_floor_usd=50.0)
 
-# Result grades (PLAN-v4 section 1). Every result in RESULTS-draft.md carries one of these.
+# Result grades (PLAN-v4 section 1, as reframed in section 7, v4.2). Every result in RESULTS-draft.md carries one.
 CONFIRMATORY = "confirmatory"
 CONDITIONAL = "conditional"
 DESCRIPTIVE = "descriptive"
+
+# Roles within the confirmatory grade (PLAN-v4 section 7.1, v4.2: a measurement and calibration study).
+# O2 is the primary quantitative confirmatory test; P1 is a confirmatory manipulation check (the harness's
+# fixed-capacity reviewer is the binding limit by design, so a P1 FAIL indicates a harness or calibration fault,
+# not support for an uncapped rival).
+ROLE_PRIMARY = "primary"
+ROLE_MANIPULATION = "manipulation check"
+# Footnote for the uncapped-truth rows of the operating-characteristics table (PLAN-v4 section 7.1).
+UNCAPPED_TRUTH_FOOTNOTE = (
+    "The P1 rates under USL, Amdahl and linear truth come from a synthetic reviewer that speeds up with queue depth "
+    "(synth.py, reviewer_load = 2); the real harness cannot produce such a reviewer (a fresh call per change that never "
+    "sees the queue), so those rows describe a counterfactual, not a result the study can observe.")
 
 # Simulated operating characteristics at the design point, PLAN-v4.1 section 6.8: recomputed by
 # design-search/oc_v41.py with the final setup (220-task supply, the grace-end V fix, a live-only pilot of T1
@@ -55,7 +67,7 @@ V4_OC = dict(
                    usl=dict(carnot=0.198, usl=0.570, amdahl=0.221, linear=0.008, tie=0.005),
                    amdahl=dict(carnot=0.002, usl=0.158, amdahl=0.675, linear=0.166, tie=0.0),
                    linear=dict(carnot=0.0, usl=0.001, amdahl=0.069, linear=0.931, tie=0.0)),
-    O2_false_alarm=dict(service_cv_1=0.10, service_cv_0_5=0.04),
+    O2_false_alarm=dict(service_cv_1=0.10, service_cv_0_5=0.04), O2_power=dict(usl=0.63, amdahl=0.99, linear=1.00),
     S3_false_alarm=0.06, O3_power=1.00,
     S1r_false_alarm=0.05, S2r_false_alarm=0.53,
     Vdur_power=dict(service_cv_1=0.18, service_cv_0_5=0.73), Vdur_fpr=dict(service_cv_1=0.04, service_cv_0_5=0.05),

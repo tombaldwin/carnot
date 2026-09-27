@@ -1,4 +1,7 @@
-"""python -m harness {reset,run,dry-run,status,log,validate-tasks,validate-log,make-toy} --config FILE"""
+"""python -m harness {reset,run,calibrate,throttle,dry-run,status,log,validate-tasks,validate-log,make-toy} --config FILE
+
+Real phases use config.t1.toml, config.t2.toml, config.sweep-n1.toml or config.sweep-n12.toml
+(PLAN-v4 section 7); there is no default real config, so --config is required."""
 from __future__ import annotations
 
 import argparse
@@ -29,14 +32,44 @@ def cmd_reset(args) -> int:
     return 0
 
 
+def input_fn(prompt: str) -> str:   # patched in tests
+    return input(prompt)
+
+
+def run_banner(cfg, run_id: str) -> str:
+    rc = cfg.run
+    sched = rc.start_schedule or [[0, rc.n_workers]]
+    return "\n".join([
+        f"run {run_id}: phase {rc.phase}",
+        f"  kind           {rc.kind}",
+        f"  N (workers)    {rc.n_workers}   start schedule (minute, workers) {sched}",
+        f"  window         {rc.window_min:g} min (warm-up {rc.warmup_min:g}, grace {rc.grace_min:g})",
+        f"  worker model   {rc.worker_model}",
+        f"  reviewer model {rc.reviewer_model}   review job {cfg.reviewer.job}",
+        f"  base_ref       {cfg.repo.base_ref}   remote {cfg.repo.remote_url}",
+    ])
+
+
 def cmd_run(args) -> int:
     from .launchers import CommandLauncher, ManualLauncher, require_verified
     from .orchestrator import Orchestrator
     from .reset import work_repo
     from .review import CommandReviewer
     from .tasks import load_tasks
+    from .config import phase_problems, schedule_problems
     cfg = _cfg(args)
     require_verified(cfg)
+    probs = phase_problems(cfg) + schedule_problems(cfg.run.start_schedule, cfg.run.n_workers)
+    if probs:
+        print("refusing a real run: the config does not match its pre-registered phase:\n  " + "\n  ".join(probs),
+              file=sys.stderr)
+        return 2
+    print(run_banner(cfg, args.run_id))
+    if not args.yes:
+        ans = input_fn("Type the phase name to confirm and start the window: ").strip()
+        if ans != cfg.run.phase:
+            print("not confirmed; nothing started", file=sys.stderr)
+            return 2
     run_dir = cfg.path(cfg.run.output_dir) / args.run_id
     reset_file = run_dir / "reset.json"
     if not reset_file.exists():
@@ -51,7 +84,7 @@ def cmd_run(args) -> int:
     if args.meter_start is not None:
         log.emit("meter", credits_left_usd=args.meter_start, source="operator, before window")
     repo = work_repo(cfg)
-    reviewer = CommandReviewer(cfg)
+    reviewer = CommandReviewer(cfg, repo)
     orch = Orchestrator(cfg, args.run_id, run_dir, clock, log, repo, load_tasks(cfg), reviewer,
                         sandbox_commit=rj["sandbox_commit"], seed=rj["seed"])
     launcher = (CommandLauncher(cfg, log, args.run_id, run_dir) if cfg.launcher.mode == "command"
@@ -152,6 +185,39 @@ def cmd_validate_log(args) -> int:
     return 1 if errs else 0
 
 
+def cmd_calibrate(args) -> int:
+    from .calibrate import calibrate, parse_task_list, refuse_if_public
+    from .launchers import NotVerified
+    from .reset import work_repo
+    from .tasks import load_tasks
+    cfg = _cfg(args)
+    if cfg.reviewer.mode != "command":
+        print("calibrate runs the command reviewer (the live review path); [reviewer] mode is "
+              f"{cfg.reviewer.mode!r}", file=sys.stderr)
+        return 2
+    if not cfg.reviewer.verified and not args.allow_unverified:
+        raise NotVerified("refusing calibration: [reviewer] command is UNVERIFIED (set verified = true after "
+                          "the CLI check, PLAN-v4 s7; --allow-unverified only for a fake command in tests)")
+    ids = parse_task_list(args.tasks, load_tasks(cfg))
+    repo = work_repo(cfg)
+    summary = calibrate(cfg, repo, ids, [v.strip() for v in args.variants.split(",") if v.strip()],
+                        Path(args.out), args.job, parallel=args.parallel,
+                        mutant_dir=Path(args.mutant_dir) if args.mutant_dir else None,
+                        check_hidden=not args.no_check_hidden, seed=args.seed,
+                        detail_out=Path(args.detail_out) if args.detail_out else None)
+    print(json.dumps(summary, indent=2))
+    return 0 if summary["reviews"] else 1
+
+
+def cmd_throttle(args) -> int:
+    from .throttle import format_report, throttle_report
+    r = throttle_report(Path(args.run_dir), skip_min=args.skip_min)
+    print(format_report(r))
+    if args.json:
+        Path(args.json).write_text(json.dumps(r, indent=2) + "\n")
+    return 0
+
+
 def cmd_make_toy(args) -> int:
     from .toygen import generate
     print(json.dumps(generate(Path(args.dest), args.n_tasks, force=args.force), indent=2))
@@ -162,9 +228,13 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="python -m harness")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    def add(name, fn, cfg_default="config.toml"):
+    def add(name, fn, cfg_default=None):
         p = sub.add_parser(name)
-        p.add_argument("--config", default=str(HERE / cfg_default))
+        if cfg_default:
+            p.add_argument("--config", default=str(HERE / cfg_default))
+        else:
+            p.add_argument("--config", required=True,
+                           help="a phase config: config.t1.toml, config.t2.toml, config.sweep-n1.toml, config.sweep-n12.toml")
         p.set_defaults(fn=fn)
         return p
 
@@ -174,6 +244,24 @@ def main(argv=None) -> int:
     p = add("run", cmd_run)
     p.add_argument("--run-id", required=True)
     p.add_argument("--meter-start", type=float, help="credit meter reading ($) just before the window")
+    p.add_argument("--yes", action="store_true", help="skip the confirmation prompt (the banner is still printed)")
+    p = add("calibrate", cmd_calibrate)
+    p.add_argument("--tasks", required=True, help="comma-separated ids, @file (one id per line) or 'all'")
+    p.add_argument("--variants", default="reference,mutant", help="reference, mutant, or both (comma-separated)")
+    p.add_argument("--out", required=True, help="calibration-review log (JSONL), appended to; rows already there are skipped")
+    p.add_argument("--job", required=True, help="review-job version label written to every row (e.g. v2-checkout)")
+    p.add_argument("--parallel", type=int, default=1,
+                   help="reviews at once (calibration only: V uses call durations, never queueing)")
+    p.add_argument("--mutant-dir", help="private dir for mutant patches (default: mutants/ beside [tasks] reference_dir)")
+    p.add_argument("--no-check-hidden", action="store_true", help="keep mutants without checking the hidden tests fail")
+    p.add_argument("--seed", type=int, default=1, help="mutant choice seed")
+    p.add_argument("--detail-out", help="private JSONL with each review's reason and head (never in the public repo)")
+    p.add_argument("--allow-unverified", action="store_true", help=argparse.SUPPRESS)
+    p = sub.add_parser("throttle", help="abort rule 1 from T1's log (activity per slot-minute, 1 vs 12)")
+    p.add_argument("run_dir")
+    p.add_argument("--skip-min", type=float, default=5.0)
+    p.add_argument("--json")
+    p.set_defaults(fn=cmd_throttle)
     p = add("dry-run", cmd_dry_run, "config.dryrun.toml")
     p.add_argument("--run-id")
     p.add_argument("--seed", type=int)

@@ -1,0 +1,72 @@
+# T1 (PLAN-v4 s7.5): trial, 1 worker for 30 min, then all 12 for 30 min. PRs are reviewed live.
+# One config per phase; `python -m harness run` refuses a config whose kind / n_workers / window /
+# warm-up / grace / start schedule / models differ from the phase's pre-registered shape
+# (harness/config.py PHASES), prints them, and asks for confirmation (or --yes).
+# Everything marked UNVERIFIED must be checked before a real run; `run` refuses to start while a
+# template it needs still has verified = false. Only [run] differs between the four phase files.
+
+[run]
+phase = "t1"
+kind = "trial"
+n_workers = 12
+window_min = 60
+warmup_min = 10
+grace_min = 10
+start_schedule = [[0, 1], [30, 12]]   # [minute, workers running from then]
+task_order_seed = 1234          # pass --seed per window to `reset`; the seed used is recorded
+worker_model = "claude-haiku-4-5"     # Haiku 4.5 (model id string UNVERIFIED)
+reviewer_model = "claude-opus-5-5"    # Opus 5.5 (model id string UNVERIFIED)
+output_dir = "../runs"          # -> analysis/fleet-sweep/runs/<run_id>/
+poll_interval_s = 15
+end_grace_early_when_idle = false   # real windows always run the full grace period
+grace_reviews = true            # reviews of already-submitted changes continue during grace
+
+[repo]
+remote_url = "git@github.com:OWNER/carnot-sandbox.git"   # FILL IN: the private sandbox repo (placeholder)
+work_dir = "../work/sandbox"    # orchestrator's own clone
+base_ref = "sandbox-v1"         # frozen tag main is reset to (check with `reset` against the remote before T1)
+branch_prefix = "claude/task-"
+race_prefix = "claude/race-"
+tasks_file_name = "TASKS.json"
+
+[tasks]
+# FILL IN: a private local path (the tasks repo's gitignored dryrun/export/), never under this repo.
+task_file = "FILL-IN/tasks.json"
+hidden_tests_dir = "FILL-IN/hidden"              # <dir>/<task id>/test_*.py
+reference_dir = "FILL-IN/reference"           # <dir>/<task id>.patch
+
+[tests]
+python = ""                     # FILL IN: the sandbox venv's python ("" = the harness interpreter)
+timeout_s = 300
+post_hidden_scope = "merged"    # this task's hidden tests + those of every task merged this window
+hidden_subdir = "tests/_hidden_acceptance"   # under tests/ so the sandbox's tests/conftest.py fixtures apply
+hidden_pythonpath = ["tests", "."]           # hidden tests use `from helpers import` and `from tests.helpers import`
+
+[reviewer]
+mode = "command"
+job = "checkout"                # frozen review job (PLAN-v4 s7): fresh checkout of the head + task + diff
+# UNVERIFIED until the CLI check (PLAN-v4 s7.3): exact `claude -p` flags. Placeholders: {model}
+# {prompt_file} {workdir} {checkout} {allowed_tools} {python}. The prompt goes in on stdin.
+command = ["claude", "-p", "--model", "{model}", "--output-format", "json", "--allowedTools", "{allowed_tools}", "--no-session-persistence"]
+prompt_on_stdin = true
+cwd = "{checkout}"
+allowed_tools = ["Read", "Grep", "Glob", "Bash({python} -m pytest:*)"]   # UNVERIFIED syntax
+allowed_tools_sep = ","
+strip_paths = [".claude", "CLAUDE.md"]
+output_format = "json"          # UNVERIFIED: field names (the parser expects result + usage.*)
+verified = false
+prompt_template = "prompts/reviewer.md"
+timeout_s = 900
+retries = 1
+retry_backoff_s = 60
+max_downtime_min = 10
+
+[launcher]
+mode = "manual"                 # manual: operator starts sessions by hand; command: start_command below
+# UNVERIFIED: how to start one cloud session from a script, and how to stop it.
+# Placeholders: {worker} {prompt_file} {remote_url} {model} {run_id}; stop: {worker} {session_id}
+start_command = []
+stop_command = []
+session_id_regex = "(?P<session_id>\\S+)"   # UNVERIFIED
+verified = false
+worker_prompt = "prompts/worker.md"
