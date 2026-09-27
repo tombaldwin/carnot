@@ -2,13 +2,14 @@
 
     python -m harness throttle runs/<T1 run id> [--skip-min 5] [--json out.json]
 
-T1 runs one worker slot, then all twelve (``start_schedule = [[0, 1], [30, 12]]``). The harness
-logs no token usage, so the pre-registered measure is worker *activity* per slot-minute:
+T1 runs one slot, then all twelve (``start_schedule = [[0, 1], [30, 12]]``). With one cloud session
+per task, a slot launches a new session for every task. The harness logs no token usage, so the
+pre-registered measure is *activity* per slot-minute:
 
-* activity = sessions launched (``worker_start`` events after a slot's first, i.e. relaunches)
-  + READY submissions (``submit`` events). With the current long-running workers each slot has
-  one launch, so activity is the submit count; with one session per task every task adds a launch.
-* exposure = slot-minutes. Phase A (one slot): from the first slot's start + ``skip_min`` to the
+* activity = session launches (``session_launch`` on that slot) + READY submissions (``submit``,
+  whose ``worker`` is the slot). Older logs without ``session_launch`` count a slot's repeated
+  ``worker_start`` events as launches instead (the long-running-worker design).
+* a slot starts at its ``worker_start`` (the slot opens); exposure = slot-minutes. Phase A (one slot): from the first slot's start + ``skip_min`` to the
   moment a second slot starts. Phase B (all slots): from that moment (or a slot's own start +
   ``skip_min``, whichever is later) to window_end. Time between ``worker_down`` and
   ``worker_restart`` is excluded.
@@ -16,7 +17,8 @@ logs no token usage, so the pre-registered measure is worker *activity* per slot
 
 **Pre-registered rule:** throttled if ratio < 0.8, i.e. per-slot activity at 12 more than 20%
 below the single slot's. Reported beside it (not part of the rule): the median minutes from a
-task's claim to its first READY in each phase (a slower model shows up as a longer time), a rough
+task's session launch (or, in older logs, its claim) to its first READY in each phase (a slower model
+shows up as a longer time), a rough
 95% interval for the ratio (log-normal approximation, sqrt(1/a + 1/b)), and the operator's
 readings: ``meter`` events and ``note`` lines starting ``plan_usage`` or ``usage``.
 
@@ -103,17 +105,25 @@ def throttle_report(run_dir: Path, skip_min: float = SKIP_MIN, threshold: float 
         return iv is not None and iv[0] <= t < iv[1] and not any(d0 <= t < d1 for d0, d1 in down.get(w, []))
 
     res = {}
-    claims = {}
+    session_launches = [(e["slot"], _t(e["t"])) for e in ev if e["type"] == "session_launch"]
+    claims = {}   # task -> (slot, time the task started): its first session_launch, else its first claim
     for e in ev:
-        if e["type"] == "claim" and e["task"] not in claims:
-            claims[e["task"]] = (e["worker"], _t(e["t"]))
+        if e["type"] == "session_launch" and e["task"] not in claims:
+            claims[e["task"]] = (e["slot"], _t(e["t"]))
+    if not session_launches:
+        for e in ev:
+            if e["type"] == "claim" and e["task"] not in claims:
+                claims[e["task"]] = (e["worker"], _t(e["t"]))
     first_ready = {}
     for e in ev:
         if e["type"] == "submit" and e["task"] not in first_ready:
             first_ready[e["task"]] = _t(e["t"])
     for ph in ("A", "B"):
         mins = minutes(ph)
-        launches = sum(1 for w, ts in starts.items() for t in ts if t != first[w] and in_phase(ph, w, t))
+        if session_launches:
+            launches = sum(1 for w, t in session_launches if in_phase(ph, w, t))
+        else:
+            launches = sum(1 for w, ts in starts.items() for t in ts if t != first[w] and in_phase(ph, w, t))
         submits = sum(1 for e in ev if e["type"] == "submit" and in_phase(ph, e["worker"], _t(e["t"])))
         tok = [e for e in ev if e["type"] == "usage" and in_phase(ph, e["worker"], _t(e["t"]))]
         tokens = sum((e.get("tokens_in") or 0) + (e.get("tokens_out") or 0) for e in tok)
@@ -157,12 +167,12 @@ def throttle_report(run_dir: Path, skip_min: float = SKIP_MIN, threshold: float 
 def format_report(r: dict) -> str:
     A, B = r["phases"]["A"], r["phases"]["B"]
     L = [f"Throttling (abort rule 1), {r['run_dir']}",
-         f"  one slot  : {A['activity']} activity ({A['launches']} relaunches + {A['submits']} READY) in "
-         f"{A['slot_minutes']} slot-min -> {A['activity_per_slot_min']}; claim->READY median {A['claim_to_ready_median_min']} min (n={A['claim_to_ready_n']})",
-         f"  {B['slots']} slots  : {B['activity']} activity ({B['launches']} relaunches + {B['submits']} READY) in "
-         f"{B['slot_minutes']} slot-min -> {B['activity_per_slot_min']}; claim->READY median {B['claim_to_ready_median_min']} min (n={B['claim_to_ready_n']})",
+         f"  one slot  : {A['activity']} activity ({A['launches']} launches + {A['submits']} READY) in "
+         f"{A['slot_minutes']} slot-min -> {A['activity_per_slot_min']}; launch->READY median {A['claim_to_ready_median_min']} min (n={A['claim_to_ready_n']})",
+         f"  {B['slots']} slots  : {B['activity']} activity ({B['launches']} launches + {B['submits']} READY) in "
+         f"{B['slot_minutes']} slot-min -> {B['activity_per_slot_min']}; launch->READY median {B['claim_to_ready_median_min']} min (n={B['claim_to_ready_n']})",
          f"  activity ratio {r['activity_ratio']} (approx. 95% {r['activity_ratio_ci95_approx']}); token ratio {r['token_ratio']}; "
-         f"claim->READY ratio {r['claim_to_ready_ratio']} (reported only)",
+         f"launch->READY ratio {r['claim_to_ready_ratio']} (reported only)",
          f"  measure: {r['measure']}; ratio {r['ratio']} -> {r['verdict']}"]
     for x in r["operator_readings"]:
         L.append(f"  reading {x['t']}: " + (f"meter ${x['credits_left_usd']} ({x['source']})" if x["type"] == "meter" else x["text"]))

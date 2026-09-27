@@ -1,4 +1,4 @@
-"""Wire SimWorkers + SimReviewer + toy sandbox into a full accelerated window."""
+"""Wire SimCloudLauncher (one SimSession per task) + SimReviewer + toy sandbox into a full accelerated window."""
 from __future__ import annotations
 
 import dataclasses as dc
@@ -16,7 +16,7 @@ from .orchestrator import Orchestrator
 from .report import summarize
 from .reset import reset, work_repo
 from .schema import validate_events, validate_run_json
-from .sim import Oracle, SimLauncher, SimReviewer
+from .sim import Oracle, SimCloudLauncher, SimReviewer
 from .tasks import load_tasks
 
 
@@ -55,6 +55,17 @@ def prepare_real_config(cfg: Config) -> Config:
     return cfg
 
 
+HARNESS_DIR = Path(__file__).resolve().parent.parent
+
+
+def _harness_prompts(cfg: Config) -> None:
+    """A dry-run config kept outside the harness (the tasks repo's dryrun/) uses the harness's own prompt
+    templates unless it names others that exist."""
+    for attr in ("worker_prompt", "rework_prompt"):
+        if not cfg.path(getattr(cfg.launcher, attr)).exists():
+            setattr(cfg.launcher, attr, str(HARNESS_DIR / getattr(cfg.launcher, attr)))
+
+
 def dry_run(cfg: Config, run_id: str | None = None, seed: int | None = None,
             keep_sandbox: bool = True, echo: bool = False) -> tuple[Path, dict, list[str]]:
     run_id = run_id or dt.datetime.now().strftime("dry-%Y%m%d-%H%M%S")
@@ -68,6 +79,7 @@ def dry_run(cfg: Config, run_id: str | None = None, seed: int | None = None,
         cfg = prepare_toy_config(cfg, sandbox)
     else:
         cfg = prepare_real_config(cfg)
+    _harness_prompts(cfg)
 
     info = reset(cfg, run_id, seed, run_dir)
     clock = Clock(cfg.sim.time_scale)
@@ -75,24 +87,28 @@ def dry_run(cfg: Config, run_id: str | None = None, seed: int | None = None,
     repo = work_repo(cfg)
     oracle = Oracle()
     reviewer = SimReviewer(cfg, clock, oracle, random.Random(f"{cfg.sim.seed}-reviewer"))
+    launcher = SimCloudLauncher(cfg, clock, log, oracle, sandbox / "slots", run_id, cfg.sim.seed)
     orch = Orchestrator(cfg, run_id, run_dir, clock, log, repo, load_tasks(cfg), reviewer,
-                        sandbox_commit=info["sandbox_commit"], seed=seed, kind="dry-run")
+                        sandbox_commit=info["sandbox_commit"], seed=seed, kind="dry-run", launcher=launcher)
     reviewer.depth_probe = orch.queue_depth
-    launcher = SimLauncher(cfg, clock, log, oracle, sandbox / "workers", run_id, cfg.sim.seed)
     try:
         orch.run_window(launcher)
     finally:
         reviewer.stop.set()
-        launcher.stop.set()
+        launcher.stop_all()
     errs = validate_events(run_dir / "events.jsonl") + validate_run_json(run_dir / "run.json")
     errs += [f"harness thread error: {e}" for e in orch.errors]
-    errs += [f"sim worker {w.id} crashed: {w.error}" for w in launcher.workers if w.error]
-    summary_workers = {w.id: dict(w.stats) for w in launcher.workers}
-    unappliable = [dict(u, worker=w.id) for w in launcher.workers for u in w.unappliable]
+    errs += [f"sim session {s.session_id} crashed: {s.error}" for s in launcher.sessions.values()
+             if s.error and not s.error.startswith("git:")]
+    tot: dict = {}
+    for s in launcher.sessions.values():
+        for k, v in s.stats.items():
+            tot[k] = tot.get(k, 0) + v
+    unappliable = [dict(u, session=s.session_id) for s in launcher.sessions.values() for u in s.unappliable]
     if unappliable:
         (run_dir / "sim_unappliable.json").write_text(json.dumps(unappliable, indent=2) + "\n")
     summary = summarize(read_events(run_dir / "events.jsonl"))
-    summary["sim_workers"] = summary_workers
+    summary["sim_sessions"] = dict(n=len(launcher.sessions), **tot)
     if not keep_sandbox:
         shutil.rmtree(sandbox, ignore_errors=True)
     return run_dir, summary, errs

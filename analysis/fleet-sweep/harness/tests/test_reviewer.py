@@ -36,9 +36,9 @@ def test_parse_verdict_rejects_ambiguous(text):
 def test_retry_once_then_success(make_env):
     rev = ScriptedReviewer({"001": ["error", "approve"]})
     env = make_env(reviewer=rev)
-    w = env.worker("w1"); w.fetch(); w.try_claim("001")
+    w = env.session("001", "s1")
     env.start()
-    w.submit("001")
+    w.submit()
     evs = env.wait_for(lambda evs: count(evs, "merge") == 1)
     seq = [e["type"] for e in evs if e["type"].startswith("review")]
     assert seq == ["reviewer_busy", "review_start", "review_error", "review_start", "review_end", "reviewer_idle"]
@@ -47,9 +47,9 @@ def test_retry_once_then_success(make_env):
 def test_persistent_failure_requeues_and_voids_window(make_env):
     rev = ScriptedReviewer({"001": ["error"] * 6 + ["approve"]})
     env = make_env(reviewer=rev, reviewer_cfg={"retry_backoff_s": 400, "max_downtime_min": 10})
-    w = env.worker("w1"); w.fetch(); w.try_claim("001")
+    w = env.session("001", "s1")
     env.start()
-    w.submit("001")
+    w.submit()
     evs = env.wait_for(lambda evs: count(evs, "review_end") == 1, timeout=60)
     assert count(evs, "review_error") == 6
     assert any(e["text"].startswith("VOID: reviewer downtime") for e in evs if e["type"] == "note")

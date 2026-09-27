@@ -16,9 +16,12 @@ def summarize(events: list[dict]) -> dict:
         elif e["type"] == "review_start" and e["task"] in open_review:
             open_review.remove(e["task"])
     return {
-        "worker_start": c["worker_start"],
-        "claims": c["claim"],
-        "claim_races": c["claim_race"],
+        "slots_opened": c["worker_start"],
+        "session_launches": c["session_launch"],
+        "rework_messages": sum(1 for e in events if e["type"] == "session_message" and e["kind"] == "rework"),
+        "session_timeouts": c["session_timeout"],
+        "max_busy_slots": _max_busy(events),
+        "branches_seen": c["claim"],
         "submits": len(submits),
         "first_attempts": sum(1 for e in submits if e["attempt_no"] == 1),
         "resubmits": sum(1 for e in submits if e["attempt_no"] > 1),
@@ -35,6 +38,17 @@ def summarize(events: list[dict]) -> dict:
         "notes_void": [e["text"] for e in events if e["type"] == "note" and e["text"].startswith("VOID")],
         "harness_errors": sum(1 for e in events if e["type"] == "note" and e["text"].startswith("harness error")),
     }
+
+
+def _max_busy(events: list[dict]) -> int:
+    busy, top = set(), 0
+    for e in events:
+        if e["type"] == "slot_busy":
+            busy.add(e["slot"])
+        elif e["type"] == "slot_idle":
+            busy.discard(e["slot"])
+        top = max(top, len(busy))
+    return top
 
 
 def format_summary(s: dict) -> str:

@@ -14,10 +14,18 @@ STR, INT, BOOL, NUM, LIST_STR = "str", "int", "bool", "num", "list[str]"
 OPT = "?"  # suffix: value may be null
 
 EVENT_FIELDS: dict[str, dict[str, str]] = {
+    # worker = slot id (s1..sN). worker_start: the slot opens (session_id null: sessions are per task).
     "worker_start": {"worker": STR, "session_id": STR + OPT},
     "worker_down": {"worker": STR, "reason": STR},
     "worker_restart": {"worker": STR, "reason": STR},
+    "slot_busy": {"slot": STR},
+    "slot_idle": {"slot": STR},
+    "session_launch": {"slot": STR, "task": STR, "session_id": STR + OPT, "attempt_no": INT},
+    "session_message": {"slot": STR, "task": STR, "session_id": STR + OPT, "kind": STR},
+    "session_timeout": {"slot": STR, "task": STR, "session_id": STR + OPT},
+    # claim: the task's branch first seen on the remote (its session's first push); worker = slot.
     "claim": {"worker": STR, "task": STR, "branch": STR},
+    # claim_race: RETIRED (no claims with one session per task); kept so older logs still validate.
     "claim_race": {"worker": STR, "task": STR},
     "submit": {
         "worker": STR, "task": STR, "branch": STR, "head": STR, "attempt_no": INT,
@@ -46,6 +54,7 @@ EVENT_FIELDS: dict[str, dict[str, str]] = {
 ENUMS = {
     ("review_end", "verdict"): {"approve", "request_changes"},
     ("bounce", "cause"): {"review", "rebase_conflict", "visible_fail", "escaped_defect", "integration_failure"},
+    ("session_message", "kind"): {"rework", "probe"},
 }
 
 RUN_FIELDS: dict[str, str] = {
@@ -125,6 +134,8 @@ def validate_events(path: Path | str, semantic: bool = True) -> list[str]:
     reviewing = None  # (task, head) under review
     approved: set[tuple[str, str]] = set()
     attempts: dict[str, int] = {}
+    busy: dict[str, bool] = {}        # slot -> busy
+    launched: set[str] = set()        # tasks with a session_launch
     for i, ev in events:
         typ = ev["type"]
         if ev["t"] < last_t:
@@ -154,6 +165,23 @@ def validate_events(path: Path | str, semantic: bool = True) -> list[str]:
         elif typ == "merge":
             if key not in approved:
                 errs.append(f"line {i}: merge of a head that was never approved")
+        elif typ == "slot_busy":
+            if busy.get(ev["slot"]):
+                errs.append(f"line {i}: slot_busy for {ev['slot']}, which is already busy")
+            busy[ev["slot"]] = True
+        elif typ == "slot_idle":
+            if not busy.get(ev["slot"]):
+                errs.append(f"line {i}: slot_idle for {ev['slot']}, which is not busy")
+            busy[ev["slot"]] = False
+        elif typ == "session_launch":
+            if not busy.get(ev["slot"]):
+                errs.append(f"line {i}: session_launch on slot {ev['slot']} without slot_busy")
+            launched.add(ev["task"])
+        elif typ in ("session_message", "session_timeout"):
+            if ev["task"] not in launched:
+                errs.append(f"line {i}: {typ} for task {ev['task']} that was never launched")
+            if typ == "session_message" and not busy.get(ev["slot"]):
+                errs.append(f"line {i}: session_message on slot {ev['slot']} without slot_busy")
     return errs
 
 

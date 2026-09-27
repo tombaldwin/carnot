@@ -5,7 +5,8 @@ each, no pilot gate, claims graded confirmatory / conditional / descriptive in a
 the Welch test on log review durations; live-only pilot; calibration log for abort rule 4 only; supply flag at
 minute 110) and reframed by its section 7 (**v4.2**: a measurement and calibration study; O2 is the primary
 quantitative confirmatory test, P1 a confirmatory manipulation check, Vdur conditional, everything else
-descriptive; decisions 35-38). PLAN-v3's gate and outcome codings are kept only
+descriptive; decisions 35-38). The harness's worker model is **one cloud session per task in N slots**
+(harness README "Worker model"; decisions 39-43). PLAN-v3's gate and outcome codings are kept only
 behind explicit flags (`predict.py --v3-gate`, `score.py --plan v3`) so the design search can be
 reproduced; they are superseded.
 
@@ -20,11 +21,11 @@ cd /Users/tom/git/carnot/analysis/fleet-sweep/analysis
 | File | What it does |
 |---|---|
 | `common.py` | Model curves (USL, Amdahl, linear), timestamps, the negative-binomial likelihood (Poisson with fixed CV 0.3), logistic / conditional-logistic fitters, the model-form collision fit. |
-| `validate_schema.py` | Checks `events.jsonl` (+ `run.json`) against SCHEMA.md: fields, types, enums, timestamps, ordering, serial reviews, attempt numbering, merges only of approved + green heads. Exit 1 on errors. |
+| `validate_schema.py` | Checks `events.jsonl` (+ `run.json`) against SCHEMA.md: fields, types, enums, timestamps, ordering, serial reviews, attempt numbering, merges only of approved + green heads; for session logs, slot busy/idle pairing, launches and messages only on busy slots, no more busy slots than `n_workers`. Exit 1 on errors. |
 | `derive.py` | Per-window quantities (PLAN-v3 section 6 accounting) and per-PR / per-approval tables, with the task-supply truncation and flag (minute 110) and the grace-end V correction; `--pilot` pools the live T1 + T2 runs (and nothing else) into the pilot parameters, including `review_time_cv` and the flag `review_cv_ok`. |
 | `predict.py` | PLAN-v4.1/v4.2 pre-registration table: point predictions for the four rivals at N = 1 and 12 (per window and per three windows), the O2 interval, design-point loads, abort rules 3-5 (rule 4 from the calibration log, `--calibration`), the task-supply check, and the operating-characteristics statement (v4.2 framing, the uncapped-truth footnote, the completion-share bias). `--v3-gate` adds the superseded PLAN-v3 gate for reference. |
 | `score.py` | PLAN-v4.2 (in this order): O2, the primary quantitative test, and P1, the manipulation check (capped vs best uncapped likelihood ratio), each also without the windows flagged for running out of tasks (O2-nf, P1-nf), the reviewer-pace test Vdur (Welch on log review durations; conditional on `review_cv_ok`), and the descriptive S3 (b_review), O3, Vratio, S1r/S2r, four-way ranking, escapes, collisions and bounce causes, each graded; writes `RESULTS-draft.md` and `results.json`. `--plan v3` gives the superseded codings. |
-| `synth.py` | Discrete-event simulation of the harness (workers, FIFO reviewer, serial merge queue, re-reviews, censoring) writing SCHEMA.md logs under a chosen truth, with the harness's `task_supply` / `tasks_exhausted` notes. `--v4` gives PLAN-v4's pilot and sweep layout. |
+| `synth.py` | Discrete-event simulation of the harness (workers, FIFO reviewer, serial merge queue, re-reviews, censoring) writing SCHEMA.md logs under a chosen truth, with the harness's `task_supply` / `tasks_exhausted` notes. `--v4` gives PLAN-v4's pilot and sweep layout; `--sessions` the current worker model (one session per task in N slots, rework to the next free slot, 25-min timeout; decision 43). The default is the long-running-worker model the operating characteristics were computed with. |
 | `selftest.py` | Unit checks plus the simulation study at the PLAN-v4 design point (every v4 coding under four truths and a load-dependent reviewer), the task-supply check, and planted escape and collision effects. Writes `selftest-output/SELFTEST.md` and `selftest.json`. |
 
 ## How to run each step
@@ -57,6 +58,7 @@ $PY score.py --pilot pilot.json ../runs/<w1> ... ../runs/<w6> --out-dir results/
 # Synthetic logs for a dry run of the whole chain
 $PY synth.py --v4 --truth carnot --set lam1=6.8 V0=13.6 n_tasks=220 --seed 1 --out /tmp/synth   # T1, 8 x T2, 6 windows
 $PY synth.py --truth usl --set V0=14 escape_depth=0.1 p=0.02 --out /tmp/synth-usl               # PLAN-v3 layout
+$PY synth.py --v4 --sessions --truth carnot --set lam1=6.8 V0=13.6 n_tasks=220 --out /tmp/synth-s  # one session per task
 ```
 
 `derive.py` reads the task supply from the harness's `task_supply` note or, for older logs, from the run
@@ -327,9 +329,46 @@ its section 7 (v4.2).
     pre-registered choice (accept the measured q and re-run oc_v41.py, or redefine the job and re-run the
     pilot) instead of "redefine and recalibrate".
 
+39. **Worker-hours with one session per task.** The harness runs N slots; `worker_start` marks a slot opening
+    and `slot_busy` / `slot_idle` a session occupying it. Worker-hours (the denominator of lambda, and of O3's
+    per-agent rate) are **slot-open hours** after warm-up (busy + idle, down-time excluded), up to the
+    supply-exhaustion minute as before. Chosen over slot-busy hours because a slot is idle only between a READY
+    and the next hand-out (one poll, seconds) or when nothing is left to hand out (supply exhaustion, which
+    truncates the counting window anyway), and because the rivals scale with N x hours, i.e. open slots.
+    Launch and start-up time is inside the busy time, so lambda = first submissions per slot-hour includes
+    each task's start-up. `slot_busy_hours` and `slot_busy_share` are reported beside it (expected near 1).
+40. **Start-up time** = a task's first `session_launch` -> its branch first seen (`claim`; the prompt tells the
+    session to push the branch before any work), averaged over tasks (`startup_min_mean`, `startup_source`).
+    Older logs keep first claim - worker start.
+41. **Supply exhaustion = end of the task list**: the harness's `tasks_exhausted` note, logged when the last task
+    is handed to a slot; failing the note, the `session_launch` that brings the distinct launched tasks to the
+    supply (older logs: the claim). Decisions 19 and 30 apply unchanged from that minute.
+42. **Session timeouts and rework waits, descriptive.** `session_timeouts`, `timeouts_before_submit` (a session
+    abandoned before any READY: no attempt is counted, the work is lost), `abandoned_after_submit` (per PR,
+    `abandoned`), `rework_messages`, `rework_wait_min_mean` (bounce -> follow-up delivered, i.e. waiting for a
+    free slot). An abandoned task after a bounce stays `rework_open`, so finished + censored + rework_open =
+    attempts_full still holds. `derive.py --pilot` pools `slot_busy_share`, `session_timeouts` and
+    `rework_wait_min`, and refuses a T0 run (`phase=t0` in run.json notes; T0 is a product check).
+43. **synth.py --sessions.** A per-task-session mode of the simulator (`per_task_sessions`): slots, hand-out in
+    the seeded order, a start-up delay per session (`session_startup_min`, exp.), READY frees the slot, rework
+    goes FIFO to the next free slot before new work, a session with no READY within `task_timeout_min` (25) is
+    abandoned. The default mode (long-running workers) and its random streams are unchanged, so the
+    operating characteristics (OPERATING-CHARACTERISTICS.md, `common.V4_OC`) and the design search still
+    reproduce; they were computed without per-task start-up, without rework moving between workers and without
+    timeouts. **Consequences found (40 seeded 120-min windows per cell at the design point's Carnot truth, lambda1 = 6.8/h,
+    USL drag alpha = 0.1, beta = 0.01, 1-min session start-up; not re-simulated for the OCs):** lambda(1) is 4.5 per
+    slot-hour against 5.35 for long-running workers (-16%, mostly because each task now pays its own
+    start-up); lambda(12) is 1.69 against 1.78. At N = 12 the drag makes the per-agent work time about 30 min, so
+    about 31 of about 80 sessions per window hit the 25-min timeout, yet lambda(12) is unchanged by the timeout
+    (1.68 with no timeout: the freed slot is reused at once) and so is the finished count (10.2 vs 9.8; review
+    caps it). The timeout therefore changes which tasks are attempted, not the attempt rate. The pilot measures
+    lambda under the session model directly, so the predictions use the right lambda; the OC tables assume the
+    old worker model.
+
 ## Self-test results (300 replicates per cell; full tables in `selftest-output/SELFTEST.md`)
 
-All 60 unit and end-to-end checks pass, including the v4.2 grades, order (O2 first), roles and footnote (decisions 35-37), the grace-end V correction (a hand-built log with a
+All unit and end-to-end checks pass (60 before the session-per-task change, plus 12 for sessions: decisions
+39-43, a hand-built session log, the validator's slot checks, `--pilot` refusing T0, and synth --sessions end to end), including the v4.2 grades, order (O2 first), roles and footnote (decisions 35-37), the grace-end V correction (a hand-built log with a
 review open at grace end), task-supply truncation from the note and from reset.json, the v4.1 supply flag
 (out at minute 105: flagged; at 112: truncated only), P1-nf / O2-nf on flagged windows, the calibration-log
 reader (JSONL and CSV, job versions, invalid rows refused) and abort rule 4 using the calibrated V (NOT

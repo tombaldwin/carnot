@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 .DS_Store
+
+# working clones hold task text: never inside this repo
+work/

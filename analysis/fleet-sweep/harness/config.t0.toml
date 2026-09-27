@@ -1,4 +1,6 @@
-# Sweep, N = 12 (PLAN-v4 s2): 120-min window, ABBAAB order.
+# T0 (harness README "T0 operator checklist"): trial, 1 slot, 20 min, fixed first task T145. A product check of
+# the session-per-task worker model (launch output, session id, detach, branch name, model, follow-up delivery,
+# READY detection). Not part of the pilot: never pass a T0 run to derive.py --pilot.
 # One config per phase; `python -m harness run` refuses a config whose kind / n_workers / window /
 # warm-up / grace / start schedule / session timeout / first task / models differ from the phase's pre-registered shape
 # (harness/config.py PHASES), prints them, and asks for confirmation (or --yes).
@@ -6,17 +8,17 @@
 # template it needs still has verified = false. Only [run] differs between the five phase files.
 
 [run]
-phase = "sweep-n12"
-kind = "sweep"
-n_workers = 12
-window_min = 120
-warmup_min = 10
+phase = "t0"
+kind = "trial"
+n_workers = 1
+window_min = 20
+warmup_min = 0
 grace_min = 10
 start_schedule = []
 task_timeout_min = 25          # no READY this long after a launch / rework message: abandoned
 task_budget_min = 20           # stated in the session prompt
-first_task = ""
-probe_followup = false
+first_task = "T145"            # T0's fixed first task (small, one file, no textual conflicts)
+probe_followup = true          # after the first READY, one probe follow-up checks delivery (PROBE: commit)
 task_order_seed = 1234          # pass --seed per window to `reset`; the seed used is recorded
 worker_model = "claude-haiku-4-5"     # Haiku 4.5 (model id string UNVERIFIED)
 reviewer_model = "claude-opus-5-5"    # Opus 5.5 (model id string UNVERIFIED)

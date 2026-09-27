@@ -325,3 +325,13 @@ until then.
 References to the PLAN-v3 gate, Sonnet, `config.toml` and "PLAN-v3 §10" removed from the harness README,
 configs, `SCHEMA.md` and the refusal messages; the `RunCfg` / `RepoCfg` defaults are PLAN-v4's (120 min,
 Haiku, 1 worker, `sandbox-v1`).
+
+**§7.8 update (worker design settled).** Workers are one Claude Code cloud session per task, because a
+cloud session can push only to its own working branch. The orchestrator keeps N slots, launches each task
+as its own Haiku 4.5 session on `claude/task-<id>`, frees the slot on the session's `READY:` push, sends
+rework as a follow-up message to the same session (which then holds a slot until its next READY), and
+abandons a task after 25 minutes without READY. Specified in harness/README.md ("Worker model", decisions
+22–28) and analysis/README.md decisions 39–43. The operating characteristics were computed for
+long-running workers; per-task sessions lower λ by about 16% at the design point (each task pays its own
+start-up), which the pilot measures directly. A T0 phase (one slot, one task, 20 min) settles the
+remaining UNVERIFIED product facts before T1.

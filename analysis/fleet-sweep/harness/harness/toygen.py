@@ -4,7 +4,7 @@ Layout written under ``dest``:
   remote.git/                 bare repo standing in for the GitHub remote; main + tag study2-base
   tasks/tasks.json            public task text and acceptance criteria
   tasks/hidden/<id>/          hidden acceptance tests (never enter the repo)
-  tasks/reference/<id>.patch  reference solution (used by SimWorker only)
+  tasks/reference/<id>.patch  reference solution (used by SimSession only)
 
 Ten task templates. With n_tasks > 10 the templates repeat under new module
 names (task 011 is template 1 again as toylib/slugify_2.py, and so on).
@@ -234,7 +234,7 @@ FUNC_OF = {"slugify": "slugify", "pad": "pad_left", "center": "center_text", "pa
            "wordcount": "word_count", "chunk": "chunk", "joinfields": "join_fields", "roman": "to_roman",
            "flatten": "flatten", "rle": "rle_encode"}
 
-# The knobs SimWorker uses on this sandbox (see config.dryrun.toml).
+# The knobs SimSession uses on this sandbox (see config.dryrun.toml).
 SEMANTIC_EDIT = {"file": "toylib/shared.py", "find": "DEFAULT_WIDTH = 10", "replace": "DEFAULT_WIDTH = 12"}
 VISIBLE_BREAK_EDIT = {"file": "toylib/core.py", "find": "return max(lo, min(hi, x))",
                       "replace": "return min(lo, max(hi, x))"}

@@ -42,11 +42,17 @@ def test_end_to_end_dry_run(tmp_path):
     assert took < 120, f"dry run took {took:.0f}s"
     assert validate_events(run_dir / "events.jsonl") == []
     assert validate_run_json(run_dir / "run.json") == []
-    assert summary["worker_start"] == 4
-    assert summary["claims"] >= 4 and summary["submits"] >= 4
+    assert summary["slots_opened"] == 4
+    assert summary["session_launches"] >= 4 and summary["branches_seen"] >= 4 and summary["submits"] >= 4
+    assert summary["max_busy_slots"] == 4                  # never more sessions than slots
     assert summary["reviews"] >= 3 and summary["merges"] >= 1
     evs = read_events(run_dir / "events.jsonl")
     assert evs[0]["type"] == "note"
+    # one session per task: every submit comes from a launched task, from the slot its session held
+    launched = {e["task"] for e in evs if e["type"] == "session_launch"}
+    assert {e["task"] for e in evs if e["type"] == "submit"} <= launched
+    assert all(e["worker"] in {"s1", "s2", "s3", "s4"} for e in evs if e["type"] == "submit")
+    assert len(launched) == summary["session_launches"]    # no task launched twice
     notes = [e["text"] for e in evs if e["type"] == "note"]
     assert "task_supply n=20" in notes          # the analysis reads the window's task supply from this note
     i_ge = notes.index("grace_end")

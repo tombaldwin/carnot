@@ -51,6 +51,26 @@ listed in README.md):
   reports P1 and O2 with and without the flagged windows.
 * Merge-queue ("CI") time per change: from max(approval, previous change's queue exit) to its merge or
   queue bounce, FIFO.
+
+**One cloud session per task (harness README "Worker model"; README decisions 39-43).** The harness runs N
+*slots*; each runs one session at a time, and a session works on one task and its rework. `worker_start`
+marks a slot opening; `slot_busy` / `slot_idle` mark a session occupying it; `session_launch`,
+`session_message` (kind rework / probe) and `session_timeout` record the sessions. Accounting:
+
+* worker-hours = **slot-open hours** (busy + idle) after warm-up, down-time excluded, as before; lambda =
+  first submissions per slot-hour. A slot is idle only between a READY and the next hand-out (seconds) or
+  when there is nothing left to hand out (supply exhaustion, which truncates the counting window anyway),
+  so slot-open time is the fleet-size exposure the rivals' N x hours assumes. `slot_busy_hours` and
+  `slot_busy_share` (busy / open, over the same counting window) are reported beside it.
+* start-up time = a task's first `session_launch` -> its branch first seen (`claim`, the session's first
+  push; the prompt tells it to push the branch before any work). Older logs: first claim - worker start.
+* supply exhaustion = the end of the task list: the harness's `tasks_exhausted` note (logged when the last
+  task is handed to a slot), else the `session_launch` that brings the distinct launched tasks to the supply,
+  else (older logs) the claim that does.
+* `session_timeouts` (no READY within the timeout: the task is abandoned, never re-launched), those before a
+  first submission (`timeouts_before_submit`: work lost without an attempt), `rework_messages`, and
+  `rework_wait_min_mean` (bounce -> the follow-up message reaching the session, i.e. waiting for a slot).
+  Per PR, `abandoned` flags a task whose session timed out after its first submission.
 """
 from __future__ import annotations
 
@@ -129,6 +149,13 @@ def derive_window(run, events, supply=None, supply_source=None):
     claims = []               # (t, task) of every logged claim
     exhausted_note_t = None
     cur_review = None         # (t of first review_start, key) of the review the reviewer is on
+    slot_busy_iv = defaultdict(list)
+    slot_busy_since = {}
+    launch_t = {}             # task -> first session_launch time
+    launches = []             # (t, task)
+    first_claim_task = {}     # task -> first claim (branch first pushed)
+    timeouts = []             # (t, task)
+    rework_msgs = []          # (t, task)
 
     def task_row(task):
         if task not in tasks:
@@ -163,10 +190,29 @@ def derive_window(run, events, supply=None, supply_source=None):
             usage_tokens[e["worker"]] += (e.get("tokens_in") or 0) + (e.get("tokens_out") or 0)
             usage_cost += e.get("cost_usd_est") or 0.0
             continue
+        if typ == "slot_busy":
+            slot_busy_since.setdefault(e["slot"], max(t, 0.0))
+            continue
+        if typ == "slot_idle":
+            if e["slot"] in slot_busy_since:
+                slot_busy_iv[e["slot"]].append((slot_busy_since.pop(e["slot"]), max(t, 0.0)))
+            continue
         if t > end_all:
+            continue
+        if typ == "session_launch":
+            launch_t.setdefault(e["task"], t)
+            launches.append((t, e["task"]))
+            continue
+        if typ == "session_timeout":
+            timeouts.append((t, e["task"]))
+            continue
+        if typ == "session_message":
+            if e["kind"] == "rework":
+                rework_msgs.append((t, e["task"]))
             continue
         if typ == "claim":
             first_claim.setdefault(e["worker"], t)
+            first_claim_task.setdefault(e["task"], t)
             claims.append((t, e["task"]))
         elif typ == "claim_race":
             claim_races += 1
@@ -228,6 +274,8 @@ def derive_window(run, events, supply=None, supply_source=None):
         busy_iv.append((busy_since, end_all))
     for w, t0 in worker_alive.items():
         worker_iv[w].append((t0, we))
+    for sl, t0 in slot_busy_since.items():
+        slot_busy_iv[sl].append((t0, we))
     if not have_busy_events:
         busy_iv = [(r["t_start"], r["t_end"]) for r in reviews]
     busy_iv = [(max(0.0, a), min(end_all, b)) for a, b in busy_iv if b > 0 and a < end_all]
@@ -245,7 +293,8 @@ def derive_window(run, events, supply=None, supply_source=None):
     t_exhausted = None
     if supply is not None and supply > 0:
         seen = set()
-        for t, task in sorted(claims, key=lambda x: x[0]):
+        # session logs: the end of the list is the last hand-out (launch); older logs: the last claim
+        for t, task in sorted(launches or claims, key=lambda x: x[0]):
             seen.add(task)
             if len(seen) >= supply:
                 t_exhausted = t
@@ -356,7 +405,28 @@ def derive_window(run, events, supply=None, supply_source=None):
     attempt_hours = (t_count_end - warm) / 3600.0
     durations = [r["duration_s"] if r["duration_s"] else r["t_end"] - r["t_start"] for r in reviews]
     resolved_first = [p for p in prs if p["resolved"]]
-    startup = [first_claim[w] - worker_start_t[w] for w in first_claim if w in worker_start_t]
+    if launch_t:
+        startup = [first_claim_task[k] - launch_t[k] for k in first_claim_task if k in launch_t]
+        startup_source = "session_launch -> branch first pushed"
+    else:
+        startup = [first_claim[w] - worker_start_t[w] for w in first_claim if w in worker_start_t]
+        startup_source = "worker_start -> first claim" if startup else None
+    slot_h_post = sum(_overlap(a, b, warm, t_count_end) for iv in slot_busy_iv.values() for a, b in iv) / 3600
+    submitted = {task for task, row in tasks.items() if row["submits"]}
+    first_sub_t = {task: row["submits"][0]["t"] for task, row in tasks.items() if row["submits"]}
+    timed_out = {task: t for t, task in timeouts}
+    for p in prs:
+        p["abandoned"] = p["task"] in timed_out and timed_out[p["task"]] >= p["t_submit_min"] * 60
+    waits = []
+    msgs_by_task = defaultdict(list)
+    for t, task in rework_msgs:
+        msgs_by_task[task].append(t)
+    for task, row in tasks.items():
+        ms = sorted(msgs_by_task.get(task, []))
+        for b in row["bounces"]:
+            nxt = [m for m in ms if m >= b["t"]]
+            if nxt:
+                waits.append(nxt[0] - b["t"])
 
     s = dict(
         run_id=run["run_id"], kind=run["kind"], n_workers=run["n_workers"],
@@ -399,11 +469,25 @@ def derive_window(run, events, supply=None, supply_source=None):
         worker_tokens_per_hour={w: usage_tokens[w] / (sum(b - a for a, b in worker_iv[w]) / 3600)
                                 for w in usage_tokens if sum(b - a for a, b in worker_iv[w]) > 0},
         usage_cost_usd=usage_cost, startup_min_mean=(sum(startup) / len(startup) / 60) if startup else math.nan,
+        startup_source=startup_source, n_startup=len(startup),
+        slot_busy_hours=slot_h_post if slot_busy_iv else math.nan,
+        slot_busy_share=(slot_h_post / worker_h_post) if slot_busy_iv and worker_h_post > 0 else math.nan,
+        session_launches=len(launches), tasks_launched=len(launch_t), session_timeouts=len(timeouts),
+        timeouts_before_submit=sum(1 for t, task in timeouts if task not in first_sub_t or first_sub_t[task] > t),
+        abandoned_after_submit=sum(1 for p in prs if p["abandoned"]),
+        rework_messages=len(rework_msgs),
+        rework_wait_min_mean=(sum(waits) / len(waits) / 60) if waits else math.nan,
+        phase=_phase(run),
         review_errors=review_errors, claim_races=claim_races, worker_downs=downs,
         max_restarts=max(restarts.values()) if restarts else 0,
         void_worker_restarts=(max(restarts.values()) if restarts else 0) > 2,
     )
     return dict(summary=s, prs=prs, approvals=appr_rows)
+
+
+def _phase(run):
+    m = re.search(r"\bphase=([\w-]+)", run.get("notes") or "")
+    return m.group(1) if m else None
 
 
 def supply_from_reset(run_dir):
@@ -441,9 +525,9 @@ def pilot_params(derived, n_pilot=None, allow_nonlive=False):
     for abort rule 4; they are never pooled into V, b or the CV. Runs whose kind is not trial or pilot
     (a sweep window or a dry run) are refused unless allow_nonlive (dry runs of the chain only)."""
     S = [d["summary"] for d in derived]
-    bad = [s["run_id"] for s in S if s["kind"] not in LIVE_KINDS]
+    bad = [s["run_id"] for s in S if s["kind"] not in LIVE_KINDS or s.get("phase") == "t0"]
     if bad and not allow_nonlive:
-        raise SystemExit(f"--pilot takes live T1 / T2 runs only (kind trial or pilot); got {bad}. "
+        raise SystemExit(f"--pilot takes live T1 / T2 runs only (kind trial or pilot, not T0); got {bad}. "
                          "Use --allow-nonlive only for a dry run of the analysis chain.")
     pil = [s for s in S if s["kind"] == "pilot"] or S
     ns = sorted({s["n_workers"] for s in pil})
@@ -483,6 +567,9 @@ def pilot_params(derived, n_pilot=None, allow_nonlive=False):
         review_tokens_mean=(sum(s["review_tokens_mean"] * s["reviews"] for s in S if s["reviews"]) / nrev) if nrev else math.nan,
         worker_tokens_per_attempt=_nanmean([s["worker_tokens_per_attempt"] for s in S]),
         startup_min=_nanmean([s["startup_min_mean"] for s in S]),
+        slot_busy_share=_nanmean([s.get("slot_busy_share", math.nan) for s in pil]),
+        session_timeouts=sum(s.get("session_timeouts", 0) for s in S),
+        rework_wait_min=_nanmean([s.get("rework_wait_min_mean", math.nan) for s in S]),
         runs=[s["run_id"] for s in S],
         review_source="live T1 + T2 review_end events only; calibration reviews not pooled (PLAN-v4.1 6.2-6.3)"
         + ("" if not bad else f"; NON-LIVE runs included for a dry run: {bad}"),
@@ -562,12 +649,13 @@ def main():
             s = d["summary"]
             if s["supply_truncated"]:
                 sup = (f"{'FLAGGED, ' if s['supply_flagged'] else ''}"
-                       f"TRUNCATED: {s['task_supply']} tasks all claimed at min {s['t_exhausted_min']:.1f}; "
+                       f"TRUNCATED: {s['task_supply']} tasks all handed out at min {s['t_exhausted_min']:.1f}; "
                        f"attempts/lambda to that minute (whole window: {s['attempts_full']}, {s['lam_full']:.2f})")
             elif s["task_supply"] is None:
                 sup = "unknown (no task_supply note or reset.json)"
             else:
-                sup = f"ok ({s['tasks_claimed']}/{s['task_supply']} claimed)"
+                sup = (f"ok ({s['tasks_launched']}/{s['task_supply']} launched)" if s["session_launches"]
+                       else f"ok ({s['tasks_claimed']}/{s['task_supply']} claimed)")
             print(f"{s['run_id'][:28]:28} {s['n_workers']:>2} {s['attempts']:>4} {s['lam']:>5.2f} {s['reviews']:>4} "
                   f"{s['V']:>5.1f} {s['b_review']:>5.2f} {s['b_hidden']:>5.2f} {s['b']:>5.2f} {s['finished']:>4} "
                   f"{s['censored']:>4} {s['escaped']:>3} {s['integration_failures']:>4} {s['queue_nonempty_share']:>4.2f} "

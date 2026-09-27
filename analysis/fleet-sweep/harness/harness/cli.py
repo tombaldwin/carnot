@@ -1,7 +1,7 @@
 """python -m harness {reset,run,calibrate,throttle,dry-run,status,log,validate-tasks,validate-log,make-toy} --config FILE
 
-Real phases use config.t1.toml, config.t2.toml, config.sweep-n1.toml or config.sweep-n12.toml
-(PLAN-v4 section 7); there is no default real config, so --config is required."""
+Real phases use config.t0.toml, config.t1.toml, config.t2.toml, config.sweep-n1.toml or
+config.sweep-n12.toml (PLAN-v4 section 7); there is no default real config, so --config is required."""
 from __future__ import annotations
 
 import argparse
@@ -42,8 +42,11 @@ def run_banner(cfg, run_id: str) -> str:
     return "\n".join([
         f"run {run_id}: phase {rc.phase}",
         f"  kind           {rc.kind}",
-        f"  N (workers)    {rc.n_workers}   start schedule (minute, workers) {sched}",
+        f"  N (slots)      {rc.n_workers}   start schedule (minute, slots) {sched}",
         f"  window         {rc.window_min:g} min (warm-up {rc.warmup_min:g}, grace {rc.grace_min:g})",
+        f"  sessions       one per task; timeout {rc.task_timeout_min:g} min, budget {rc.task_budget_min:g} min"
+        + (f"; first task {rc.first_task}" if rc.first_task else "") + ("; probe follow-up" if rc.probe_followup else ""),
+        f"  launcher       {cfg.launcher.mode}   launch clone {cfg.path(cfg.launcher.launch_dir)}",
         f"  worker model   {rc.worker_model}",
         f"  reviewer model {rc.reviewer_model}   review job {cfg.reviewer.job}",
         f"  base_ref       {cfg.repo.base_ref}   remote {cfg.repo.remote_url}",
@@ -85,10 +88,10 @@ def cmd_run(args) -> int:
         log.emit("meter", credits_left_usd=args.meter_start, source="operator, before window")
     repo = work_repo(cfg)
     reviewer = CommandReviewer(cfg, repo)
+    launcher = (CommandLauncher(cfg, log, args.run_id) if cfg.launcher.mode == "command"
+                else ManualLauncher(cfg, log, args.run_id, input_fn=input_fn))
     orch = Orchestrator(cfg, args.run_id, run_dir, clock, log, repo, load_tasks(cfg), reviewer,
-                        sandbox_commit=rj["sandbox_commit"], seed=rj["seed"])
-    launcher = (CommandLauncher(cfg, log, args.run_id, run_dir) if cfg.launcher.mode == "command"
-                else ManualLauncher(cfg, log, args.run_id, run_dir))
+                        sandbox_commit=rj["sandbox_commit"], seed=rj["seed"], launcher=launcher)
     run = orch.run_window(launcher)
     print(json.dumps(run, indent=2))
     print(format_summary(summarize(read_events(run_dir / "events.jsonl"))))
@@ -145,7 +148,7 @@ def _parse_value(v: str):
 
 
 def cmd_log(args) -> int:
-    """Operator entries: meter readings, notes, worker_down / worker_restart."""
+    """Operator entries: meter readings, notes, worker_down / worker_restart (worker = slot id, s1..sN)."""
     cfg = _cfg(args)
     run_dir = cfg.path(cfg.run.output_dir) / args.run_id
     fields = {}
@@ -234,7 +237,7 @@ def main(argv=None) -> int:
             p.add_argument("--config", default=str(HERE / cfg_default))
         else:
             p.add_argument("--config", required=True,
-                           help="a phase config: config.t1.toml, config.t2.toml, config.sweep-n1.toml, config.sweep-n12.toml")
+                           help="a phase config: config.t0.toml, config.t1.toml, config.t2.toml, config.sweep-n1.toml, config.sweep-n12.toml")
         p.set_defaults(fn=fn)
         return p
 
@@ -267,7 +270,7 @@ def main(argv=None) -> int:
     p.add_argument("--seed", type=int)
     p.add_argument("--scale", type=float, help="virtual seconds per real second")
     p.add_argument("--window-min", type=float)
-    p.add_argument("--workers", type=int)
+    p.add_argument("--workers", type=int, help="slots")
     p.add_argument("--clean", action="store_true", help="delete the toy sandbox afterwards")
     p.add_argument("--echo", action="store_true", help="print events as they are logged")
     p = add("status", cmd_status)

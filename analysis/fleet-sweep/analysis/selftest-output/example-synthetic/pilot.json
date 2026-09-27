@@ -40,6 +40,9 @@
   "review_tokens_mean": 8783.426470588236,
   "worker_tokens_per_attempt": 143468.21944444446,
   "startup_min": 2.0,
+  "slot_busy_share": null,
+  "session_timeouts": 0,
+  "rework_wait_min": null,
   "runs": [
     "synth-11-T1",
     "synth-11-T2-1",

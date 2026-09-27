@@ -158,6 +158,71 @@ def unit_supply():
     }
 
 
+def unit_sessions():
+    """One cloud session per task (README decisions 39-43): lambda per slot-hour (slot-open time), start-up =
+    launch -> branch first pushed, supply exhausted at the last launch, slot busy share, timeouts, rework wait;
+    the validator's slot checks; synth --sessions end to end."""
+    run = {"run_id": "u-sess", "kind": "sweep", "n_workers": 2, "window_start": iso(T0), "window_end": iso(T0 + 3600),
+           "warmup_min": 10, "grace_min": 10, "task_order_seed": 1, "sandbox_commit": "x", "harness_commit": "x",
+           "worker_model": "x", "reviewer_model": "x", "notes": "phase=t2; worker_model_design=session-per-task"}
+    L = lambda t, sl, task: [_ev(t, "slot_busy", slot=sl),
+                             _ev(t, "session_launch", slot=sl, task=task, session_id="x" + task, attempt_no=1)]
+    C = lambda t, sl, task: _ev(t, "claim", worker=sl, task=task, branch=f"claude/task-{task}")
+    S = lambda t, sl, task, head, a=1: _ev(t, "submit", worker=sl, task=task, branch=f"claude/task-{task}", head=head,
+                                           attempt_no=a, lines_changed=5, files=["a.py"], k=0, m=0)
+    I = lambda t, sl: _ev(t, "slot_idle", slot=sl)
+    ev = [_ev(0, "note", text="task_supply n=4"), _ev(0, "worker_start", worker="s1", session_id=None),
+          _ev(0, "worker_start", worker="s2", session_id=None),
+          *L(0, "s1", "A"), *L(0, "s2", "B"), C(2, "s1", "A"), C(4, "s2", "B"),
+          S(12, "s1", "A", "a1"), I(12, "s1"), *L(12, "s1", "C"), C(13, "s1", "C"),
+          _ev(15, "bounce", task="A", head="a1", cause="rebase_conflict"),
+          _ev(25, "session_timeout", slot="s2", task="B", session_id="xB"), I(25, "s2"),
+          _ev(25, "slot_busy", slot="s2"), _ev(25, "session_message", slot="s2", task="A", session_id="xA", kind="rework"),
+          S(30, "s2", "A", "a2", 2), I(30, "s2"),
+          *L(30, "s2", "D"), _ev(30, "note", text="tasks_exhausted n=4"), C(31, "s2", "D"),
+          S(40, "s1", "C", "c1"), I(40, "s1"), S(50, "s2", "D", "d1"), I(50, "s2")]
+    d = derive_window(run, ev)
+    s = d["summary"]
+    errs, _ = validate_schema.validate_events(list(enumerate(ev, 1)), run)
+    out = {
+        "sessions: hand-built log passes the validator": not errs,
+        "sessions: attempts_full 3 (A at 12, C at 40, D at 50; A's rework is not an attempt)": s["attempts_full"] == 3,
+        "sessions: exhausted at the last launch (min 30); lambda = 1 attempt / (2 slots x 20 min)":
+            abs(s["t_exhausted_min"] - 30) < 1e-9 and s["supply_truncated"] and abs(s["lam"] - 1 / (40 / 60)) < 1e-9
+            and s["attempts"] == 1,
+        "sessions: start-up = launch -> branch first pushed, mean (2 + 4 + 1 + 1) / 4 = 2 min":
+            abs(s["startup_min_mean"] - 2.0) < 1e-9 and s["startup_source"].startswith("session_launch"),
+        "sessions: slot busy share 1 up to exhaustion (never idle for longer than an instant)": abs(s["slot_busy_share"] - 1.0) < 1e-9,
+        "sessions: 1 timeout, before any submission; rework wait 10 min (bounce 15 -> message 25)":
+            s["session_timeouts"] == 1 and s["timeouts_before_submit"] == 1 and abs(s["rework_wait_min_mean"] - 10) < 1e-9,
+        "sessions: 4 launches of 4 distinct tasks": s["session_launches"] == 4 and s["tasks_launched"] == 4,
+    }
+    over = ev[:7] + [_ev(1, "slot_busy", slot="s3")]
+    e2, _ = validate_schema.validate_events(list(enumerate(over, 1)), run)
+    out["validator: more slots busy than n_workers is an error"] = any("more than n_workers" in x for x in e2)
+    msg = ev[:3] + [_ev(1, "session_message", slot="s1", task="Z", session_id=None, kind="rework")]
+    e3, _ = validate_schema.validate_events(list(enumerate(msg, 1)), run)
+    out["validator: a message to a task never launched is an error"] = any("never launched" in x for x in e3)
+    t0 = dict(run, notes="phase=t0")
+    try:
+        pilot_params([derive_window(dict(t0, kind="trial"), ev)])
+        out["derive --pilot refuses a T0 run"] = False
+    except SystemExit:
+        out["derive --pilot refuses a T0 run"] = True
+    truth = make_truth("carnot", **{**V4_TRUTH, "n_tasks": 220, "per_task_sessions": True})
+    runs = simulate_study(truth, (1, 12), seed=77, reps=1, with_pilot=True, pilot_design="v4")
+    bad = []
+    for r, e in runs:
+        er, _ = validate_schema.validate_events(list(enumerate(e, 1)), r)
+        bad += er
+    S2 = [d["summary"] for d in derive_all(runs)]
+    out["synth --sessions: every run validates, no slot over-booked"] = not bad
+    out["synth --sessions: derive gives lambda, start-up and busy share for every window"] = all(
+        x["session_launches"] > 0 and x["startup_min_mean"] == x["startup_min_mean"] and x["slot_busy_share"] > 0.9
+        for x in S2 if x["n_workers"] >= 1 and x["kind"] != "trial")
+    return out
+
+
 def unit_v41():
     """PLAN-v4.1: the supply flag at minute 110, P1 / O2 with and without flagged windows, the calibration-log reader
     (abort rule 4 only), and derive --pilot refusing non-live runs."""
@@ -473,10 +538,11 @@ def main():
         u = unit_derive()
         us = unit_supply()
         v41 = unit_v41()
+        se = unit_sessions()
         c = unit_cli(outdir)
-        T["unit"] = {**u, **us, **v41, **c}
+        T["unit"] = {**u, **us, **v41, **se, **c}
         md += ["## U. Unit checks", ""]
-        for k, v in {**u, **us, **v41, **c}.items():
+        for k, v in {**u, **us, **v41, **se, **c}.items():
             if k == "score stderr":
                 md.append(f"- score stderr: `{v}`")
                 continue

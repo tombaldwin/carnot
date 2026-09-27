@@ -7,7 +7,9 @@
 Errors (exit status 1): not JSON, unknown type, bad timestamp, missing or unexpected fields,
 wrong value types, bad enum values, time going backwards, overlapping reviews, attempt_no out of
 sequence, m > k, a merge/hidden_pre on a head that was never approved, a merge without a green
-tests_post. Warnings (exit 0): things the analysis tolerates but a reader should know about,
+tests_post; for session-per-task logs: slot_busy on a busy slot / slot_idle on an idle one, a
+session_launch or session_message on a slot that is not busy, a message or timeout for a task that was
+never launched, and more slots busy at once than run.json's n_workers (the number of slots). Warnings (exit 0): things the analysis tolerates but a reader should know about,
 e.g. events after window_end + grace, reviews still open at the end, no reviewer_busy/idle events.
 
 Fields follow SCHEMA.md exactly, with the nullable values the harness uses (session_id, new_head,
@@ -29,8 +31,12 @@ FIELDS = {
     "worker_start": {"worker": S, "session_id": S + "?"},
     "worker_down": {"worker": S, "reason": S},
     "worker_restart": {"worker": S, "reason": S},
+    "slot_busy": {"slot": S}, "slot_idle": {"slot": S},
+    "session_launch": {"slot": S, "task": S, "session_id": S + "?", "attempt_no": I},
+    "session_message": {"slot": S, "task": S, "session_id": S + "?", "kind": S},
+    "session_timeout": {"slot": S, "task": S, "session_id": S + "?"},
     "claim": {"worker": S, "task": S, "branch": S},
-    "claim_race": {"worker": S, "task": S},
+    "claim_race": {"worker": S, "task": S},   # retired with one session per task; older logs only
     "submit": {"worker": S, "task": S, "branch": S, "head": S, "attempt_no": I, "lines_changed": I,
                "files": L, "k": I, "m": I},
     "review_start": {"task": S, "head": S, "queue_depth": I},
@@ -49,7 +55,8 @@ FIELDS = {
 }
 ENUMS = {("review_end", "verdict"): {"approve", "request_changes"},
          ("bounce", "cause"): {"review", "rebase_conflict", "visible_fail", "escaped_defect",
-                               "integration_failure"}}
+                               "integration_failure"},
+         ("session_message", "kind"): {"rework", "probe"}}
 RUN_FIELDS = {"run_id": S, "kind": S, "n_workers": I, "window_start": S, "window_end": S,
               "warmup_min": N, "grace_min": N, "task_order_seed": I, "sandbox_commit": S,
               "harness_commit": S, "worker_model": S, "reviewer_model": S, "notes": S}
@@ -97,6 +104,8 @@ def check_event(ev):
     for (et, f), allowed in ENUMS.items():
         if typ == et and ev.get(f) not in allowed:
             errs.append(f"{typ}: {f}={ev.get(f)!r} not in {sorted(allowed)}")
+    if typ == "session_launch" and not errs and ev["attempt_no"] < 1:
+        errs.append("session_launch: attempt_no < 1")
     if typ == "submit" and not errs:
         if ev["attempt_no"] < 1:
             errs.append("submit: attempt_no < 1")
@@ -134,6 +143,9 @@ def validate_events(events, run=None):
     attempts = {}
     open_review_heads = set()
     types = set()
+    busy = {}
+    launched = set()
+    n_slots = run.get("n_workers") if run and not check_run(run) else None
     end_iso = None
     if run and not check_run(run):
         end_iso = iso(parse_t(run["window_end"]) + 60 * run["grace_min"])
@@ -181,6 +193,25 @@ def validate_events(events, run=None):
                 errs.append(f"line {i}: merge of a head that was never approved")
             if key not in green:
                 errs.append(f"line {i}: merge without a green tests_post on that head")
+        elif typ == "slot_busy":
+            if busy.get(ev["slot"]):
+                errs.append(f"line {i}: slot_busy for {ev['slot']}, which is already busy")
+            busy[ev["slot"]] = True
+            if n_slots is not None and sum(busy.values()) > n_slots:
+                errs.append(f"line {i}: {sum(busy.values())} slots busy, more than n_workers = {n_slots}")
+        elif typ == "slot_idle":
+            if not busy.get(ev["slot"]):
+                errs.append(f"line {i}: slot_idle for {ev['slot']}, which is not busy")
+            busy[ev["slot"]] = False
+        elif typ == "session_launch":
+            if not busy.get(ev["slot"]):
+                errs.append(f"line {i}: session_launch on slot {ev['slot']} without slot_busy")
+            launched.add(ev["task"])
+        elif typ in ("session_message", "session_timeout"):
+            if ev["task"] not in launched:
+                errs.append(f"line {i}: {typ} for task {ev['task']} that was never launched")
+            if typ == "session_message" and not busy.get(ev["slot"]):
+                errs.append(f"line {i}: session_message on slot {ev['slot']} without slot_busy")
     if reviewing is not None:
         warns.append(f"review of {reviewing} still open at end of log (reviewer busy time is clipped)")
     if "review_end" in types and not ({"reviewer_busy", "reviewer_idle"} & types):

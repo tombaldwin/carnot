@@ -1,29 +1,35 @@
-<!-- DRAFT worker prompt. The harness depends on the git protocol below exactly. Pre-register the final text. -->
-You are worker {worker} in a team of agents working on this repository. Coordinate through git only.
+<!-- Per-task session prompt (one cloud session per task). The harness fills the {placeholders} and passes the
+text as the session's first prompt. The harness depends on the branch name, the READY: message and the push.
+DRAFT until T0 (harness/README.md, "T0 operator checklist"); pre-register the final text. -->
+You are working alone on one task in this repository. Nobody will answer questions: never ask any. If
+something is unclear, make the most reasonable choice, say so in your commit message, and carry on.
 
-The task list is `TASKS.json` on `main`, in the order to take tasks. Loop until told to stop:
+## Task {task_id}: {title}
 
-1. **Rework first.** `git fetch origin`. For each branch `claude/task-<id>` you claimed, if its
-   newest commit's message starts with `FEEDBACK:`, read `FEEDBACK.md` on that branch, fix the
-   change (update from `origin/main` if it says so), delete `FEEDBACK.md`, commit with a message
-   starting `READY:` and ending with the trailer line `Worker: {worker}`, and push the branch.
+{text}
 
-   **Conflicts with `main` are common and expected.** Many tasks add code at the same places, and
-   other workers' changes are merged to `main` all the time, so a change that was fine when you
-   wrote it may no longer apply. When `FEEDBACK.md` says your change does not apply cleanly to the
-   current main (a merge conflict), resolve it by merging main into your task branch:
-   `git fetch origin`, `git merge origin/main`, fix every conflicted file so that both your change
-   and what is now on `main` are kept and work, run the visible tests, then delete `FEEDBACK.md`,
-   commit with a `READY:` message and the `Worker: {worker}` trailer, and push. Do not rebase or
-   force-push, and do not drop the other changes on `main` to make yours apply.
-2. **Claim.** Otherwise take the first task in `TASKS.json` that has no `claude/task-<id>` branch on
-   origin. Create an empty commit on `origin/main` with message `CLAIM: task-<id>` and the trailer
-   `Worker: {worker}`, and push it as a new branch `claude/task-<id>` (never force-push). If the
-   push is rejected because the branch exists, push the same commit to
-   `claude/race-<id>-{worker}` and try the next task.
-3. **Work.** Implement the task on that branch. Run the visible tests (`python -m pytest -q`).
-4. **Submit.** Commit with a message starting `READY:` and the trailer `Worker: {worker}`, push, and
-   go straight back to step 1. Do not wait for review.
+Acceptance criteria:
+{acceptance}
 
-Never push to `main`, never force-push, never touch another worker's branch, never edit
-`TASKS.json`.
+## How to work (follow exactly; an automated harness watches the repository)
+
+1. Run `git fetch origin`, create the branch `{branch}` from `origin/main`, and push it at once, before any
+   other work: `git checkout -b {branch} origin/main && git push -u origin {branch}`. Work only on this
+   branch.
+2. Implement the task. Change only what the task needs.
+3. Run the visible tests, `{visible_cmd}`, and make them pass.
+4. Commit. Your final commit message must start with `READY: {task_id}` (for example
+   `READY: {task_id} <one-line summary>`).
+5. Run `git fetch origin`. If `origin/main` has moved since you branched, merge it into your branch
+   (`git merge origin/main`), keep both your change and everything now on `main`, re-run the visible tests,
+   and make the merge commit's message start with `READY: {task_id}` too. Never rebase and never force-push.
+6. Push the branch (`git push origin {branch}`), then stop. Do not wait for a review and do not start
+   anything else.
+
+Time budget: about {budget_min} minutes. If you are running out of time, commit and push what you have with
+a `READY: {task_id}` message rather than nothing.
+
+Never push to `main` or to any other branch, never force-push, and never edit `TASKS.json`.
+
+If you later receive a message about this task, it is review feedback: follow it on the same branch, finish
+with a new commit whose message starts with `READY: {task_id}`, push, and stop.

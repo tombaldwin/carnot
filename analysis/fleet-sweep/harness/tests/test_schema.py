@@ -11,10 +11,13 @@ def ev(type_, t=T, **f):
 
 
 GOOD = [
-    ev("worker_start", worker="w1", session_id="s1"),
-    ev("claim", worker="w1", task="001", branch="claude/task-001"),
-    ev("submit", worker="w1", task="001", branch="claude/task-001", head="a", attempt_no=1,
+    ev("worker_start", worker="s1", session_id=None),
+    ev("slot_busy", slot="s1"),
+    ev("session_launch", slot="s1", task="001", session_id="sess_1", attempt_no=1),
+    ev("claim", worker="s1", task="001", branch="claude/task-001"),
+    ev("submit", worker="s1", task="001", branch="claude/task-001", head="a", attempt_no=1,
        lines_changed=5, files=["x.py"], k=0, m=0),
+    ev("slot_idle", slot="s1"),
     ev("reviewer_busy"),
     ev("review_start", task="001", head="a", queue_depth=0),
     ev("review_end", task="001", head="a", verdict="approve", reason="ok", tokens_in=None,
@@ -53,17 +56,30 @@ def test_structural_errors():
     assert check_event(ev("nonsense"))
 
 
+def test_session_events(tmp_path):
+    assert check_event(ev("session_message", slot="s1", task="1", session_id=None, kind="nudge"))
+    assert not check_event(ev("session_message", slot="s1", task="1", session_id="x", kind="rework"))
+    assert check_event(ev("session_launch", slot="s1", task="1", session_id="x"))           # attempt_no missing
+    assert not check_event(ev("session_timeout", slot="s1", task="1", session_id=None))
+    twice = GOOD[:2] + [ev("slot_busy", slot="s1")]
+    assert any("already busy" in e for e in validate_events(_write(tmp_path, twice)))
+    unl = GOOD[:1] + [ev("session_timeout", slot="s1", task="009", session_id=None)]
+    assert any("never launched" in e for e in validate_events(_write(tmp_path, unl)))
+    nob = GOOD[:1] + [ev("session_launch", slot="s1", task="1", session_id=None, attempt_no=1)]
+    assert any("without slot_busy" in e for e in validate_events(_write(tmp_path, nob)))
+
+
 def test_semantic_errors(tmp_path):
     bad = list(GOOD)
-    bad.insert(3, ev("submit", worker="w1", task="001", branch="b", head="z", attempt_no=3,
+    bad.insert(5, ev("submit", worker="w1", task="001", branch="b", head="z", attempt_no=3,
                      lines_changed=1, files=[], k=0, m=0))
     errs = validate_events(_write(tmp_path, bad))
     assert any("attempt_no" in e for e in errs)
-    two = GOOD[:5] + [ev("review_start", task="002", head="q", queue_depth=0)]
+    two = GOOD[:8] + [ev("review_start", task="002", head="q", queue_depth=0)]
     assert any("serial" in e for e in validate_events(_write(tmp_path, two)))
     back = [ev("note", text="a"), ev("note", t="2026-10-01T09:00:00.000Z", text="b")]
     assert any("backwards" in e for e in validate_events(_write(tmp_path, back)))
-    unapproved = GOOD[:3] + [ev("merge", task="001", head="a", main_sha="b")]
+    unapproved = GOOD[:5] + [ev("merge", task="001", head="a", main_sha="b")]
     assert any("never approved" in e for e in validate_events(_write(tmp_path, unapproved)))
 
 

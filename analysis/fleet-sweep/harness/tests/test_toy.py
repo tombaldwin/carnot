@@ -12,11 +12,21 @@ def test_toy_tasks_validate(make_env):
     assert all(r["ok"] for r in rows), [r for r in rows if not r["ok"]]
 
 
+def test_reset_first_task_goes_first(make_env):
+    import dataclasses as dc
+    from harness.reset import reset
+    env = make_env()
+    cfg = dc.replace(env.cfg, run=dc.replace(env.cfg.run, first_task="007"))
+    info = reset(cfg, "t0", 5, env.run_dir.parent / "t0")
+    assert info["task_order"][0] == "007" and sorted(info["task_order"]) == sorted(env.orch.tasks)
+
+
 def test_reset_restores_main_and_deletes_task_branches(make_env):
     from harness.reset import reset
     env = make_env()
-    w = env.worker("w1")
-    w.fetch(); w.try_claim("001"); w.submit("001")
+    s = env.session("001", "s1")
+    s.submit()
+    s.submit(branch="claude/some-name", message="READY: 001")
     assert any(b.startswith("claude/task-") for b in remote_heads(env.repo))
     info = reset(env.cfg, "again", 99, env.run_dir.parent / "again")
     heads = remote_heads(env.repo)

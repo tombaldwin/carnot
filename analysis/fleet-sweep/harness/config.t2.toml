@@ -1,9 +1,9 @@
-# T2 (PLAN-v4 s2): pilot, one of eight separate 60-min windows of 1 worker.
+# T2 (PLAN-v4 s2): pilot, one of eight separate 60-min windows of 1 slot.
 # One config per phase; `python -m harness run` refuses a config whose kind / n_workers / window /
-# warm-up / grace / start schedule / models differ from the phase's pre-registered shape
+# warm-up / grace / start schedule / session timeout / first task / models differ from the phase's pre-registered shape
 # (harness/config.py PHASES), prints them, and asks for confirmation (or --yes).
 # Everything marked UNVERIFIED must be checked before a real run; `run` refuses to start while a
-# template it needs still has verified = false. Only [run] differs between the four phase files.
+# template it needs still has verified = false. Only [run] differs between the five phase files.
 
 [run]
 phase = "t2"
@@ -13,6 +13,10 @@ window_min = 60
 warmup_min = 10
 grace_min = 10
 start_schedule = []
+task_timeout_min = 25          # no READY this long after a launch / rework message: abandoned
+task_budget_min = 20           # stated in the session prompt
+first_task = ""
+probe_followup = false
 task_order_seed = 1234          # pass --seed per window to `reset`; the seed used is recorded
 worker_model = "claude-haiku-4-5"     # Haiku 4.5 (model id string UNVERIFIED)
 reviewer_model = "claude-opus-5-5"    # Opus 5.5 (model id string UNVERIFIED)
@@ -23,10 +27,10 @@ grace_reviews = true            # reviews of already-submitted changes continue 
 
 [repo]
 remote_url = "git@github.com:OWNER/carnot-sandbox.git"   # FILL IN: the private sandbox repo (placeholder)
-work_dir = "../work/sandbox"    # orchestrator's own clone
+work_dir = "/Users/tom/git/carnot-sandbox-tasks/work/sandbox"    # orchestrator's own clone
 base_ref = "sandbox-v1"         # frozen tag main is reset to (check with `reset` against the remote before T1)
-branch_prefix = "claude/task-"
-race_prefix = "claude/race-"
+branch_prefix = "claude/task-"   # each session is told to create claude/task-<id>
+accept_other_claude_branches = true   # a READY: <id> commit on another claude/* branch still counts (T0 checks naming)
 tasks_file_name = "TASKS.json"
 
 [tasks]
@@ -62,11 +66,29 @@ retry_backoff_s = 60
 max_downtime_min = 10
 
 [launcher]
-mode = "manual"                 # manual: operator starts sessions by hand; command: start_command below
-# UNVERIFIED: how to start one cloud session from a script, and how to stop it.
-# Placeholders: {worker} {prompt_file} {remote_url} {model} {run_id}; stop: {worker} {session_id}
-start_command = []
-stop_command = []
-session_id_regex = "(?P<session_id>\\S+)"   # UNVERIFIED
+# One cloud session per task (harness README, "Worker model"). manual: the harness prints each launch /
+# follow-up command and the operator runs it and pastes the session id (T0, and until verified);
+# command: the templates below. `run` refuses mode = "command" while verified / followup_verified are false.
+mode = "manual"
+launch_dir = "/Users/tom/git/carnot-sandbox-tasks/work/launch"   # local clone whose origin is [repo] remote_url; sessions launch from its main
+# Documented: `claude --cloud "<prompt>"` clones this directory's GitHub remote at the current branch and does
+# not return at once. UNVERIFIED (T0): the output, the session id, how to detach.
+# Placeholders: {prompt} {prompt_file} {model} {name} {run_id} {slot} {task}
+launch_command = ["claude", "--cloud", "{prompt}", "--model", "{model}", "--name", "{name}"]
+session_id_regex = "(?P<session_id>session_[A-Za-z0-9]{8,})"   # UNVERIFIED
+detach = "on_id"                # UNVERIFIED: on_id | after_s | exit
+detach_after_s = 120
+launch_timeout_s = 600
+detach_signal = "none"          # UNVERIFIED: none | int | term (what to do with a CLI still running after detach)
+launch_retries = 1
+# Documented: `claude -p "<message>" --cloud <session-id>` queues a message and exits without waiting. UNVERIFIED
+# in this harness until T0. Placeholders: {message} {message_file} {session_id} {slot} {task}
+followup_command = ["claude", "-p", "{message}", "--cloud", "{session_id}"]
+followup_stdin = false
+followup_timeout_s = 120
+stop_command = []               # none documented
 verified = false
+followup_verified = false
 worker_prompt = "prompts/worker.md"
+rework_prompt = "prompts/rework.md"
+prompt_dir = ""                 # FILL IN: a PRIVATE dir ("" = session-prompts/ beside [tasks] task_file); never this repo

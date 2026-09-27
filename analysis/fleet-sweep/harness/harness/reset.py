@@ -1,7 +1,8 @@
 """Reset the sandbox remote before a window.
 
-main := base_ref, every ``claude/task-*`` (and race-marker) branch deleted, and
-the window's seeded task order committed to main as TASKS.json.
+main := base_ref, every ``claude/*`` branch deleted (task branches, and any a session named itself), and
+the window's seeded task order committed to main as TASKS.json (with ``[run] first_task``, T0's fixed task,
+moved to the front). The orchestrator hands tasks to slots in this order.
 """
 from __future__ import annotations
 
@@ -40,13 +41,17 @@ def reset(cfg: Config, run_id: str, seed: int, run_dir: Path) -> dict:
     if not base:
         raise SystemExit(f"reset: base_ref {cfg.repo.base_ref!r} not found in {cfg.repo.remote_url}")
 
-    doomed = [b for b in remote_heads(repo)
-              if b.startswith(cfg.repo.branch_prefix) or b.startswith(cfg.repo.race_prefix)]
+    doomed = [b for b in remote_heads(repo) if b.startswith("claude/")]
     for i in range(0, len(doomed), 50):
         repo.run("push", "-q", "origin", "--delete", *doomed[i:i + 50])
 
     tasks = load_tasks(cfg)
     order = seeded_order(tasks, seed)
+    first = cfg.run.first_task
+    if first:
+        if first not in tasks:
+            raise SystemExit(f"reset: [run] first_task {first!r} is not in the task catalogue")
+        order = [tasks[first]] + [t for t in order if t.id != first]
     content = tasks_file_content(order, seed, run_id)
 
     repo.run("checkout", "-q", "--detach", "--force", base)
@@ -58,7 +63,7 @@ def reset(cfg: Config, run_id: str, seed: int, run_dir: Path) -> dict:
     repo.run("push", "-q", "--force", "origin", "HEAD:refs/heads/main")
     repo.run("fetch", "-q", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*")
 
-    left = [b for b in remote_heads(repo) if b.startswith(cfg.repo.branch_prefix)]
+    left = [b for b in remote_heads(repo) if b.startswith("claude/")]
     if left or repo.sha("origin/main") != tasks_commit:
         raise SystemExit(f"reset did not take: leftover branches {left}")
 

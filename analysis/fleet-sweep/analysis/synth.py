@@ -24,6 +24,14 @@ generator:
 * Serial merge queue: hidden_pre -> rebase -> tests_post -> merge, with CI times.
 * Workers stop at window_end; the reviewer and merge queue run to window_end + grace; whatever is
   still open then is simply left open (censoring happens in derive.py, as it will for real logs).
+* ``per_task_sessions = true`` (``--sessions``) switches to the harness's current worker model, one cloud
+  session per task: N slots, each running one session at a time; the harness hands tasks out in the seeded
+  order (``slot_busy`` + ``session_launch``); a session pushes its branch (``claim``) after
+  ``session_startup_min`` and READY after its work time; READY frees the slot; a bounce queues rework, which
+  goes to the next free slot before any new task (``session_message``, kind rework) and to the same session;
+  a session with no READY within ``task_timeout_min`` is abandoned (``session_timeout``). The default
+  (False) is the long-running-worker model the operating characteristics were computed with; its random
+  streams are unchanged.
 
 Usage (writes run directories under --out):
 
@@ -86,6 +94,9 @@ class Truth:
     usage_every_min: float = 10.0
     n_files: int = 40
     n_tasks: int = 120
+    per_task_sessions: bool = False   # True: one session per task in N slots (the harness's worker model)
+    session_startup_min: float = 1.0  # sessions: launch -> branch pushed (provisioning, clone), exp. mean
+    task_timeout_min: float = 25.0    # sessions: no READY this long after launch / rework message: abandoned
 
     def X(self, n):
         if self.family in ("carnot", "usl"):
@@ -220,7 +231,10 @@ def simulate(truth: Truth, n_workers: int, *, seed: int, window_min=90.0, warmup
         if t + dur < w["end"]:
             at(t + dur, do_submit, w, task.id)
 
-    def do_submit(t, w, task_id):
+    def do_submit(t, w, task_id, token=None):
+        if truth.per_task_sessions:
+            if w.get("token") != token or t >= w["end"]:
+                return  # timed out, or the window closed first
         ch = changes[task_id]
         ch["attempt"] += 1
         ch["head"] = _hex(rng)
@@ -241,6 +255,9 @@ def simulate(truth: Truth, n_workers: int, *, seed: int, window_min=90.0, warmup
         reviewq.append(task_id)
         if not rev["busy"]:
             start_review(t)
+        if truth.per_task_sessions:
+            slot_free(t, w)
+            return
         if ch["attempt"] == 1 or truth.rework_uses_worker:
             worker_next(w, t)
 
@@ -345,6 +362,14 @@ def simulate(truth: Truth, n_workers: int, *, seed: int, window_min=90.0, warmup
     def bounce(t, task_id, cause):
         ch = changes[task_id]
         emit(t, "bounce", task=task_id, head=ch["head"], cause=cause)
+        if truth.per_task_sessions:
+            if not truth.rework_returns or ch.get("abandoned"):
+                ch["inflight"] = False
+                return
+            if task_id not in rework_q:
+                rework_q.append(task_id)
+            dispatch(t)
+            return
         if not truth.rework_returns:
             ch["inflight"] = False  # abandoned
             return
@@ -371,9 +396,89 @@ def simulate(truth: Truth, n_workers: int, *, seed: int, window_min=90.0, warmup
         if truth.usage_every_min > 0:
             at(t + truth.usage_every_min * 60, usage, w)
 
+    # ---------------------------------------------------------------- one session per task (slots)
+    rework_q = deque()
+
+    def slot_free(t, w):
+        w["busy"], w["token"] = None, None
+        emit(t, "slot_idle", slot=w["id"])
+        dispatch(t)
+
+    def occupy(t, w, task_id):
+        seq[0] += 1
+        tok = seq[0]
+        w["busy"], w["token"] = task_id, tok
+        emit(t, "slot_busy", slot=w["id"])
+        at(t + truth.task_timeout_min * 60, session_timeout, w, tok)
+        return tok
+
+    def session_timeout(t, w, token):
+        if w.get("token") != token or t >= w["end"]:
+            return
+        task_id = w["busy"]
+        ch = changes[task_id]
+        emit(t, "session_timeout", slot=w["id"], task=task_id, session_id=ch["session"])
+        ch["abandoned"] = True
+        if ch["attempt"] == 0 or not any(x == task_id for x in reviewq):
+            ch["inflight"] = False
+        slot_free(t, w)
+
+    def dispatch(t):
+        for w in workers:
+            if not (w["start"] <= t < w["end"]) or w.get("busy") or not w.get("open"):
+                continue
+            while rework_q and changes[rework_q[0]].get("abandoned"):
+                rework_q.popleft()
+            if rework_q:
+                task_id = rework_q.popleft()
+                ch = changes[task_id]
+                tok = occupy(t, w, task_id)
+                emit(t, "session_message", slot=w["id"], task=task_id, session_id=ch["session"], kind="rework")
+                mean = truth.rework_min * 60
+                dur = mean if truth.rework_dist == "fixed" else gamma_time(mean, 1.0)
+                dur /= (drag(t) * mult)
+                at(t + dur, do_submit, w, task_id, tok)
+                continue
+            if ptr[0] >= len(order):
+                return
+            task = order[ptr[0]]
+            ptr[0] += 1
+            changes[task.id] = dict(task=task, owner=w, attempt=0, head=None, inflight=False, defective=False,
+                                    collided=False, merged=False, depth=0, session=f"session_{_hex(rng, 8)}")
+            tok = occupy(t, w, task.id)
+            emit(t, "session_launch", slot=w["id"], task=task.id, session_id=changes[task.id]["session"], attempt_no=1)
+            if ptr[0] == len(order):
+                emit(t, "note", text=f"tasks_exhausted n={len(order)}")
+            t_up = t + rng.expovariate(1 / max(truth.session_startup_min * 60, 1e-9))
+            at(t_up, session_branch, w, task.id, tok)
+            rate = truth.lam1 * drag(t) * mult / 3600.0
+            at(t_up + gamma_time(1 / rate, truth.work_cv), do_submit, w, task.id, tok)
+
+    def session_branch(t, w, task_id, token):
+        if w.get("token") == token and t < w["end"]:
+            emit(t, "claim", worker=w["id"], task=task_id, branch=f"claude/task-{task_id}")
+
+    def open_slot(t, w):
+        w["open"] = True
+        emit(t, "worker_start", worker=w["id"], session_id=None)
+        if truth.usage_every_min > 0:
+            at(t + truth.usage_every_min * 60, usage, w)
+        dispatch(t)
+
+    def close_slot(t, w):
+        if w.get("busy"):
+            w["busy"], w["token"] = None, None
+            emit(t, "slot_idle", slot=w["id"])
+
     emit(0.0, "note", text=f"task_supply n={len(order)}")
-    for w in workers:
-        at(w["start"] + rng.uniform(0, 5), start_worker, w)
+    if truth.per_task_sessions:
+        for w in workers:
+            w["id"] = "s" + w["id"][1:]
+            at(w["start"], open_slot, w)
+            at(w["end"], close_slot, w)
+    else:
+        for w in workers:
+            at(w["start"] + rng.uniform(0, 5), start_worker, w)
 
     while heap:
         t, _, fn, args = heapq.heappop(heap)
@@ -382,6 +487,9 @@ def simulate(truth: Truth, n_workers: int, *, seed: int, window_min=90.0, warmup
         fn(t, *args)
 
     out.sort(key=lambda x: x[0])  # stable: same-time events keep emission order
+    if truth.per_task_sessions:
+        # the harness logs worker_start at the slot's opening, before anything happens on it
+        out.sort(key=lambda x: (x[0], x[1]["type"] != "worker_start"))
     run = {"run_id": run_id, "kind": kind, "n_workers": n_workers, "window_start": iso(t0),
            "window_end": iso(t0 + end_s), "warmup_min": warmup_min, "grace_min": grace_min,
            "task_order_seed": int(order_seed), "sandbox_commit": "synthetic", "harness_commit": "synthetic",
@@ -460,6 +568,8 @@ def main():
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--v4", action="store_true",
                     help="PLAN-v4 design: sizes 1 12, 3 windows each (ABBAAB) of 120 min, v4 pilot (T1 1->12, 8 x 60-min T2)")
+    ap.add_argument("--sessions", action="store_true",
+                    help="one cloud session per task in N slots (the harness's worker model; sets per_task_sessions)")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     if a.v4:
@@ -468,6 +578,8 @@ def main():
     for kv in a.set:
         k, v = kv.split("=", 1)
         ov[k] = _coerce(v)
+    if a.sessions:
+        ov["per_task_sessions"] = True
     truth = make_truth(a.truth, **ov)
     runs = simulate_study(truth, a.sizes, seed=a.seed, reps=a.reps, window_min=a.window_min,
                           with_pilot=not a.no_pilot, pilot_design="v4" if a.v4 else "v3")

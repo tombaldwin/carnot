@@ -1,11 +1,22 @@
-"""Watcher, review queue, merge queue and window control.
+"""Slots and sessions, watcher, review queue, merge queue and window control.
+
+Worker model (harness README, "Worker model: one cloud session per task"): N **slots**, each running one
+cloud session at a time. A session works on exactly one task, whose text is in its launch prompt.
 
 Threads (all share one EventLog and one local clone of the sandbox remote):
 
-  watcher   git fetch every poll interval; logs claim / claim_race / submit
-  prep      runs the visible tests on each submitted head (for the review packet)
-  reviewer  one review at a time, FIFO, never shows the reviewer the queue
-  merger    serial merge queue: hidden_pre -> rebase -> tests_post -> merge
+  dispatcher  hands work to free slots: first queued rework (a follow-up message to the task's own
+              session), else the next task in the window's seeded order (a new session); abandons a
+              session with no READY within task_timeout_min of its launch / message
+  launch-*    one short-lived thread per launch or follow-up (a launch can take minutes)
+  watcher     git fetch every poll interval; logs claim (branch first pushed) and submit (a READY: commit);
+              a READY frees the task's slot
+  prep        runs the visible tests on each submitted head (logged as visible_pre)
+  reviewer    one review at a time, FIFO, never shows the reviewer the queue
+  merger      serial merge queue: hidden_pre -> rebase -> tests_post -> merge
+
+The orchestrator never pushes to a session's branch: a bounce is queued as rework and delivered as a
+follow-up message when a slot frees.
 """
 from __future__ import annotations
 
@@ -26,33 +37,32 @@ from .clock import Clock, iso
 from .config import Config
 from .events import EventLog
 from .gitops import GitError, Repo
+from .launchers import LaunchError, probe_message, rework_message, task_prompt
 from .review import ReviewError, ReviewPacket, Reviewer, make_packet
 from .tasks import Task, TestResult, TestRunner
 
-FEEDBACK_FILE = "FEEDBACK.md"
+FEEDBACK_FILE = "FEEDBACK.md"   # no longer written; still excluded from diffs and from main, defensively
 READY_RE = re.compile(r"^READY:", re.M)
-WORKER_RE = re.compile(r"^Worker:\s*(\S+)\s*$", re.M | re.I)
+READY_ID_RE = re.compile(r"^READY:\s*(?:task[-_ ]?)?([A-Za-z0-9_.-]+)")
+PROBE_RE = re.compile(r"^PROBE:")
 
-# FEEDBACK.md wording by cause (PLAN-v3 s5: say the cause, never name hidden tests).
+# Rework message wording by cause (PLAN-v3 s5: say the cause, never name hidden tests).
 CAUSE_TEXT = {
     "review": "The reviewer requested changes.",
     "rebase_conflict": (
         "Your change does not apply cleanly to the current main (merge conflict). "
-        "Update your branch from the current main, resolve the conflicts, and re-submit."),
+        "Merge the current main into your branch, resolve the conflicts, and re-submit."),
     "visible_fail": (
         "After your change was applied to the current main, the visible test suite failed. "
-        "Update your branch from the current main, make the visible tests pass, and re-submit."),
+        "Merge the current main into your branch, make the visible tests pass, and re-submit."),
     "escaped_defect": (
         "Acceptance check failed. Your change does not yet meet the task's acceptance criteria. "
         "Re-read the task text and acceptance criteria, fix the change, and re-submit."),
     "integration_failure": (
         "Acceptance check failed after your change was applied to the current main "
         "(it passed on your branch as submitted). Your change interacts with work merged since "
-        "you started. Update your branch from the current main, fix the interaction, and re-submit."),
+        "you started. Merge the current main into your branch, fix the interaction, and re-submit."),
 }
-FEEDBACK_FOOTER = (
-    "When you have fixed it: delete FEEDBACK.md, commit with a message starting `READY:` "
-    "(keep the `Worker:` trailer), and push this branch. The change will be reviewed again.")
 
 
 @dc.dataclass
@@ -76,35 +86,65 @@ class TaskState:
     branch: str
     worker: str
     last_head: str
-    ignored: bool = False        # claimed after the window closed
     submits: int = 0
     merged: bool = False
     files: list[str] = dc.field(default_factory=list)
 
 
+@dc.dataclass
+class Slot:
+    id: str
+    open: bool = False
+    task: str | None = None            # task whose session occupies the slot
+    since: dt.datetime | None = None   # launch / message time: the session timeout runs from here
+    kind: str | None = None            # launch | rework | probe
+
+
+@dc.dataclass
+class Session:
+    task: str
+    slot: str | None                    # slot it occupies now (None: waiting for review / rework)
+    last_slot: str
+    session_id: str | None = None
+    launches: int = 0
+    status: str = "starting"            # starting | working | submitted | rework_queued | probe | abandoned
+    feedback: collections.deque = dc.field(default_factory=collections.deque)   # messages to deliver
+    probe_sent_at: dt.datetime | None = None
+
+
 class Orchestrator:
     def __init__(self, cfg: Config, run_id: str, run_dir: Path, clock: Clock, log: EventLog,
                  repo: Repo, tasks: dict[str, Task], reviewer: Reviewer,
-                 sandbox_commit: str, seed: int, kind: str | None = None):
+                 sandbox_commit: str, seed: int, kind: str | None = None, launcher=None):
         self.cfg, self.run_id, self.run_dir = cfg, run_id, run_dir
         self.clock, self.log, self.repo, self.tasks, self.reviewer = clock, log, repo, tasks, reviewer
         self.sandbox_commit, self.seed = sandbox_commit, seed
         self.kind = kind or cfg.run.kind
+        self.launcher = launcher
         self.tests = TestRunner(cfg, repo)
         self.pfx = cfg.repo.branch_prefix
-        self.rpfx = cfg.repo.race_prefix
 
         self.lock = threading.RLock()
         self.cv = threading.Condition(self.lock)
         self.states: dict[str, TaskState] = {}
-        self.inflight: dict[str, list[str]] = {}     # task -> files; submitted, not merged
+        self.branch_heads: dict[str, str] = {}       # attributed claude/* branch -> last seen sha
+        self.unattributed: set[str] = set()
+        self.inflight: dict[str, list[str]] = {}     # task -> files; submitted, not merged, not abandoned
         self.prep_q: collections.deque[Change] = collections.deque()
         self.review_q: collections.deque[Change] = collections.deque()
         self.merge_q: collections.deque[Change] = collections.deque()
         self.reviewing: Change | None = None
         self.merging: Change | None = None
         self.merged_tasks: list[str] = []
-        self.seen_races: set[str] = set()
+        # slots and sessions
+        self.slots: dict[str, Slot] = {f"s{i}": Slot(f"s{i}") for i in range(1, cfg.run.n_workers + 1)}
+        self.sessions: dict[str, Session] = {}
+        self.rework_q: collections.deque[str] = collections.deque()
+        self.order: list[str] = self._task_order()
+        self.pending: collections.deque[str] = collections.deque(self.order)
+        self.supply_ids: set[str] = set(self.order)
+        self.exhausted_logged = False
+        self.probe_done = False
         self.phase = "setup"                          # setup | window | grace | done
         self.stop = threading.Event()
         self.threads: list[threading.Thread] = []
@@ -114,23 +154,20 @@ class Orchestrator:
         self._down_since: dt.datetime | None = None
         self.window_start: dt.datetime | None = None
         self.window_end: dt.datetime | None = None
-        # Task supply (PLAN-v4 prep): the window's task list is reset.json's task_order (= TASKS.json on main),
-        # else the catalogue. The watcher notes the moment the last unclaimed task is claimed.
-        self.supply_ids: set[str] = self._supply_ids()
-        self.claimed_supply: set[str] = set()
-        self.exhausted_logged = False
 
     # ------------------------------------------------------------------ helpers
-    def _supply_ids(self) -> set[str]:
+    def _task_order(self) -> list[str]:
+        """The window's seeded order: reset.json's task_order (= TASKS.json on main, with [run] first_task
+        first), else the catalogue."""
         reset = self.run_dir / "reset.json"
         if reset.exists():
             try:
                 order = json.loads(reset.read_text()).get("task_order")
                 if isinstance(order, list) and order:
-                    return {str(x) for x in order}
+                    return [str(x) for x in order]
             except (json.JSONDecodeError, AttributeError):
                 pass
-        return set(self.tasks)
+        return sorted(self.tasks)
 
     def _fetch(self) -> None:
         self.repo.run("fetch", "-q", "--prune", "origin",
@@ -147,23 +184,14 @@ class Orchestrator:
             files.append(f)
         return lines, sorted(files)
 
-    def _worker_of(self, commits: list[str]) -> str:
-        for c in commits:
-            m = WORKER_RE.search(self.repo.message(c))
-            if m:
-                return m.group(1)
-        if commits:
-            return self.repo.out("log", "-1", "--format=%an", commits[-1]) or "unknown"
-        return "unknown"
-
     def queue_depth(self) -> int:
         with self.lock:
             return len(self.review_q)
 
-    def _run_thread(self, name, fn):
+    def _run_thread(self, name, fn, *args):
         def wrapper():
             try:
-                fn()
+                fn(*args)
             except Exception:
                 tb = traceback.format_exc()
                 self.errors.append(f"{name}: {tb}")
@@ -175,68 +203,297 @@ class Orchestrator:
         t.start()
         self.threads.append(t)
 
+    def busy_slots(self) -> int:
+        with self.lock:
+            return sum(1 for s in self.slots.values() if s.task is not None)
+
+    # ------------------------------------------------------------------ slots
+    def open_slots(self, ids: list[str]) -> None:
+        with self.lock:
+            for sid in ids:
+                sl = self.slots[sid]
+                if not sl.open:
+                    sl.open = True
+                    self.log.emit("worker_start", worker=sid, session_id=None)
+            self.cv.notify_all()
+
+    def _occupy(self, sl: Slot, task: str, kind: str) -> None:
+        sl.task, sl.since, sl.kind = task, self.clock.now(), kind
+        self.log.emit("slot_busy", slot=sl.id)
+
+    def _free(self, sl: Slot) -> None:
+        if sl.task is None:
+            return
+        sess = self.sessions.get(sl.task)
+        if sess is not None and sess.slot == sl.id:
+            sess.slot = None
+        sl.task, sl.since, sl.kind = None, None, None
+        self.log.emit("slot_idle", slot=sl.id)
+        self.cv.notify_all()
+
+    def _abandon(self, task: str, why: str) -> None:
+        """Never re-launched in this window. A change already waiting for review stays there."""
+        sess = self.sessions[task]
+        sess.status = "abandoned"
+        sess.feedback.clear()
+        if task in self.rework_q:
+            self.rework_q.remove(task)
+        if not any(c.task == task for c in list(self.review_q) + list(self.merge_q)) and \
+                not (self.reviewing and self.reviewing.task == task) and \
+                not (self.merging and self.merging.task == task):
+            self.inflight.pop(task, None)
+        self.log.note(f"task_abandoned task={task} session={sess.session_id} reason={why}")
+
+    def adopt_session(self, slot: str, task: str, session_id: str | None) -> Session:
+        """Record a session started outside the dispatcher (tests): the slot is taken, the task leaves the
+        pending list, session_launch is logged."""
+        with self.lock:
+            sl = self.slots[slot]
+            if not sl.open:
+                self.open_slots([slot])
+            if sl.task is not None:
+                raise RuntimeError(f"slot {slot} is busy with {sl.task}")
+            if task in self.pending:
+                self.pending.remove(task)
+            self._occupy(sl, task, "launch")
+            sess = self.sessions.get(task) or Session(task, slot, slot)
+            sess.slot, sess.last_slot, sess.session_id = slot, slot, session_id
+            sess.launches += 1
+            sess.status = "working"
+            self.sessions[task] = sess
+            self.log.emit("session_launch", slot=slot, task=task, session_id=session_id, attempt_no=sess.launches)
+            self._note_exhausted()
+            return sess
+
+    def _note_exhausted(self) -> None:
+        if not self.pending and not self.exhausted_logged and self.phase == "window":
+            self.exhausted_logged = True
+            self.log.note(f"tasks_exhausted n={len(self.supply_ids)}")
+
+    # ------------------------------------------------------------------ dispatcher
+    def dispatch_once(self) -> None:
+        """One pass: time out stale sessions, then fill free open slots (rework first, then new tasks)."""
+        with self.lock:
+            now = self.clock.now()
+            limit = dt.timedelta(minutes=self.cfg.run.task_timeout_min)
+            for sl in self.slots.values():
+                if sl.task is None or sl.since is None:
+                    continue
+                sess = self.sessions.get(sl.task)
+                if sl.kind == "probe":
+                    if now - sl.since > dt.timedelta(minutes=self.cfg.run.probe_timeout_min):
+                        self.log.note(f"probe_timeout task={sl.task} session={sess.session_id if sess else None}")
+                        if sess is not None and sess.status == "probe":
+                            sess.status = "submitted"
+                        self._free(sl)
+                    continue
+                if now - sl.since > limit and sess is not None and sess.status in ("starting", "working"):
+                    self.log.emit("session_timeout", slot=sl.id, task=sl.task, session_id=sess.session_id)
+                    self._abandon(sl.task, f"timeout {self.cfg.run.task_timeout_min:g} min")
+                    self._stop_session(sess)
+                    self._free(sl)
+            if self.phase != "window" or self.launcher is None:
+                return
+            for sl in sorted(self.slots.values(), key=lambda s: int(s.id[1:])):
+                if not sl.open or sl.task is not None:
+                    continue
+                task = self._next_rework()
+                if task is not None:
+                    sess = self.sessions[task]
+                    msg = sess.feedback.popleft()
+                    sess.slot, sess.last_slot, sess.status = sl.id, sl.id, "working"
+                    self._occupy(sl, task, "rework")
+                    self._run_thread(f"send-{sl.id}-{task}", self._do_send, sl.id, task, msg, "rework")
+                    continue
+                if not self.pending:
+                    break
+                task = self.pending.popleft()
+                sess = Session(task, sl.id, sl.id)
+                self.sessions[task] = sess
+                self._occupy(sl, task, "launch")
+                self._note_exhausted()
+                self._run_thread(f"launch-{sl.id}-{task}", self._do_launch, sl.id, task)
+
+    def _next_rework(self) -> str | None:
+        for task in list(self.rework_q):
+            sess = self.sessions.get(task)
+            if sess is None or sess.status == "abandoned" or not sess.feedback:
+                self.rework_q.remove(task)
+                continue
+            if sess.slot is not None:      # its session is still busy elsewhere; keep it queued
+                continue
+            self.rework_q.remove(task)
+            return task
+        return None
+
+    def _do_launch(self, slot: str, task: str) -> None:
+        t = self.tasks.get(task) or Task(task, "", "(task not in catalogue)", [])
+        prompt = task_prompt(self.cfg, t)
+        name = f"{self.run_id}-{slot}-{task}"
+        sess = self.sessions[task]
+        for n in range(1 + max(0, self.cfg.launcher.launch_retries)):
+            with self.lock:
+                if sess.status == "abandoned" or self.stop.is_set():
+                    return
+                sess.launches += 1
+            try:
+                res = self.launcher.launch(slot, t, prompt, name)
+            except (LaunchError, OSError, subprocess.SubprocessError) as e:
+                self.log.note(f"session_launch_failed slot={slot} task={task} attempt={sess.launches} "
+                              f"error={str(e)[:300]}")
+                continue
+            with self.lock:
+                sess.session_id = res.session_id
+                if sess.status == "starting":
+                    sess.status = "working"
+                self.log.emit("session_launch", slot=slot, task=task, session_id=res.session_id,
+                              attempt_no=sess.launches)
+                self.log.note(f"launch_detail slot={slot} task={task} detached_by={res.detached_by} "
+                              f"returncode={res.returncode} session_id_seen={str(res.session_id is not None).lower()}")
+            return
+        with self.lock:
+            self._abandon(task, "launch failed")
+            sl = self.slots[slot]
+            if sl.task == task:
+                self._free(sl)
+
+    def _do_send(self, slot: str, task: str, message: str, kind: str) -> None:
+        sess = self.sessions[task]
+        err = None
+        if sess.session_id is None and not getattr(self.launcher, "accepts_no_session_id", False):
+            err = "no session id recorded for this task's session"
+        else:
+            for _ in range(2):
+                try:
+                    self.launcher.send(slot, task, sess.session_id, message, kind)
+                    err = None
+                    break
+                except (LaunchError, OSError, subprocess.SubprocessError) as e:
+                    err = str(e)
+        with self.lock:
+            sl = self.slots[slot]
+            if err is None:
+                self.log.emit("session_message", slot=slot, task=task, session_id=sess.session_id, kind=kind)
+                if sl.task == task:
+                    sl.since = self.clock.now()     # the timeout runs from the message
+                return
+            self.log.note(f"followup_failed slot={slot} task={task} kind={kind} error={err[:300]}")
+            if kind == "rework":
+                self._abandon(task, "follow-up not delivered")
+            elif sess.status == "probe":
+                sess.status = "submitted"
+            if sl.task == task:
+                self._free(sl)
+
+    def _stop_session(self, sess: Session) -> None:
+        try:
+            if self.launcher is not None:
+                self.launcher.stop(sess.session_id)
+        except Exception as e:  # best effort
+            self.log.note(f"stop of session {sess.session_id} failed: {str(e)[:200]}")
+
+    def _dispatch_loop(self) -> None:
+        while not self.stop.is_set():
+            self.dispatch_once()
+            with self.lock:
+                self.cv.wait(0.2)
+
     # ------------------------------------------------------------------ watcher
+    def _task_of(self, branch: str, sha: str, main: str) -> str | None:
+        if branch.startswith(self.pfx):
+            return branch[len(self.pfx):]
+        if not self.cfg.repo.accept_other_claude_branches:
+            return None
+        for c in self.repo.out("rev-list", sha, "^" + main).split():
+            m = READY_ID_RE.match(self.repo.message(c))
+            if m:
+                return m.group(1)
+        return None
+
     def poll(self) -> None:
         self._fetch()
         refs = self.repo.refs("refs/remotes/origin/claude/")
         main = self.repo.sha("origin/main")
         for ref, sha in sorted(refs.items()):
             branch = ref.removeprefix("refs/remotes/origin/")
-            if branch.startswith(self.rpfx):
-                self._race_marker(branch)
-            elif branch.startswith(self.pfx):
-                self._branch_seen(branch, sha, main)
+            if self.branch_heads.get(branch) == sha:
+                continue
+            first = branch not in self.branch_heads
+            task = self._task_of(branch, sha, main)
+            if task is None:
+                if branch not in self.unattributed:
+                    self.unattributed.add(branch)
+                    self.log.note(f"unattributed branch {branch}: no task id in its name or in a READY: commit")
+                continue
+            if first and not branch.startswith(self.pfx):
+                self.log.note(f"task {task} pushed on branch {branch}, not {self.pfx}{task}")
+            self._branch_seen(task, branch, sha, main, first)
 
-    def _race_marker(self, branch: str) -> None:
-        if branch in self.seen_races:
-            return
-        self.seen_races.add(branch)
-        rest = branch[len(self.rpfx):]
-        task, _, worker = rest.rpartition("-")
-        if self.phase == "window" and task:
-            self.log.emit("claim_race", worker=worker or "unknown", task=task)
-        try:
-            self.repo.run("push", "-q", "origin", "--delete", branch)
-        except GitError:
-            pass
-
-    def _branch_seen(self, branch: str, sha: str, main: str) -> None:
-        task = branch[len(self.pfx):]
+    def _branch_seen(self, task: str, branch: str, sha: str, main: str, first: bool) -> None:
+        prev = self.branch_heads.get(branch)
+        self.branch_heads[branch] = sha
+        sess = self.sessions.get(task)
         st = self.states.get(task)
-        if st is None:
-            own = self.repo.out("rev-list", "--reverse", sha, "^" + main).split()
-            worker = self._worker_of(own)
-            st = TaskState(task, branch, worker, last_head=main)
-            self.states[task] = st
+        if first and st is None:
             if self.phase != "window":
-                st.ignored = True
-                self.log.note(f"claim of task {task} by {worker} outside the window; ignored")
+                self.log.note(f"branch {branch} of task {task} first seen outside the window; ignored")
+                st = TaskState(task, branch, "unknown", last_head=main)
+                self.states[task] = st
                 return
-            if task not in self.tasks:
-                self.log.note(f"branch {branch} does not match a task id in the catalogue")
-            self.log.emit("claim", worker=worker, task=task, branch=branch)
-            if task in self.supply_ids:
-                self.claimed_supply.add(task)
-                if not self.exhausted_logged and self.claimed_supply >= self.supply_ids:
-                    self.exhausted_logged = True
-                    self.log.note(f"tasks_exhausted n={len(self.supply_ids)}")
-        if st.ignored or sha == st.last_head:
+            if sess is None:
+                self.log.note(f"branch {branch}: task {task} was never launched in this window; ignored")
+                return
+            st = TaskState(task, branch, sess.last_slot, last_head=main)
+            self.states[task] = st
+            self.log.emit("claim", worker=sess.last_slot, task=task, branch=branch)
+        if st is None or sess is None:
             return
-        new = self.repo.out("rev-list", sha, "^" + st.last_head, "^origin/main").split()
-        st.last_head = sha
-        ready = [c for c in new if READY_RE.match(self.repo.message(c))]
+        new = self.repo.out("rev-list", sha, *(["^" + prev] if prev else []), "^origin/main").split()
+        msgs = [(c, self.repo.message(c)) for c in new]
+        if self.cfg.run.probe_followup and any(PROBE_RE.match(m) for _, m in msgs):
+            self._probe_ack(task, sess)
+        ready = [c for c, m in msgs if READY_RE.match(m)]
         if not ready:
             return
         head = ready[0]  # newest READY: commit in this push
         if self.phase != "window":
             self.log.note(f"submission of task {task} head {head[:12]} after window end; not queued")
             return
-        self._submit(st, head)
+        with self.lock:
+            if sess.status == "abandoned":
+                self.log.note(f"READY for abandoned task {task} head {head[:12]} (session {sess.session_id}); "
+                              "ignored")
+                return
+            worker = sess.slot or sess.last_slot
+            st.branch = branch
+            self._submit(st, head, worker)
+            sl = self.slots.get(sess.slot) if sess.slot else None
+            if self.cfg.run.probe_followup and not self.probe_done and sl is not None:
+                self.probe_done = True
+                sess.status = "probe"
+                sl.kind, sl.since = "probe", self.clock.now()
+                self._run_thread(f"probe-{sl.id}-{task}", self._do_send, sl.id, task,
+                                 probe_message(self.cfg, task), "probe")
+            else:
+                sess.status = "submitted"
+                if sl is not None:
+                    self._free(sl)
 
-    def _submit(self, st: TaskState, head: str) -> None:
+    def _probe_ack(self, task: str, sess: Session) -> None:
+        with self.lock:
+            sl = self.slots.get(sess.slot) if sess.slot else None
+            since = sl.since if sl is not None and sl.kind == "probe" else None
+            delay = (self.clock.now() - since).total_seconds() if since else None
+            self.log.note(f"probe_ack task={task} session={sess.session_id} delay_s="
+                          f"{'%.0f' % delay if delay is not None else 'na'}")
+            if sess.status == "probe":
+                sess.status = "submitted"
+            if sl is not None and sl.kind == "probe":
+                self._free(sl)
+
+    def _submit(self, st: TaskState, head: str, worker: str) -> None:
         base = self.repo.out("merge-base", "origin/main", head)
         lines, files = self._diffstat(base, head)
-        worker = self._worker_of([head]) if WORKER_RE.search(self.repo.message(head)) else st.worker
         with self.lock:
             others = {t: f for t, f in self.inflight.items() if t != st.task}
             k = len(others)
@@ -244,6 +501,7 @@ class Orchestrator:
             m = sum(1 for f in others.values() if fs & set(f))
             st.submits += 1
             st.files = files
+            st.last_head = head
             self.inflight[st.task] = files
             self.log.emit("submit", worker=worker, task=st.task, branch=st.branch, head=head,
                           attempt_no=st.submits, lines_changed=lines, files=files, k=k, m=m)
@@ -501,41 +759,31 @@ class Orchestrator:
 
     # ------------------------------------------------------------------ bounce
     def feedback_text(self, ch: Change, cause: str, detail: str = "") -> str:
-        parts = [f"# Feedback: task {ch.task}, attempt {ch.attempt_no}", "",
-                 f"Reviewed head: {ch.head}", "", f"Cause: {cause}", "", CAUSE_TEXT[cause]]
-        if detail:
-            parts += ["", "Details:", "", detail.strip()]
-        parts += ["", FEEDBACK_FOOTER, ""]
-        return "\n".join(parts)
+        return rework_message(self.cfg, ch.task, ch.attempt_no, ch.head, cause, CAUSE_TEXT[cause], detail)
 
     def bounce(self, ch: Change, cause: str, detail: str = "") -> None:
+        """Log the bounce and queue the rework for the task's own session. Nothing is pushed to its branch;
+        the message goes out as a follow-up when a slot frees (dispatcher)."""
         text = self.feedback_text(ch, cause, detail)
-        ref = f"refs/remotes/origin/{ch.branch}"
-        for _ in range(5):
-            self.repo.run("fetch", "-q", "origin", f"+refs/heads/{ch.branch}:{ref}")
-            tip = self.repo.sha(ref)
-            blob = self.repo.out("hash-object", "-w", "--stdin", input=text)
-            tree = self._with_file(self.repo.out("rev-parse", tip + "^{tree}"), FEEDBACK_FILE, blob)
-            c = self.repo.commit_tree(tree, [tip], f"FEEDBACK: {cause} (task {ch.task}, head {ch.head[:12]})")
-            if self.repo.run("push", "-q", "origin", f"{c}:refs/heads/{ch.branch}", check=False).returncode == 0:
-                st = self.states.get(ch.task)
-                if st and st.last_head == tip:
-                    st.last_head = c
-                self.log.emit("bounce", task=ch.task, head=ch.head, cause=cause)
+        with self.lock:
+            self.log.emit("bounce", task=ch.task, head=ch.head, cause=cause)
+            sess = self.sessions.get(ch.task)
+            if sess is None:
+                self.log.note(f"task {ch.task}: bounce {cause} but no session is known; rework not sent")
                 return
-        self.log.note(f"task {ch.task}: could not push FEEDBACK.md after 5 tries; bounce {cause} not delivered")
-        self.log.emit("bounce", task=ch.task, head=ch.head, cause=cause)
-
-    def _with_file(self, tree: str, name: str, blob: str) -> str:
-        with tempfile.TemporaryDirectory(prefix="fleet-idx-") as td:
-            env = dict(self.repo.env, GIT_INDEX_FILE=os.path.join(td, "index"))
-            def g(*a):
-                return subprocess.run(["git", *a], cwd=self.repo.path, env=env, capture_output=True,
-                                      text=True, check=True).stdout.strip()
-            with self.repo.lock:
-                g("read-tree", tree)
-                g("update-index", "--add", "--cacheinfo", f"100644,{blob},{name}")
-                return g("write-tree")
+            if sess.status == "abandoned":
+                self.log.note(f"task {ch.task}: bounce {cause} for an abandoned task; rework not sent")
+                return
+            if self.phase != "window":
+                self.log.note(f"task {ch.task}: bounce {cause} after window end; rework not sent")
+                return
+            sess.feedback.clear()          # only the newest feedback matters
+            sess.feedback.append(text)
+            if sess.status != "probe":
+                sess.status = "rework_queued"
+            if ch.task not in self.rework_q:
+                self.rework_q.append(ch.task)
+            self.cv.notify_all()
 
     # ------------------------------------------------------------------ window
     def idle(self) -> bool:
@@ -543,20 +791,25 @@ class Orchestrator:
             return (not self.prep_q and not self.review_q and not self.merge_q
                     and self.reviewing is None and self.merging is None)
 
-    def start_threads(self) -> None:
-        for name, fn in (("watcher", self._watch_loop), ("prep", self._prep_loop),
-                         ("reviewer", self._review_loop), ("merger", self._merge_loop)):
+    def start_threads(self, dispatch: bool = False) -> None:
+        loops = [("watcher", self._watch_loop), ("prep", self._prep_loop),
+                 ("reviewer", self._review_loop), ("merger", self._merge_loop)]
+        if dispatch:
+            loops.append(("dispatcher", self._dispatch_loop))
+        for name, fn in loops:
             self._run_thread(name, fn)
 
     def shutdown(self) -> None:
         self.stop.set()
         with self.lock:
             self.cv.notify_all()
-        for t in self.threads:
+        for t in list(self.threads):
             t.join(timeout=max(5.0, self.cfg.tests.timeout_s))
 
-    def run_window(self, launcher) -> dict:
+    def run_window(self, launcher=None) -> dict:
         rc = self.cfg.run
+        if launcher is not None:
+            self.launcher = launcher
         self._fetch()
         self.log.note(f"run {self.run_id}: sandbox_commit={self.sandbox_commit} "
                       f"main={self.repo.sha('origin/main')} seed={self.seed}")
@@ -567,18 +820,30 @@ class Orchestrator:
         self.phase = "window"
         self.log.note("window_start")
         self.log.note(f"task_supply n={len(self.supply_ids)}")
-        self.start_threads()
-        self._start_workers(launcher)
+        self.log.note(f"slots n={rc.n_workers} task_timeout_min={rc.task_timeout_min:g} "
+                      f"task_budget_min={rc.task_budget_min:g}")
+        self.start_threads(dispatch=True)
+        self._open_scheduled_slots()
 
         self.clock.sleep_until(warm_end)
         self.log.note("warmup_end")
         self.clock.sleep_until(self.window_end)
-        # Stop accepting new claims and submissions; stop the workers.
+        # Stop handing out work and accepting submissions; stop the sessions.
         with self.lock:
             self.phase = "grace"
             self.cv.notify_all()
         self.log.note("window_end")
-        launcher.stop_all(self)
+        with self.lock:
+            for sl in self.slots.values():
+                if sl.task is not None:
+                    sess = self.sessions.get(sl.task)
+                    self.log.note(f"session_open_at_window_end slot={sl.id} task={sl.task} kind={sl.kind} "
+                                  f"session={sess.session_id if sess else None}")
+                    self._free(sl)
+            if self.rework_q:
+                self.log.note(f"rework_not_sent_at_window_end n={len(self.rework_q)} "
+                              f"tasks={','.join(self.rework_q)}")
+        self.launcher.stop_all(self)
         try:
             self.poll()  # log anything pushed just before the end
         except GitError:
@@ -602,17 +867,17 @@ class Orchestrator:
         self._check_downtime()
         return self.write_run_json()
 
-    def _start_workers(self, launcher) -> None:
-        """All workers at window start, or, with ``[run] start_schedule`` (T1: [[0, 1], [30, 12]]),
-        each group at its minute from a launcher thread, so the window's own timing (warm-up end,
-        window end) is never held up by the operator typing session ids."""
+    def _open_scheduled_slots(self) -> None:
+        """All slots at window start, or, with ``[run] start_schedule`` (T1: [[0, 1], [30, 12]]), each group
+        at its minute from a thread, so the window's own timing is never held up."""
         sched = self.cfg.run.start_schedule
+        ids_all = [f"s{i}" for i in range(1, self.cfg.run.n_workers + 1)]
         if not sched:
-            launcher.start_all(self)
+            self.open_slots(ids_all)
             return
         stages, started = [], 0
         for minute, upto in sched:
-            ids = [f"w{i}" for i in range(started + 1, int(upto) + 1)]
+            ids = ids_all[started:int(upto)]
             started = int(upto)
             stages.append((self.window_start + dt.timedelta(minutes=float(minute)), minute, ids))
 
@@ -621,11 +886,11 @@ class Orchestrator:
                 if self.clock.sleep_until(at, self.stop):
                     return
                 if self.phase != "window":
-                    self.log.note(f"start_schedule: minute {minute} group {ids} not started (window over)")
+                    self.log.note(f"start_schedule: minute {minute} slots {ids} not opened (window over)")
                     return
-                self.log.note(f"start_schedule minute={minute} workers={','.join(ids)}")
-                launcher.start(ids, self)
-        self._run_thread("launcher", run_stages)
+                self.log.note(f"start_schedule minute={minute} slots={','.join(ids)}")
+                self.open_slots(ids)
+        self._run_thread("slot-schedule", run_stages)
 
     def _check_claude_dir(self) -> None:
         try:
@@ -638,6 +903,9 @@ class Orchestrator:
 
     def write_run_json(self) -> dict:
         notes = [self.cfg.run.notes] if self.cfg.run.notes else []
+        if self.cfg.run.phase:
+            notes.append(f"phase={self.cfg.run.phase}")
+        notes.append("worker_model_design=session-per-task")
         reset = self.run_dir / "reset.json"
         if reset.exists():
             r = json.loads(reset.read_text())

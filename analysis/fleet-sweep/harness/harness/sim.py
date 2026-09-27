@@ -1,23 +1,22 @@
-"""Simulated workers and reviewer for dry runs. No model is ever called.
+"""Simulated sessions and reviewer for dry runs. No model is ever called.
 
-SimWorker follows the git-only worker protocol of PLAN-v3 s5 (the same one
-prompts/worker.md gives the real workers) against a local bare repo:
+One SimSession per task, as the real worker model has one cloud session per task (harness README,
+"Worker model"). SimCloudLauncher starts them for the orchestrator's slots, against a local bare repo:
 
-  claim     push a new branch claude/task-<id> holding one empty commit
-            "CLAIM: task-<id>" with a "Worker: <id>" trailer; if the push is
-            rejected, (optionally) push a race marker claude/race-<id>-<worker>
-            and take the next task
-  submit    push a commit whose message starts "READY:"; do not wait
-  rework    between tasks, fetch and look at every own branch whose tip is a
-            "FEEDBACK:" commit; rebuild the change on current main and push a
-            new "READY:" commit
+  launch    after a start-up delay (exp., mean startup_mean_s: provisioning and clone), push the branch
+            claude/task-<id> at origin/main (the prompt's step 1), then work (exp. with rate
+            rate_per_hour) and push one commit whose message starts "READY: <id>"; then wait
+  message   a follow-up (rework) wakes the session: after rework_factor of a fresh task's time it merges
+            origin/main into its branch, rebuilds the change, and pushes a new "READY: <id>" commit;
+            a probe (T0) makes it push an empty "PROBE: <id>" commit
+  stall     with p_stall the session never pushes READY, so the orchestrator's session timeout fires;
+            the same happens when the reference patch cannot be applied or max_reworks is reached
 
-The change itself is the task's reference patch (correct) or a synthetic note
-file (wrong: hidden tests fail because the feature is missing), optionally plus a
-write to a shared hotspot file (textual conflict with other such changes), a
-shared-constant edit (semantic: breaks other tasks after rebase) or a visible
-test break. A shared oracle records what each head really is, so SimReviewer
-can play a reviewer who catches some defects and misses others.
+The change itself is the task's reference patch (correct) or a synthetic note file (wrong: hidden tests
+fail because the feature is missing), optionally plus a write to a shared hotspot file (textual conflict
+with other such changes), a shared-constant edit (semantic: breaks other tasks after rebase) or a visible
+test break. A shared oracle records what each head really is, so SimReviewer can play a reviewer who
+catches some defects and misses others.
 """
 from __future__ import annotations
 
@@ -32,6 +31,7 @@ from .clock import Clock
 from .config import Config
 from .events import EventLog
 from .gitops import GitError, Repo, clone
+from .launchers import LaunchError, LaunchResult
 from .review import ReviewError, ReviewPacket, ReviewResult, Reviewer, parse_verdict
 
 HOTSPOT = "SIM_HOTSPOT.txt"
@@ -57,98 +57,40 @@ class Oracle:
             return dict(self._d.get(head, {}))
 
 
-class SimWorker:
-    def __init__(self, worker_id: str, cfg: Config, clock: Clock, oracle: Oracle, clone_dir: Path,
-                 rng: random.Random, stop: threading.Event):
-        self.id = worker_id
+class SimSession:
+    """One task's session. Git work happens in the clone of the slot it currently runs on, under that
+    slot's lock, so a session that timed out cannot interleave with the slot's next session."""
+
+    def __init__(self, task_id: str, session_id: str, cfg: Config, clock: Clock, oracle: Oracle,
+                 rng: random.Random, stop: threading.Event | None = None):
+        self.task, self.session_id = task_id, session_id
         self.cfg, self.sim = cfg, cfg.sim
-        self.clock, self.oracle, self.rng, self.stop = clock, oracle, rng, stop
-        self.repo: Repo = clone(cfg.repo.remote_url, clone_dir, (worker_id, f"{worker_id}@sim.local"))
+        self.clock, self.oracle, self.rng = clock, oracle, rng
+        self.halt = stop or threading.Event()
         self.ref_dir = cfg.path(cfg.tasks.reference_dir)
-        self.pfx = cfg.repo.branch_prefix
-        self.mine: list[str] = []          # task ids this worker claimed
-        self.done: set[str] = set()        # tasks whose branch tip we saw merged (not tracked; kept open)
-        self.stats = {"claims": 0, "races": 0, "submits": 0, "reworks": 0, "git_errors": 0,
-                      "apply_3way": 0, "union_resolved": 0, "unappliable": 0, "rework_capped": 0}
-        self.rework_count: dict[str, int] = {}
-        self.unappliable: list[dict] = []   # {task, stage, main, error}: patch would not apply
-        self.given_up: set[str] = set()     # tasks this worker abandoned because of that
+        self.branch = f"{cfg.repo.branch_prefix}{task_id}"
+        self.repo: Repo | None = None
+        self.slot_lock: threading.Lock = threading.Lock()
+        self.stats = {"submits": 0, "reworks": 0, "git_errors": 0, "apply_3way": 0, "union_resolved": 0,
+                      "unappliable": 0, "rework_capped": 0, "stalled": 0, "probes": 0}
+        self.reworks = 0
+        self.unappliable: list[dict] = []
+        self.given_up = False
         self.error: str | None = None
+
+    def bind(self, repo: Repo, slot_lock: threading.Lock) -> "SimSession":
+        self.repo, self.slot_lock = repo, slot_lock
+        return self
 
     # -- git helpers
     def fetch(self):
         self.repo.run("fetch", "-q", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*")
 
-    def claimed(self) -> set[str]:
-        out = self.repo.out("ls-remote", "--heads", "origin", f"{self.pfx}*")
-        return {l.split("\t")[1].removeprefix("refs/heads/" + self.pfx) for l in out.splitlines() if l}
-
-    def task_order(self) -> list[dict]:
-        txt = self.repo.out("show", f"origin/main:{self.cfg.repo.tasks_file_name}")
-        return json.loads(txt)["tasks"]
-
     def _sleep(self, virtual_s: float) -> bool:
-        return self.clock.sleep(virtual_s, self.stop)
+        return self.clock.sleep(virtual_s, self.halt)
 
     def work_time(self, factor: float = 1.0) -> float:
         return self.rng.expovariate(self.sim.rate_per_hour / 3600.0) * factor
-
-    # -- protocol
-    def run(self):
-        try:
-            self._run()
-        except Exception:
-            import traceback
-            self.error = traceback.format_exc()
-            raise
-
-    def _run(self):
-        while not self.stop.is_set():
-            try:
-                if self.rework_one():
-                    continue
-                tid = self.claim_next()
-                if tid is None:
-                    if self._sleep(60):
-                        return
-                    continue
-                if self._sleep(self.work_time()):
-                    return
-                self.submit_first(tid)
-            except GitError as e:
-                self.stats["git_errors"] += 1
-                self.last_git_error = str(e)
-                if self.stop.is_set():
-                    return
-                if self._sleep(30):
-                    return
-
-    def claim_next(self) -> str | None:
-        self.fetch()
-        taken = self.claimed()
-        for t in self.task_order():
-            tid = t["id"]
-            if tid in taken:
-                continue
-            if self.try_claim(tid):
-                return tid
-            taken.add(tid)
-        return None
-
-    def try_claim(self, tid: str) -> bool:
-        main = self.repo.sha("origin/main")
-        c = self.repo.commit_tree(self.repo.out("rev-parse", main + "^{tree}"), [main],
-                                  f"CLAIM: task-{tid}\n\nWorker: {self.id}")
-        p = self.repo.run("push", "-q", "origin", f"{c}:refs/heads/{self.pfx}{tid}", check=False)
-        if p.returncode == 0:
-            self.mine.append(tid)
-            self.stats["claims"] += 1
-            return True
-        self.stats["races"] += 1
-        if self.sim.race_markers:
-            self.repo.run("push", "-q", "origin",
-                          f"{c}:refs/heads/{self.cfg.repo.race_prefix}{tid}-{self.id}", check=False)
-        return False
 
     def _checkout(self, sha: str):
         self.repo.run("checkout", "-q", "--detach", "--force", sha)
@@ -164,18 +106,144 @@ class SimWorker:
         p.write_text(s.replace(find, replace, 1))
         return True
 
-    def _apply_change(self, tid: str, wrong: bool, conflict: bool, semantic: bool, vbreak: bool) -> dict:
+    def sim_edit(self, name: str) -> dict | None:
+        return getattr(self.sim, name, None) or None
+
+    # -- the session's life (thread bodies)
+    def _guard(self, fn, *a):
+        try:
+            fn(*a)
+        except GitError as e:
+            self.stats["git_errors"] += 1
+            self.error = None if self.halt.is_set() else f"git: {e}"
+        except Exception:
+            import traceback
+            self.error = traceback.format_exc()
+
+    def run_first(self):
+        self._guard(self._first)
+
+    def _first(self):
+        if self._sleep(self.rng.expovariate(1.0 / max(self.sim.startup_mean_s, 1e-9))):
+            return
+        stall = self.rng.random() < self.sim.p_stall
+        with self.slot_lock:
+            self.start_branch()
+        if stall:
+            self.stats["stalled"] += 1
+            return
+        if self._sleep(self.work_time()):
+            return
+        r = self.rng.random
+        wrong, conflict = r() < self.sim.p_wrong, r() < self.sim.p_conflict
+        semantic, vbreak = r() < self.sim.p_semantic, r() < self.sim.p_visible_break
+        try:
+            with self.slot_lock:
+                self.submit(wrong=wrong, conflict=conflict, semantic=semantic, vbreak=vbreak)
+        except PatchConflict as e:
+            self._give_up("first", str(e))
+
+    def run_message(self, kind: str):
+        self._guard(self._message, kind)
+
+    def _message(self, kind: str):
+        if kind == "probe":
+            if self._sleep(30):
+                return
+            with self.slot_lock:
+                self.probe()
+            return
+        if self.given_up:
+            return
+        if self.sim.max_reworks and self.reworks >= self.sim.max_reworks:
+            self.stats["rework_capped"] += 1
+            self.given_up = True
+            return
+        self.reworks += 1
+        if self._sleep(self.work_time(self.sim.rework_factor)):
+            return
+        wrong = self.rng.random() < self.sim.p_wrong * self.sim.p_wrong_rework_factor
+        try:
+            with self.slot_lock:
+                self.rework(wrong=wrong)
+        except PatchConflict as e:
+            self._give_up("rework", str(e))
+
+    def _give_up(self, stage: str, err: str) -> None:
+        self.stats["unappliable"] += 1
+        self.unappliable.append({"task": self.task, "stage": stage, "error": err})
+        self.given_up = True
+
+    # -- git steps (also called directly by the tests)
+    def start_branch(self) -> str:
+        """The prompt's step 1: create claude/task-<id> from origin/main and push it."""
+        self.fetch()
+        main = self.repo.sha("origin/main")
+        self.repo.run("push", "-q", "origin", f"{main}:refs/heads/{self.branch}")
+        return main
+
+    def submit(self, wrong=False, conflict=False, semantic=False, vbreak=False, branch: str | None = None,
+               message: str | None = None) -> str | None:
+        self.fetch()
+        br = branch or self.branch
+        tip = self.repo.try_sha(f"origin/{br}") or self.repo.sha("origin/main")
+        self._checkout(tip)
+        truth = self._apply_change(wrong=wrong, conflict=conflict, semantic=semantic, vbreak=vbreak)
+        tree = self.repo.out("write-tree")
+        c = self.repo.commit_tree(tree, [tip], message or f"READY: {self.task}\n\nSession: {self.session_id}")
+        return self._push_ready(c, truth, br)
+
+    def rework(self, wrong=False) -> str | None:
+        """Merge origin/main into the branch and rebuild the change on it (a merge commit, READY:)."""
+        self.fetch()
+        tip = self.repo.sha(f"origin/{self.branch}")
+        main = self.repo.sha("origin/main")
+        self._checkout(main)
+        # Undo a shared-constant edit that reached main (the later session repairs the interaction).
+        se = self.sim_edit("semantic_edit")
+        if se:
+            self._edit(se["file"], se["replace"], se["find"])
+        truth = self._apply_change(wrong=wrong, conflict=False, semantic=False, vbreak=False)
+        tree = self.repo.out("write-tree")
+        c = self.repo.commit_tree(tree, [tip, main], f"READY: {self.task} (rework)\n\nSession: {self.session_id}")
+        head = self._push_ready(c, truth, self.branch)
+        if head:
+            self.stats["reworks"] += 1
+        return head
+
+    def probe(self) -> str | None:
+        self.fetch()
+        tip = self.repo.sha(f"origin/{self.branch}")
+        c = self.repo.commit_tree(self.repo.out("rev-parse", tip + "^{tree}"), [tip], f"PROBE: {self.task}")
+        p = self.repo.run("push", "-q", "origin", f"{c}:refs/heads/{self.branch}", check=False)
+        if p.returncode == 0:
+            self.stats["probes"] += 1
+            return c
+        return None
+
+    def _push_ready(self, c: str, truth: dict, branch: str) -> str | None:
+        if self.halt.is_set():
+            return None
+        p = self.repo.run("push", "-q", "origin", f"{c}:refs/heads/{branch}", check=False)
+        if p.returncode == 0:
+            self.oracle.put(c, task=self.task, session=self.session_id, **truth)
+            self.stats["submits"] += 1
+            return c
+        return None
+
+    def _apply_change(self, wrong: bool, conflict: bool, semantic: bool, vbreak: bool) -> dict:
+        tid = self.task
         truth = {"wrong": wrong, "conflict": False, "semantic": False, "visible_break": False}
         patch = self.ref_dir / f"{tid}.patch"
         if not wrong and patch.exists():
-            self._apply_patch(tid, patch)
+            self._apply_patch(patch)
         else:
             truth["wrong"] = True
             notes = self.repo.path / "sim_notes"
             notes.mkdir(exist_ok=True)
-            (notes / f"task-{tid}.md").write_text(f"Work in progress for task {tid} by {self.id}.\n")
+            (notes / f"task-{tid}.md").write_text(f"Work in progress for task {tid} ({self.session_id}).\n")
         if conflict:
-            (self.repo.path / HOTSPOT).write_text(f"last touched by task {tid} ({self.id})\n")
+            (self.repo.path / HOTSPOT).write_text(f"last touched by task {tid} ({self.session_id})\n")
             truth["conflict"] = True
         se = self.sim_edit("semantic_edit")
         if semantic and se:
@@ -186,12 +254,11 @@ class SimWorker:
         self.repo.run("add", "-A")
         return truth
 
-    def _apply_patch(self, tid: str, patch: Path) -> None:
-        """Apply the reference patch to the checked-out tree. Real-task patches are cut
-        against the frozen base, so on a main that already carries other tasks a plain
-        apply can fail; fall back to a three-way apply (base blobs are in the repo). If
-        that also fails, the patch cannot be applied without a human-style resolution:
-        raise PatchConflict so the caller can record it."""
+    def _apply_patch(self, patch: Path) -> None:
+        """Apply the reference patch to the checked-out tree. Real-task patches are cut against the frozen
+        base, so on a main that already carries other tasks a plain apply can fail; fall back to a three-way
+        apply (base blobs are in the repo). If that also fails, the patch cannot be applied without a
+        human-style resolution: raise PatchConflict so the caller can record it."""
         p = self.repo.run("apply", "--whitespace=nowarn", str(patch), check=False)
         if p.returncode == 0:
             return
@@ -206,13 +273,13 @@ class SimWorker:
             return
         self.repo.run("reset", "-q", "--hard")
         self.repo.run("clean", "-q", "-fdx")
-        raise PatchConflict(f"task {tid}: reference patch does not apply to {self.repo.sha('HEAD')[:12]}: "
+        raise PatchConflict(f"task {self.task}: reference patch does not apply to {self.repo.sha('HEAD')[:12]}: "
                             f"{p.stderr.strip()[-300:]}")
 
     def _union_resolve(self) -> bool:
-        """Resolve the conflict markers a three-way apply left by keeping both sides (main's
-        first, then the task's), as a worker would for two additions at the same place (a
-        registry entry, a CLI sub-command). Returns False if there is nothing to resolve."""
+        """Resolve the conflict markers a three-way apply left by keeping both sides (main's first, then the
+        task's), as a worker would for two additions at the same place (a registry entry, a CLI sub-command).
+        Returns False if there is nothing to resolve."""
         files = self.repo.out("diff", "--name-only", "--diff-filter=U").split()
         if not files:
             return False
@@ -233,81 +300,6 @@ class SimWorker:
             fp.write_text("".join(out))
             self.repo.run("add", "--", rel)
         return True
-
-    def sim_edit(self, name: str) -> dict | None:
-        return getattr(self.sim, name, None) or None
-
-    def submit_first(self, tid: str):
-        r = self.rng.random
-        try:
-            self.submit(tid, wrong=r() < self.sim.p_wrong, conflict=r() < self.sim.p_conflict,
-                        semantic=r() < self.sim.p_semantic, vbreak=r() < self.sim.p_visible_break)
-        except PatchConflict as e:
-            self._give_up(tid, "first", str(e))
-
-    def _give_up(self, tid: str, stage: str, err: str) -> None:
-        self.stats["unappliable"] += 1
-        self.unappliable.append({"task": tid, "stage": stage, "error": err})
-        self.given_up.add(tid)
-
-    def submit(self, tid: str, wrong=False, conflict=False, semantic=False, vbreak=False) -> str | None:
-        self.fetch()
-        tip = self.repo.sha(f"origin/{self.pfx}{tid}")
-        self._checkout(tip)
-        truth = self._apply_change(tid, wrong=wrong, conflict=conflict, semantic=semantic, vbreak=vbreak)
-        tree = self.repo.out("write-tree")
-        c = self.repo.commit_tree(tree, [tip], f"READY: task {tid}\n\nWorker: {self.id}")
-        return self._push_ready(tid, c, truth)
-
-    def _push_ready(self, tid: str, c: str, truth: dict) -> str | None:
-        if self.stop.is_set():
-            return None
-        p = self.repo.run("push", "-q", "origin", f"{c}:refs/heads/{self.pfx}{tid}", check=False)
-        if p.returncode == 0:
-            self.oracle.put(c, task=tid, worker=self.id, **truth)
-            self.stats["submits"] += 1
-            return c
-        return None
-
-    def rework_one(self) -> bool:
-        """Fix one bounced branch if there is one. Returns True if it did."""
-        self.fetch()
-        for tid in list(self.mine):
-            if tid in self.given_up:
-                continue
-            ref = f"origin/{self.pfx}{tid}"
-            tip = self.repo.try_sha(ref)
-            if not tip or not self.repo.message(tip).startswith("FEEDBACK:"):
-                continue
-            if self.sim.max_reworks and self.rework_count.get(tid, 0) >= self.sim.max_reworks:
-                self.stats["rework_capped"] += 1
-                self.given_up.add(tid)
-                continue
-            self.rework_count[tid] = self.rework_count.get(tid, 0) + 1
-            if self._sleep(self.work_time(self.sim.rework_factor)):
-                return True
-            self.fetch()
-            tip = self.repo.sha(ref)
-            if not self.repo.message(tip).startswith("FEEDBACK:"):
-                return True
-            main = self.repo.sha("origin/main")
-            self._checkout(main)
-            # Undo a shared-constant edit that reached main (the later worker repairs the interaction).
-            se = self.sim_edit("semantic_edit")
-            if se:
-                self._edit(se["file"], se["replace"], se["find"])
-            wrong = self.rng.random() < self.sim.p_wrong * self.sim.p_wrong_rework_factor
-            try:
-                truth = self._apply_change(tid, wrong=wrong, conflict=False, semantic=False, vbreak=False)
-            except PatchConflict as e:
-                self._give_up(tid, "rework", str(e))
-                return True
-            tree = self.repo.out("write-tree")
-            c = self.repo.commit_tree(tree, [tip, main], f"READY: task {tid} (rework)\n\nWorker: {self.id}")
-            self._push_ready(tid, c, truth)
-            self.stats["reworks"] += 1
-            return True
-        return False
 
 
 class SimReviewer(Reviewer):
@@ -353,29 +345,72 @@ class SimReviewer(Reviewer):
                             tokens_out=self.rng.randint(80, 400))
 
 
-class SimLauncher:
+class SimCloudLauncher:
+    """Stands in for `claude --cloud` (launch) and `claude -p ... --cloud <id>` (follow-up): each launch
+    starts a SimSession thread and returns at once with a session id; a follow-up wakes that session. One
+    clone of the bare remote per slot, reused by whichever session runs there."""
+
+    accepts_no_session_id = False
+
     def __init__(self, cfg: Config, clock: Clock, log: EventLog, oracle: Oracle, clones_dir: Path,
                  run_id: str, seed: int):
         self.cfg, self.clock, self.log, self.oracle = cfg, clock, log, oracle
         self.clones_dir, self.run_id, self.seed = clones_dir, run_id, seed
-        self.stop = threading.Event()
-        self.workers: list[SimWorker] = []
+        self.stop_ev = threading.Event()
+        self.sessions: dict[str, SimSession] = {}
+        self.by_id: dict[str, SimSession] = {}
         self.threads: list[threading.Thread] = []
+        self._repos: dict[str, tuple[Repo, threading.Lock]] = {}
+        self._lock = threading.Lock()
+        self.launches: list[tuple[str, str, str]] = []     # (slot, task, name)
+        self.messages: list[tuple[str, str, str]] = []     # (slot, task, kind)
 
-    def start_all(self, orch=None):
-        self.start([f"w{i}" for i in range(1, self.cfg.run.n_workers + 1)], orch)
+    def slot_repo(self, slot: str) -> tuple[Repo, threading.Lock]:
+        with self._lock:
+            if slot not in self._repos:
+                r = clone(self.cfg.repo.remote_url, self.clones_dir / slot, (f"sim-{slot}", f"{slot}@sim.local"))
+                self._repos[slot] = (r, threading.Lock())
+            return self._repos[slot]
 
-    def start(self, ids, orch=None):
-        for wid in ids:
-            w = SimWorker(wid, self.cfg, self.clock, self.oracle, self.clones_dir / wid,
-                          random.Random(f"{self.seed}-{wid}"), self.stop)
-            self.workers.append(w)
-            t = threading.Thread(target=w.run, name=f"sim-{wid}", daemon=True)
-            t.start()
-            self.threads.append(t)
-            self.log.emit("worker_start", worker=wid, session_id=f"sim-{self.run_id}-{wid}")
+    def _spawn(self, name, fn, *a):
+        t = threading.Thread(target=fn, args=a, name=name, daemon=True)
+        t.start()
+        self.threads.append(t)
 
-    def stop_all(self, orch=None):
-        self.stop.set()
-        for t in self.threads:
+    def launch(self, slot: str, task, prompt: str, name: str) -> LaunchResult:
+        if f"READY: {task.id}" not in prompt or f"{self.cfg.repo.branch_prefix}{task.id}" not in prompt:
+            raise LaunchError("prompt lacks the READY: message or the branch name")
+        sid = f"sim-{self.run_id}-{slot}-{task.id}"
+        repo, lk = self.slot_repo(slot)
+        s = SimSession(task.id, sid, self.cfg, self.clock, self.oracle, random.Random(f"{self.seed}-{task.id}"),
+                       threading.Event()).bind(repo, lk)
+        with self._lock:
+            self.sessions[task.id] = s
+            self.by_id[sid] = s
+            self.launches.append((slot, task.id, name))
+        if self.stop_ev.is_set():
+            s.halt.set()
+        self._spawn(f"sim-{sid}", s.run_first)
+        return LaunchResult(sid, "sim")
+
+    def send(self, slot: str, task_id: str, session_id: str | None, message: str, kind: str = "rework") -> None:
+        s = self.by_id.get(session_id or "")
+        if s is None:
+            raise LaunchError(f"no such session {session_id}")
+        repo, lk = self.slot_repo(slot)
+        s.bind(repo, lk)
+        with self._lock:
+            self.messages.append((slot, task_id, kind))
+        self._spawn(f"sim-{session_id}-{kind}", s.run_message, kind)
+
+    def stop(self, session_id: str | None) -> None:
+        s = self.by_id.get(session_id or "")
+        if s is not None:
+            s.halt.set()
+
+    def stop_all(self, orch=None) -> None:
+        self.stop_ev.set()
+        for s in list(self.sessions.values()):
+            s.halt.set()
+        for t in list(self.threads):
             t.join(timeout=30)
