@@ -98,3 +98,28 @@ def test_claims_after_window_end_are_ignored(make_env):
     evs = env.events()
     assert count(evs, "claim") == 0 and count(evs, "submit") == 0
     assert any("outside the window" in e["text"] for e in evs if e["type"] == "note")
+
+
+def test_tasks_exhausted_note_when_last_task_claimed(make_env):
+    """The watcher notes the moment the last unclaimed task is claimed, so the analysis can stop
+    lambda and attempt counts there (a supply shortfall must not look like coordination drag)."""
+    env = make_env()
+    env.orch.phase = "window"
+    ids = sorted(env.orch.supply_ids)
+    assert len(ids) == 10                      # reset.json's task_order
+    w = env.worker("w1")
+    w.fetch()
+    for t in ids[:-1]:
+        assert w.try_claim(t)
+    env.orch.poll()
+    notes = [e["text"] for e in env.events("note")]
+    assert not any(n.startswith("tasks_exhausted") for n in notes)
+    assert w.try_claim(ids[-1])
+    env.orch.poll()
+    env.orch.poll()
+    notes = [e["text"] for e in env.events("note")]
+    assert notes.count("tasks_exhausted n=10") == 1
+    evs = env.events()
+    i_last = max(i for i, e in enumerate(evs) if e["type"] == "claim")
+    assert evs[i_last + 1]["type"] == "note" and evs[i_last + 1]["text"] == "tasks_exhausted n=10"
+    assert validate_events(env.log.path) == []

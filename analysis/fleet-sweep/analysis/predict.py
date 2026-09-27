@@ -1,17 +1,30 @@
 #!/usr/bin/env python3
-"""Point predictions for the four rivals (PLAN-v3 section 2) and the q-gate (section 3).
+"""Point predictions for the four rivals at PLAN-v4's fixed sizes, and the pre-registration table.
 
-    python predict.py --pilot pilot.json                       # gate + table at the gated N_low, N_high
-    python predict.py --pilot pilot.json --sizes 1 5 --md prediction.md --json prediction.json
-    python predict.py --lambda-pilot 3.4 --n-pilot 2 --V 12 --b-review 0.3 --b-hidden 0.15 --r0 0.4 \
-                      --ci-time-min 2.5                        # parameters by hand
+    python predict.py --pilot pilot.json --md prediction.md --json prediction.json
+    python predict.py --pilot pilot.json --burn 2.10 --balance 240     # adds abort rule 5 (credits)
+    python predict.py --lambda-pilot 7 --n-pilot 1 --V 14 --b-review 0.25 --b-hidden 0.1 --r0 0.3 \
+                      --completion 0.7 --ci-time-min 0.5              # parameters by hand
+    python predict.py --pilot pilot.json --v3-gate                    # SUPERSEDED PLAN-v3 gate, for reference only
+
+PLAN-v4 (the default path): fleet sizes N = 1 and N = 12, fixed in advance; three windows per size of
+120 min with 10 min warm-up and 10 min grace (ABBAAB); the `completion` reading of the rivals' rework
+term; no pilot gate. The output is the pre-registration table: pilot inputs, design-point loads, abort
+rule 4 (calibrated V within +/-30% of 2 x pilot lambda), point predictions (finished and attempts per
+window, 95% predictive intervals) for Carnot, USL, Amdahl and linear at each size, the O2 interval for
+the total finished over the three N = 12 windows, and the operating-characteristics statement with the
+confirmatory / conditional / descriptive split of PLAN-v4 section 1.
+
+`--v3-gate` runs PLAN-v3's q-gate (N_low, N_high, REDESIGN_* decisions). PLAN-v4 section 2 dropped it
+("No pilot gate"); it is kept only so the design search and older outputs can be reproduced, and its
+decision is labelled SUPERSEDED. It is never computed on the default path.
 
 Inputs: the pilot's lambda (first attempts per worker-hour after warm-up, at n_pilot workers), V
 (reviews per reviewer-busy hour), b_review, b_hidden (and b_other: rebase conflicts + visible fails per
-approval, 0 if absent), r0, merge-queue time per change; the sweep window, warm-up; the model constants
-alpha = 0.1, beta = 0.01, p = 0.005.
+approval, 0 if absent), r0, the completion share c (finished / attempts in the pilot windows),
+merge-queue time per change; the model constants alpha = 0.1, beta = 0.01, p = 0.005.
 
-Formulas (hours = window - warm-up):
+Formulas (hours = window - warm-up = 110 min):
 
 * single-agent rate for rival R, anchored at the pilot:  lam1_R = lambda_pilot * n_pilot / X_R(n_pilot)
   so every rival reproduces the pilot's attempt rate exactly (X_R = USL for Carnot and USL,
@@ -20,23 +33,14 @@ Formulas (hours = window - warm-up):
   1 - b(N) = (1 - b_review)(1 - b_hidden(N))(1 - b_other);
   reviews/h = min(lam1 X(N) / (1 - b(N)), V, merge-queue capacity / (1 - b_review));
   finished = (1 - b_hidden(N))(1 - b_other)(1 - b_review) * reviews/h * hours.
-  With b_other = 0 and no merge-queue limit this is exactly PLAN-v3's
-  (1 - b_hidden)(1 - b_review) min(lam1 X(N)/(1 - b), V) hours.
 * USL: (1 - r0) lam1 X(N) hours;  Amdahl: (1 - r0) lam1_A X_A(N) hours;  Linear: (1 - r0) lam1_L N hours.
   Readings of the rework term (--rival-rework; README "decisions"):
-    plan        as written above (default, PLAN-v3 section 2).
-    recovered   rivals use factor 1 instead of (1 - r0): bounced changes are reworked and finish, which is
-                what Carnot's own formula implies when review does not bind.
-    completion  every rival, and Carnot's uncapped branch, use the pilot's measured completion share c =
-                finished / attempts in the pilot window: rival = c lam1_R X_R(N) hours and
+    completion  (PLAN-v4, default) every rival, and Carnot's uncapped branch, use the pilot's measured
+                completion share c: rival = c lam1_R X_R(N) hours and
                 Carnot = min(c lam1 X(N), (1 - b_hidden(N))(1 - b_other)(1 - b_review) V_cap) hours,
                 so Carnot and USL coincide below the knee and differ only by the review cap.
-
-Gate: demand(N) = lam1 X(N) / (1 - b) reviews per hour (Carnot's X).
-N_low = largest N with demand <= 0.7 V; N_high = smallest N with demand >= 1.5 V.
-If demand(8) < V: the review limit cannot be reached within budget -> redesign (smaller tasks,
-heavier pre-registered review job) or do not run. If N_high > 8 (or none): re-cut the budget or do
-not run. If no N >= 1 has demand <= 0.7 V: the reviewer is saturated even at one worker -> redesign.
+    plan        (1 - r0) as PLAN-v3 section 2 writes it.
+    recovered   factor 1: bounced changes are reworked and finish.
 """
 from __future__ import annotations
 
@@ -47,10 +51,10 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import (ALPHA, BETA, CV_OVERDISPERSION, P_COLLISION, RIVAL_LABEL, RIVALS, X_for,  # noqa: E402
-                    X_usl, nb_interval)
+from common import (ALPHA, BETA, CV_OVERDISPERSION, P_COLLISION, PLAN_V4, RIVAL_LABEL, RIVALS,  # noqa: E402
+                    V4_OC, X_for, X_usl, nb_interval, pooled_interval)
 
-N_MAX_BUDGET = 8
+N_MAX_BUDGET = 8   # PLAN-v3 gate only (superseded)
 N_SEARCH = 20
 
 
@@ -60,8 +64,8 @@ def _num(x, default=math.nan):
 
 class Params:
     def __init__(self, lambda_pilot, n_pilot, V, b_review, b_hidden, r0, ci_time_min=0.0, b_other=0.0,
-                 window_min=90.0, warmup_min=10.0, alpha=ALPHA, beta=BETA, p=P_COLLISION,
-                 rival_rework="plan", mq_cap=True, completion=None):
+                 window_min=PLAN_V4["window_min"], warmup_min=PLAN_V4["warmup_min"], alpha=ALPHA, beta=BETA,
+                 p=P_COLLISION, rival_rework=PLAN_V4["rival_rework"], mq_cap=True, completion=None):
         self.lambda_pilot = float(lambda_pilot)
         self.n_pilot = int(n_pilot)
         self.V = float(V)
@@ -148,6 +152,8 @@ def predict_window(P: Params, n, hours=None):
 
 
 def gate(P: Params):
+    """SUPERSEDED (PLAN-v3 section 3). PLAN-v4 fixes N = 1 and 12 with no gate; this is kept only for
+    reproducing the design search and PLAN-v3 outputs, and runs only behind predict.py --v3-gate."""
     dem = {n: P.demand(n) for n in range(1, N_SEARCH + 1)}
     lows = [n for n in dem if n <= N_MAX_BUDGET and dem[n] <= 0.7 * P.V]
     n_low = max(lows) if lows else None
@@ -185,8 +191,8 @@ def gate(P: Params):
 
 
 def budget_rule(n_low, n_high, burn, pilot_spend):
-    """PLAN-v3 section 4: full sweep if burn * 3 (N_low + N_high) <= 200 - P, else 75-min windows,
-    else one replicate of each size reported as a pilot."""
+    """SUPERSEDED (PLAN-v3 section 4; --v3-gate only): full sweep if burn * 3 (N_low + N_high) <= 200 - P,
+    else 75-min windows, else one replicate of each size reported as a pilot."""
     room = 200.0 - pilot_spend
     full = burn * 3.0 * (n_low + n_high)
     short = burn * 2.5 * (n_low + n_high)
@@ -210,9 +216,10 @@ def prediction_table(P: Params, sizes):
     return rows
 
 
-def to_markdown(P: Params, g, rows, pilot=None, budget=None):
+def to_markdown_v3(P: Params, g, rows, pilot=None, budget=None):
+    """SUPERSEDED PLAN-v3 table with the gate (--v3-gate only)."""
     L = []
-    L.append("## Point predictions (pre-registration, PLAN-v3 sections 2-3)\n")
+    L.append("## SUPERSEDED: PLAN-v3 gate and point predictions (reference only; PLAN-v4 has no gate)\n")
     L.append(f"Constants: alpha = {P.alpha}, beta = {P.beta}, p = {P.p}; over-dispersion CV = {CV_OVERDISPERSION} "
              f"(fixed). Window {P.window_min:g} min, warm-up {P.warmup_min:g} min, so hours = {P.hours:.3f} per "
              f"window. Rival rework reading: `{P.rival_rework}`.\n")
@@ -247,7 +254,7 @@ def to_markdown(P: Params, g, rows, pilot=None, budget=None):
     L.append("|---|" + "---|" * len(g["demand"]))
     L.append("| demand | " + " | ".join(f"{v:.1f}" for v in g["demand"].values()) + " |")
     L.append("| demand / V | " + " | ".join(f"{v / g['V']:.2f}" for v in g["demand"].values()) + " |")
-    L.append(f"\nN_low = {g['N_low']}, N_high = {g['N_high']}. **Decision: {g['decision']}** - {g['reason']}\n")
+    L.append(f"\nN_low = {g['N_low']}, N_high = {g['N_high']}. PLAN-v3 decision (SUPERSEDED, not acted on): {g['decision']} - {g['reason']}\n")
     L.append(f"The gate can pass only if V lies in [{g['V_feasible'][0]:.1f}, {g['V_feasible'][1]:.1f}] reviews/h "
              f"(q in [{g['q_feasible'][0]:.2f}, {g['q_feasible'][1]:.2f}]). With these alpha, beta, "
              f"X(8)/X(2) = {g['x_ratio_8_over_2']:.2f} < 1.5/0.7 = {g['x_ratio_needed']:.2f}, so N_low = 1 is the only "
@@ -273,27 +280,211 @@ def to_markdown(P: Params, g, rows, pilot=None, budget=None):
     return "\n".join(L)
 
 
+
+# ---------------------------------------------------------------------- PLAN-v4
+def pilot_inputs_md(P: Params, pilot):
+    L = ["| Input | Value |", "|---|---|"]
+    L.append(f"| lambda (first attempts per worker-hour at N = {P.n_pilot}) | {P.lambda_pilot:.3f} |")
+    if pilot.get("lambda_ci"):
+        L.append(f"| lambda 95% interval | {pilot['lambda_ci'][0]:.2f} - {pilot['lambda_ci'][1]:.2f} |")
+    L.append(f"| lambda1 (single-agent, USL-anchored) | {P.lam1('carnot'):.3f} |")
+    L.append(f"| V (reviews per reviewer-busy hour) | {P.V:.2f} |")
+    if pilot.get("V_ci"):
+        L.append(f"| V 95% interval (n = {pilot.get('reviews')}) | {pilot['V_ci'][0]:.1f} - {pilot['V_ci'][1]:.1f} |")
+    L.append(f"| b_review | {P.b_review:.3f} |")
+    L.append(f"| b_hidden (escaped + integration per approval) | {P.b_hidden:.3f} |")
+    L.append(f"| b_other (rebase conflict + visible fail per approval) | {P.b_other:.3f} |")
+    L.append(f"| b (implied, at N = {P.n_pilot}) | {1 - P.one_minus_b(P.n_pilot):.3f} |")
+    if pilot.get("b") is not None:
+        L.append(f"| b (measured directly) | {pilot['b']:.3f} |")
+    L.append(f"| r0 (share of first attempts bounced at least once) | {P.r0:.3f} |")
+    if P.completion is not None:
+        L.append(f"| completion share c (finished / attempts in the pilot windows) | {P.completion:.3f} |")
+    L.append(f"| merge-queue time per change (min) | {P.ci_time_min:.2f} |")
+    for k, lab in (("escape_rate", "escape rate (escaped / approvals)"), ("review_min_mean", "review time (min)"),
+                   ("review_time_cv", "review-time CV"), ("review_tokens_mean", "review tokens"),
+                   ("worker_tokens_per_attempt", "worker tokens per attempt"), ("startup_min", "session start-up (min)")):
+        if pilot.get(k) is not None:
+            L.append(f"| {lab} | {pilot[k]:.3g} |")
+    if "review_cv_ok" in pilot:
+        L.append(f"| review_cv_ok (review-time CV <= {PLAN_V4['review_cv_max']}; fixes whether V constancy is confirmatory) "
+                 f"| **{bool(pilot['review_cv_ok'])}** |")
+    if pilot.get("supply_truncated_windows"):
+        L.append(f"| pilot windows that ran out of tasks | {', '.join(pilot['supply_truncated_windows'])} |")
+    return L
+
+
+def abort_rule_4(P: Params):
+    """PLAN-v4 section 4 rule 4: calibrated V within +/-30% of 2 x pilot lambda (per agent-hour at N = 1)."""
+    target = PLAN_V4["q"] * P.lam1("carnot")
+    ratio = P.V / target
+    return dict(V=P.V, target=target, ratio=ratio, ok=0.7 <= ratio <= 1.3)
+
+
+def credit_rule(burn, balance):
+    """PLAN-v4 sections 3-4 rule 5: predicted balance after the sweep >= $50."""
+    cost = burn * PLAN_V4["sweep_session_hours"]
+    after = balance - cost
+    return dict(burn=burn, balance=balance, sweep_cost=cost, balance_after=after,
+                ok=after >= PLAN_V4["balance_floor_usd"])
+
+
+def supply_check(P: Params, supply, sizes):
+    """Minute at which each rival's predicted claim rate (first attempts per hour, from minute 0) would use up
+    `supply` tasks in one window; None if it would not within the window. Claims run slightly ahead of
+    first submissions, so this is a lower bound on the supply needed."""
+    out = []
+    for n in sizes:
+        for r in RIVALS:
+            rate = P.attempts_per_hour(r, n)  # per hour
+            t_ex = 60.0 * supply / rate if rate > 0 else math.inf
+            out.append(dict(N=n, rival=r, claims_per_window=rate * P.window_min / 60.0,
+                            exhausted_min=t_ex if t_ex < P.window_min else None))
+    return out
+
+
+def v4_predictions(P: Params, sizes=None, reps=None):
+    sizes = tuple(sizes or PLAN_V4["sizes"])
+    reps = reps or PLAN_V4["reps"]
+    rows = prediction_table(P, sizes)
+    totals = []
+    for n in sizes:
+        pr = predict_window(P, n)
+        for r in RIVALS:
+            mu = pr[r]["finished"]
+            lo, hi = pooled_interval([mu] * reps, CV_OVERDISPERSION)
+            totals.append(dict(N=n, rival=r, windows=reps, finished_total=mu * reps, finished_total_95=[lo, hi],
+                               attempts_total=pr[r]["attempts"] * reps))
+    loads = {n: P.demand(n) / P.V for n in sizes}
+    o2 = next(t for t in totals if t["N"] == max(sizes) and t["rival"] == "carnot")
+    return dict(sizes=list(sizes), reps=reps, rows=rows, totals=totals, loads=loads, q=P.V / P.lam1("carnot"),
+                O2_interval=o2["finished_total_95"], O2_point=o2["finished_total"])
+
+
+def oc_statement_md():
+    oc = V4_OC
+    pc = oc["primary_correct"]
+    cm = oc["confusion"]
+    L = ["### Operating characteristics (simulated; PLAN-v4 section 1, DESIGN-SEARCH.md stage C, 800 sweeps per truth)", ""]
+    L.append(f"- **Confirmatory, primary: review is the binding limit.** Carnot's review-capped prediction has a higher "
+             f"likelihood than the best uncapped rival (USL, Amdahl, linear); the likelihood ratio is reported. Correct "
+             f"{pc['carnot']:.2f} under Carnot truth; {pc['usl']:.2f} / {pc['amdahl']:.2f} / {pc['linear']:.2f} under USL / Amdahl / "
+             f"linear truth; {pc['carnot_lambda_30pct_low']:.2f} if agents are 30% slower than assumed; {pc['burn_1_5x']:.2f} at "
+             "1.5x credit burn with the degrade rule.")
+    L.append("- **Confirmatory, secondary** (not identities of the harness): O2, finished at N = 12 inside Carnot's 95% "
+             "predictive interval; S3, the review-bounce share b_review does not rise with N (one-sided Fisher exact); "
+             "O3, attempts rise with N (exact rate-ratio test).")
+    L.append(f"- **Conditionally confirmatory: V constancy.** V(12)/V(1) with its exact 95% interval, stable iff the interval "
+             f"lies inside [{PLAN_V4['V_band'][0]}, {PLAN_V4['V_band'][1]}], plus a Welch test on log review durations (Vdur). "
+             f"Confirmatory only if the pilot's review-time CV <= {PLAN_V4['review_cv_max']} (`review_cv_ok`), else descriptive. "
+             f"Vdur power against a +/-25% reviewer: {oc['Vdur_power']['service_cv_0_5']:.2f} at review-time CV 0.5, "
+             f"{oc['Vdur_power']['service_cv_1']:.2f} at CV 1; false-positive rate {oc['Vdur_fpr']:.2f}.")
+    L.append("- **Descriptive** (reported whatever they show; a null result is not evidence):")
+    L.append("  - four-way ranking of the rivals (USL vs Amdahl is not claimed). Simulated confusion matrix, rows = truth, "
+             "columns = family with the highest likelihood:")
+    L.append("")
+    L.append("    | truth | Carnot | USL | Amdahl | linear | tie |")
+    L.append("    |---|---|---|---|---|---|")
+    for t in RIVALS:
+        row = cm[t]
+        L.append(f"    | {t} | " + " | ".join(f"{row[c]:.2f}" for c in (*RIVALS, "tie")) + " |")
+    L.append("")
+    L.append(f"  - escaped defects against reviewer queue depth (`logit_cluster_task`, >= {PLAN_V4['min_escape_events']} events "
+             f"or not modelled): power {oc['escape_power']['a05']:.2f} at alpha 0.05;")
+    L.append(f"  - collisions against in-flight changes (k-slope): power {oc['collision_power']['p01_a05']:.2f} at p = 0.01, "
+             f"{oc['collision_power']['p05_a05']:.2f} at p = 0.05;")
+    L.append(f"  - S1r / S2r surprise ratios: false-alarm rates {oc['S1r_false_alarm']:.2f} / {oc['S2r_false_alarm']:.2f} under "
+             "the model's own truth. S2r fires about half the time under Carnot at N = 12, so it is not a criterion.")
+    L.append(f"- **Circularity.** At the design point the reviewer is {oc['loads']['N1']:.2f} loaded with one agent and about "
+             f"{oc['loads']['N12']:.1f}x overloaded with twelve, so a flat finished count at N = 12 is expected by construction "
+             "and is not itself evidence; the non-identity claims are the ones listed above.")
+    return L
+
+
+def to_markdown_v4(P: Params, pred, pilot, ar4, credits=None):
+    L = ["## Point predictions (pre-registration, PLAN-v4)\n"]
+    L.append(f"Design (PLAN-v4 section 2, fixed in advance, no pilot gate): N = {' and '.join(str(n) for n in pred['sizes'])}, "
+             f"{pred['reps']} windows per size in {PLAN_V4['order']} order, {P.window_min:g} min each ({P.warmup_min:g} min "
+             f"warm-up, {PLAN_V4['grace_min']:g} min grace), so hours = {P.hours:.3f} per window. Constants: alpha = {P.alpha}, "
+             f"beta = {P.beta}, p = {P.p}; over-dispersion CV = {CV_OVERDISPERSION} (fixed). Rival rework reading: "
+             f"`{P.rival_rework}`.\n")
+    L.append("### Pilot inputs\n")
+    L += pilot_inputs_md(P, pilot)
+    L.append("\n### Design-point load and abort rules\n")
+    L.append(f"q = V / lambda1 = {pred['q']:.2f} (target {PLAN_V4['q']:g}). Review demand lambda1 X(N) / (1 - b) as a share "
+             "of V: " + ", ".join(f"N = {n}: {v:.2f}" for n, v in pred["loads"].items()) + ".\n")
+    L.append(f"- Abort rule 4 (V within +/-30% of 2 x pilot lambda = {ar4['target']:.1f}/h): V / target = {ar4['ratio']:.2f} -> "
+             f"**{'OK' if ar4['ok'] else 'FAIL: redefine the review job and recalibrate before any sweep window'}**.")
+    lam_floor = 0.5 * PLAN_V4["lambda_target"]
+    L.append(f"- Abort rule 3 (pilot lambda >= 0.5 x target = {lam_floor:g}/agent-hour): lambda1 = {P.lam1('carnot'):.2f} -> "
+             f"**{'OK' if P.lam1('carnot') >= lam_floor else 'FAIL: report as a pilot, no sweep'}**.")
+    if pred.get("supply"):
+        S = pred["supply"]
+        ex = [x for x in S["by_rival"] if x["exhausted_min"] is not None]
+        txt = "; ".join(f"{RIVAL_LABEL[x['rival']]} at N = {x['N']} would claim all {S['n']} by minute "
+                        f"{x['exhausted_min']:.0f}" for x in ex) or "no rival's predicted claim rate uses it up within a window"
+        L.append(f"- Task supply ({S['n']} tasks per window): {txt}. A window that runs out is flagged by derive.py and its "
+                 "attempt-based measures stop at that minute (README decision 19).")
+    if credits:
+        L.append(f"- Abort rule 5 (credits): sweep {PLAN_V4['sweep_session_hours']:g} session-h x ${credits['burn']:.2f} = "
+                 f"${credits['sweep_cost']:.0f}; balance ${credits['balance']:.0f} -> ${credits['balance_after']:.0f} after "
+                 f"(floor ${PLAN_V4['balance_floor_usd']:.0f}) -> **{'OK' if credits['ok'] else 'FAIL: apply the degrade rule'}**.")
+    L.append("\n### Finished changes and attempts per window (point prediction, 95% predictive interval: NB with CV 0.3)\n")
+    L.append("| Rival | N | Finished | 95% interval | Attempts | Review demand /h | Reviews /h | Binding | b | V |")
+    L.append("|---|---|---|---|---|---|---|---|---|---|")
+    for r in pred["rows"]:
+        vtxt = "" if r["V"] is None else f"{r['V']:.1f}"
+        L.append(f"| {RIVAL_LABEL[r['rival']]} | {r['N']} | {r['finished']:.1f} | {r['finished_95'][0]}-{r['finished_95'][1]} "
+                 f"| {r['attempts']:.1f} | {r['demand_per_hour']:.1f} | {r['reviews_per_hour']:.1f} | {r['binding']} "
+                 f"| {r['b']:.3f} | {vtxt} |")
+    L.append(f"\n### Totals over the {pred['reps']} windows per size\n")
+    L.append("| Rival | N | Finished total | 95% interval | Attempts total |\n|---|---|---|---|---|")
+    for t in pred["totals"]:
+        L.append(f"| {RIVAL_LABEL[t['rival']]} | {t['N']} | {t['finished_total']:.1f} | {t['finished_total_95'][0]}-"
+                 f"{t['finished_total_95'][1]} | {t['attempts_total']:.1f} |")
+    hi = max(pred["sizes"])
+    L.append(f"\n**O2 (confirmatory, secondary):** the total finished over the {pred['reps']} N = {hi} windows is predicted "
+             f"at {pred['O2_point']:.1f}, 95% predictive interval {pred['O2_interval'][0]}-{pred['O2_interval'][1]} "
+             "(score.py recomputes it from each window's actual hours).\n")
+    f = {(r["rival"], r["N"]): r["finished"] for r in pred["rows"]}
+    lo = min(pred["sizes"])
+    L.append(f"Predicted ratio finished(N = {hi}) / finished(N = {lo}) (descriptive only; S1r/S2r compare the observed ratio "
+             "with Carnot's): " + ", ".join(f"{RIVAL_LABEL[r]} {f[(r, hi)] / f[(r, lo)]:.2f}" for r in RIVALS) + ".\n")
+    L.append("Also predicted by Carnot: V is a property of the reviewer (V(12)/V(1) = 1, review durations unchanged); "
+             "b_review the same at both sizes; attempts rising with N as lambda1 X(N). The uncapped rivals imply a reviewer "
+             "that keeps up with demand, i.e. V rising with load.\n")
+    L += oc_statement_md()
+    return "\n".join(L)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--pilot", help="pilot.json from derive.py --pilot")
-    for k in ("lambda-pilot", "V", "b-review", "b-hidden", "b-other", "r0", "ci-time-min"):
+    for k in ("lambda-pilot", "V", "b-review", "b-hidden", "b-other", "r0", "ci-time-min", "completion"):
         ap.add_argument(f"--{k}", type=float, default=None)
     ap.add_argument("--n-pilot", type=int, default=None)
-    ap.add_argument("--window-min", type=float, default=90.0)
-    ap.add_argument("--warmup-min", type=float, default=10.0)
+    ap.add_argument("--window-min", type=float, default=PLAN_V4["window_min"])
+    ap.add_argument("--warmup-min", type=float, default=PLAN_V4["warmup_min"])
     ap.add_argument("--alpha", type=float, default=ALPHA)
     ap.add_argument("--beta", type=float, default=BETA)
     ap.add_argument("--p", type=float, default=P_COLLISION)
-    ap.add_argument("--rival-rework", choices=["plan", "recovered", "completion"], default="plan")
-    ap.add_argument("--sizes", nargs="+", type=int, default=None, help="N values (default: the gate's N_low, N_high)")
-    ap.add_argument("--burn", type=float, default=None, help="$ per worker session-hour measured in T2")
-    ap.add_argument("--pilot-spend", type=float, default=None, help="$ spent on T1 + T2")
+    ap.add_argument("--rival-rework", choices=["completion", "plan", "recovered"], default=PLAN_V4["rival_rework"])
+    ap.add_argument("--sizes", nargs="+", type=int, default=list(PLAN_V4["sizes"]),
+                    help="fleet sizes (PLAN-v4: 1 12)")
+    ap.add_argument("--reps", type=int, default=PLAN_V4["reps"], help="windows per size (PLAN-v4: 3)")
+    ap.add_argument("--task-supply", type=int, default=None, help="tasks per window (TASKS.json length), for the supply check")
+    ap.add_argument("--burn", type=float, default=None, help="$ per worker session-hour measured in T1/T2")
+    ap.add_argument("--balance", type=float, default=None, help="credits left before the sweep, $ (abort rule 5)")
+    ap.add_argument("--v3-gate", action="store_true",
+                    help="SUPERSEDED: also print PLAN-v3's q-gate and budget rule (reference only; PLAN-v4 has no gate)")
+    ap.add_argument("--pilot-spend", type=float, default=None, help="--v3-gate only: $ spent on T1 + T2")
     ap.add_argument("--md", default=None)
     ap.add_argument("--json", default=None)
     a = ap.parse_args()
     pilot = json.loads(Path(a.pilot).read_text()) if a.pilot else {}
     over = {"lambda_pilot": a.lambda_pilot, "V": a.V, "b_review": a.b_review, "b_hidden": a.b_hidden,
-            "b_other": a.b_other, "r0": a.r0, "ci_time_min": a.ci_time_min, "n_pilot": a.n_pilot}
+            "b_other": a.b_other, "r0": a.r0, "ci_time_min": a.ci_time_min, "n_pilot": a.n_pilot,
+            "completion": a.completion}
     for k, v in over.items():
         if v is not None:
             pilot[k] = v
@@ -302,19 +493,30 @@ def main():
         raise SystemExit(f"missing pilot inputs: {missing}")
     P = Params.from_pilot(pilot, window_min=a.window_min, warmup_min=a.warmup_min, alpha=a.alpha, beta=a.beta,
                           p=a.p, rival_rework=a.rival_rework)
-    g = gate(P)
-    sizes = a.sizes or ([g["N_low"], g["N_high"]] if g["decision"] == "RUN" else [1, N_MAX_BUDGET])
-    rows = prediction_table(P, sizes)
-    budget = None
-    if a.burn is not None and a.pilot_spend is not None and g["N_low"] and g["N_high"]:
-        budget = budget_rule(g["N_low"], g["N_high"], a.burn, a.pilot_spend)
-    md = to_markdown(P, g, rows, pilot, budget)
+    if sorted(a.sizes) != sorted(PLAN_V4["sizes"]) or a.reps != PLAN_V4["reps"] or a.window_min != PLAN_V4["window_min"]:
+        print(f"note: not the PLAN-v4 design (sizes {list(PLAN_V4['sizes'])}, {PLAN_V4['reps']} x "
+              f"{PLAN_V4['window_min']:g} min)", file=sys.stderr)
+    pred = v4_predictions(P, sorted(a.sizes), a.reps)
+    if a.task_supply:
+        pred["supply"] = dict(n=a.task_supply, by_rival=supply_check(P, a.task_supply, sorted(a.sizes)))
+    ar4 = abort_rule_4(P)
+    credits = credit_rule(a.burn, a.balance) if a.burn is not None and a.balance is not None else None
+    md = to_markdown_v4(P, pred, pilot, ar4, credits)
+    out = dict(plan="PLAN-v4", params=P.as_dict(), design=dict(PLAN_V4), predictions=pred, abort_rule_4=ar4,
+               credits=credits, operating_characteristics=V4_OC,
+               review_cv_ok=pilot.get("review_cv_ok"), review_time_cv=pilot.get("review_time_cv"))
+    if a.v3_gate:
+        g = gate(P)
+        budget = None
+        if a.burn is not None and a.pilot_spend is not None and g["N_low"] and g["N_high"]:
+            budget = budget_rule(g["N_low"], g["N_high"], a.burn, a.pilot_spend)
+        md += "\n\n" + to_markdown_v3(P, g, prediction_table(P, sorted(a.sizes)), pilot, budget)
+        out["v3_gate_superseded"] = dict(gate=g, budget=budget)
     print(md)
     if a.md:
         Path(a.md).write_text(md + "\n")
     if a.json:
-        Path(a.json).write_text(json.dumps(dict(params=P.as_dict(), gate=g, sizes=sizes, rows=rows, budget=budget),
-                                           indent=2, default=str) + "\n")
+        Path(a.json).write_text(json.dumps(out, indent=2, default=str) + "\n")
 
 
 if __name__ == "__main__":

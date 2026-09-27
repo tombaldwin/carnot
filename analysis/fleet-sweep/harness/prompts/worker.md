@@ -7,6 +7,15 @@ The task list is `TASKS.json` on `main`, in the order to take tasks. Loop until 
    newest commit's message starts with `FEEDBACK:`, read `FEEDBACK.md` on that branch, fix the
    change (update from `origin/main` if it says so), delete `FEEDBACK.md`, commit with a message
    starting `READY:` and ending with the trailer line `Worker: {worker}`, and push the branch.
+
+   **Conflicts with `main` are common and expected.** Many tasks add code at the same places, and
+   other workers' changes are merged to `main` all the time, so a change that was fine when you
+   wrote it may no longer apply. When `FEEDBACK.md` says your change does not apply cleanly to the
+   current main (a merge conflict), resolve it by merging main into your task branch:
+   `git fetch origin`, `git merge origin/main`, fix every conflicted file so that both your change
+   and what is now on `main` are kept and work, run the visible tests, then delete `FEEDBACK.md`,
+   commit with a `READY:` message and the `Worker: {worker}` trailer, and push. Do not rebase or
+   force-push, and do not drop the other changes on `main` to make yours apply.
 2. **Claim.** Otherwise take the first task in `TASKS.json` that has no `claude/task-<id>` branch on
    origin. Create an empty commit on `origin/main` with message `CLAIM: task-<id>` and the trailer
    `Worker: {worker}`, and push it as a new branch `claude/task-<id>` (never force-push). If the

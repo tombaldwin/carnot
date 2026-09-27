@@ -1,10 +1,10 @@
 # Fleet-sweep harness (study 2 orchestrator)
 
-This runs one window of the study in PLAN-v3.md: it resets the sandbox repo, watches the workers'
-git branches, feeds the reviewer one change at a time, runs the serial merge queue, and writes
-`runs/<run_id>/events.jsonl` and `run.json` in the format SCHEMA.md sets out. It needs only the
-Python 3.11 standard library and git 2.40 or later. pytest is used for its own tests and for the
-sandbox's test suites.
+This runs one window of the study in PLAN-v4.md (protocol from PLAN-v3.md): it resets the sandbox
+repo, watches the workers' git branches, feeds the reviewer one change at a time, runs the serial
+merge queue, and writes `runs/<run_id>/events.jsonl` and `run.json` in the format SCHEMA.md sets
+out. It needs only the Python 3.11 standard library and git 2.40 or later. pytest is used for its
+own tests and for the sandbox's test suites.
 
 Dry runs, and every test, use simulated workers and a simulated reviewer against a local bare
 repo. **Nothing here calls `claude`, an Anthropic API, GitHub, or a cloud session unless you run
@@ -41,6 +41,10 @@ workers (cloud or SimWorker) --git push--> remote <--git fetch-- watcher --> rev
   commit whose message starts `FEEDBACK:`. Between tasks, the worker looks for its branches whose
   tip is such a commit, fixes the change, deletes `FEEDBACK.md`, and pushes a new `READY:` commit.
   Every re-submission is reviewed again.
+- *Conflicts with main:* the prompt tells workers plainly that these are common (95 of the 120 real
+  tasks conflict textually with at least one other) and that a `rebase_conflict` bounce is resolved by
+  merging `origin/main` into the task branch, keeping both sides, and re-submitting; never by rebasing,
+  force-pushing or dropping what is on `main`.
 
 **Watcher** (`orchestrator.poll`, every `poll_interval_s`). It fetches `main` and `claude/*`.
 - A new `claude/task-*` branch is logged as `claim`. The worker comes from the `Worker:` trailer,
@@ -49,6 +53,9 @@ workers (cloud or SimWorker) --git push--> remote <--git fetch-- watcher --> rev
   holds several, the newest is the submitted head. `attempt_no` counts submissions per task.
   `lines_changed` and `files` come from the diff against the merge base with `main`, excluding
   `FEEDBACK.md`.
+- When the last task in the window's list is claimed, the watcher logs a `note`
+  `tasks_exhausted n=<N>` straight after that `claim`. The list is `reset.json`'s `task_order` (the
+  TASKS.json on `main`), else the task catalogue.
 - `k` is the number of *other* tasks in flight (submitted at least once, not merged). `m` is how
   many of those share a file with this change.
 - Event times are the time the watcher saw the push, not git commit dates.
@@ -90,11 +97,15 @@ test names and no output. For `visible_fail` it includes the tail of the visible
 since those tests are public.
 
 **Window control** (`run_window`):
-- The window starts; the log notes `window_start`, then `warmup_end` after `warmup_min`.
+- The window starts; the log notes `window_start` and `task_supply n=<N>` (tasks in the window's list),
+  then `warmup_end` after `warmup_min`.
 - At `window_end`, the workers are stopped. Claims and submissions seen after this point are logged
   only as `note` lines and are not queued.
 - During grace, reviews of already-submitted changes (`grace_reviews = true`) and merges carry on.
   Real windows run the full grace period. Dry runs stop early once nothing is left.
+- If a review is still running then, the log notes `review_open_at_grace_end task=… head=…`. That
+  review finishes and is logged after `grace_end` (the validator warns); the analysis counts neither it
+  nor its busy time (analysis README decision 20).
 - Then `grace_end`, the threads stop, a `.claude/` diff check against the sandbox commit runs, and
   `run.json` is written.
 - Nothing is marked censored; the analysis derives that.
@@ -203,7 +214,7 @@ real seconds even when the clock is accelerated, so they measure the merge-queue
 | `[reviewer] output_format` | `text` | whether to use a JSON output mode, and its field names (the parser expects `result` and `usage.input_tokens`/`output_tokens`) |
 | `[launcher] start_command`, `stop_command`, `session_id_regex` | empty | whether and how a cloud session can be started and stopped from a script, and what it prints. Until then use `mode = "manual"` |
 | `[repo] remote_url`, `[tasks] *` | placeholders | the private sandbox repo and the local task, hidden-test and reference paths |
-| worker prompt `prompts/worker.md` | draft | that cloud sessions can push `claude/task-*` and `claude/race-*` branches (T1), and the final wording, to be pre-registered |
+| worker prompt `prompts/worker.md` | draft | that cloud sessions can push `claude/task-*` and `claude/race-*` branches (T1), and that they resolve `rebase_conflict` bounces by merging `origin/main` as the prompt says; the final wording, to be pre-registered |
 
 ## Operator checklist for a real window
 
@@ -215,8 +226,9 @@ Before the day:
 3. Commit the harness and push it with the pre-registration. `run.json` records `harness_commit`,
    with `-dirty` if the harness has uncommitted changes.
 
-For each window (order low, high, high, low):
-1. Choose `run_id` (e.g. `2026-10-02-N8-r1`), `n_workers` (from the pilot gate) and a seed.
+For each window (PLAN-v4: N = 1 and N = 12, three windows each, order 1, 12, 12, 1, 1, 12):
+1. Choose `run_id` (e.g. `2026-10-02-N12-r1`), `n_workers` (1 or 12, fixed in advance; there is no
+   pilot gate) and a seed.
 2. **Meter before:** read the credits meter.
 3. `python -m harness reset --config config.toml --run-id <id> --seed <seed>`. Check that the
    printed `sandbox_commit` is the frozen tag and `branches_deleted` looks right.
@@ -233,7 +245,7 @@ For each window (order low, high, high, low):
 7. **Meter after:** `python -m harness log --run-id <id> --type meter --field credits_left_usd=<x> --field source=operator`.
 8. `python -m harness validate-log runs/<id>`, then `python -m harness status --run-id <id>`. Check
    `notes` in `run.json` for `VOID:`. A voided window is rerun under a new id, never spliced.
-9. Decide from the burn whether the next step keeps the balance above $50 (PLAN-v3 §4).
+9. Decide from the burn whether the next window keeps the predicted balance above $50 (PLAN-v4 §3-4).
 
 ## Decisions made where PLAN-v3 / SCHEMA.md were silent
 
@@ -259,3 +271,11 @@ These are listed in the build report and should be pre-registered or overruled:
     review replaces it in place, with a `note`.
 12. **Extra `note` lines**: `visible_pre` results, window phase marks, harness errors, and
     `mq_timing` (real seconds per merge-queue step).
+13. **Task-supply notes** (PLAN-v4 prep): `task_supply n=<N>` at window start and `tasks_exhausted n=<N>`
+    when the last task in the list is claimed. The analysis stops lambda and attempt counts at that
+    minute, so running out of tasks cannot look like coordination drag. Only claims seen during the
+    window count; claims of ids not in the list do not.
+14. **Review open at grace end**: noted as `review_open_at_grace_end`; the review is still allowed to
+    finish (and is logged after `grace_end`), but the analysis drops it and its busy time.
+15. **Worker prompt, conflicts**: the prompt states that conflicts with `main` are common and are
+    resolved by merging `origin/main` into the task branch before re-submitting (DRYRUN-REPORT §6.5).

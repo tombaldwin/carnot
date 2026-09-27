@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Derive per-window quantities from runs/<id>/run.json + events.jsonl (PLAN-v3 section 6).
+"""Derive per-window quantities from runs/<id>/run.json + events.jsonl (PLAN-v4; accounting of PLAN-v3 section 6).
 
     python derive.py runs/<id> [runs/<id> ...] --out derived.json [--csv-dir tables/]
-    python derive.py --pilot runs/<T1> runs/<T2> --out pilot.json
+    python derive.py --pilot runs/<T1> runs/<T2> ... --out pilot.json
 
 Per window: attempts, reviews, V (reviews per reviewer-busy hour, all reviews), V per half-window,
-b_review, b_hidden, b (by cause), lambda (first attempts per worker-hour after warm-up), finished,
-censored, escaped defects, integration failures, and a per-PR table (first attempt: k, m, bounced at
-least once, first cause, queue depth at its first review, time in window).
+review durations and their CV, b_review, b_hidden, b (by cause), lambda (first attempts per
+worker-hour after warm-up), finished, censored, escaped defects, integration failures, the task-supply
+check, and a per-PR table (first attempt: k, m, bounced at least once, first cause, queue depth at its
+first review, time in window).
 
-Definitions used (PLAN-v3 section 6; the choices where the text leaves room are listed in README.md):
+Definitions used (PLAN-v3 section 6, carried over by PLAN-v4; the choices where the text leaves room are
+listed in README.md):
 
 * Times are relative to window_start. The counting window for attempts and finished work is
   [window_start + warm-up, window_end]; the analysis sees events up to window_end + grace.
@@ -23,11 +25,27 @@ Definitions used (PLAN-v3 section 6; the choices where the text leaves room are 
   `review_start` for that head (the hand-over; a retry after `review_error` does not reset it).
 * V = reviews / reviewer-busy hours, busy time from reviewer_busy/reviewer_idle (clipped to
   [window_start, window_end + grace]); falls back to summed review durations if those events are absent.
+  **Grace-end correction (PLAN-v4 prep, README decision 20):** a review still running at
+  window_end + grace is not counted, so its elapsed time is not counted as busy time either: busy time
+  is clipped at that review's first `review_start`. (Before, it counted as busy time but not as a
+  review, biasing V low by up to one review per window.)
   Half-windows split at the window midpoint; the second half includes the grace period; a review
   belongs to the half in which it ended.
+* Review-time CV = sample sd / mean of `duration_s` over the counted reviews. The pilot's value sets
+  the pre-registered flag `review_cv_ok` (CV <= 0.5), which decides whether the V-constancy claim is
+  confirmatory (PLAN-v4 section 1).
 * b_review = review bounces / reviews. b_hidden = (escaped + integration failures) / approvals with a
   merge-queue outcome. b_other = (rebase conflicts + visible fails) / the same approvals. b = all
   bounces / reviews.
+* **Task supply (README decision 19):** the supply is the number of tasks in the window's TASKS.json,
+  read from the harness's `note` "task_supply n=<N>" or, failing that, the length of `task_order` in
+  the run directory's reset.json. The exhaustion time is the harness's `note` "tasks_exhausted" or,
+  failing that, the `claim` that brings the number of distinct claimed tasks to the supply. If it falls
+  before window_end, the window is flagged `supply_truncated` and lambda and every attempt-based
+  measure (attempts, attempts_per_hour, worker_hours, lam) use [warm-up end, exhaustion] only, so a
+  supply shortfall cannot look like coordination drag. `attempts_full`, `worker_hours_full`,
+  `lam_full` keep the whole counting window; finished / censored / rework_open are over the whole
+  counting window (finished + censored + rework_open = attempts_full).
 * Merge-queue ("CI") time per change: from max(approval, previous change's queue exit) to its merge or
   queue bounce, FIFO.
 """
@@ -37,6 +55,8 @@ import argparse
 import csv
 import json
 import math
+import re
+import statistics
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -45,6 +65,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import BOUNCE_CAUSES, parse_t, rate_ci  # noqa: E402
 
 MQ_CAUSES = ("rebase_conflict", "visible_fail", "escaped_defect", "integration_failure")
+REVIEW_CV_MAX = 0.5   # PLAN-v4 section 1: V constancy is confirmatory only if the pilot's review-time CV <= 0.5
+SUPPLY_RE = re.compile(r"^task_supply\s+n=(\d+)")
+EXHAUSTED_RE = re.compile(r"^tasks_exhausted\b")
 
 
 def load_run(run_dir):
@@ -58,7 +81,17 @@ def _overlap(a0, a1, b0, b1):
     return max(0.0, min(a1, b1) - max(a0, b0))
 
 
-def derive_window(run, events):
+def _cv(xs):
+    xs = [float(x) for x in xs if x is not None and x > 0]
+    if len(xs) < 2:
+        return math.nan
+    m = statistics.fmean(xs)
+    return statistics.stdev(xs) / m if m > 0 else math.nan
+
+
+def derive_window(run, events, supply=None, supply_source=None):
+    """supply: number of tasks in the window's task list if known from outside the log (reset.json);
+    a `task_supply` note in the log takes precedence."""
     ws = parse_t(run["window_start"])
     we = parse_t(run["window_end"]) - ws
     warm = 60.0 * float(run["warmup_min"])
@@ -89,6 +122,9 @@ def derive_window(run, events):
     usage_cost = 0.0
     first_claim = {}
     worker_start_t = {}
+    claims = []               # (t, task) of every logged claim
+    exhausted_note_t = None
+    cur_review = None         # (t of first review_start, key) of the review the reviewer is on
 
     def task_row(task):
         if task not in tasks:
@@ -98,6 +134,13 @@ def derive_window(run, events):
     for e in events:
         t = parse_t(e["t"]) - ws
         typ = e["type"]
+        if typ == "note":
+            m = SUPPLY_RE.match(e.get("text", ""))
+            if m:
+                supply, supply_source = int(m.group(1)), "note"
+            elif EXHAUSTED_RE.match(e.get("text", "")) and exhausted_note_t is None:
+                exhausted_note_t = t
+            continue
         if typ in ("worker_start", "worker_restart"):
             w = e["worker"]
             if typ == "worker_restart":
@@ -120,6 +163,7 @@ def derive_window(run, events):
             continue
         if typ == "claim":
             first_claim.setdefault(e["worker"], t)
+            claims.append((t, e["task"]))
         elif typ == "claim_race":
             claim_races += 1
         elif typ == "submit":
@@ -135,6 +179,8 @@ def derive_window(run, events):
             key = (e["task"], e["head"])
             if key not in open_reviews:
                 open_reviews[key] = (t, e["queue_depth"])
+            if cur_review is None or cur_review[1] != key:
+                cur_review = (t, key)
             if key not in first_review_seen and e["head"] in heads:
                 first_review_seen.add(key)
                 wait_steps.append((t, -1))
@@ -148,12 +194,14 @@ def derive_window(run, events):
                       tokens=(e.get("tokens_in") or 0) + (e.get("tokens_out") or 0))
             reviews.append(rv)
             task_row(e["task"])["reviews"].append(rv)
+            cur_review = None
         elif typ == "reviewer_busy":
             have_busy_events = True
             if busy_since is None:
                 busy_since = t
         elif typ == "reviewer_idle":
             have_busy_events = True
+            cur_review = None
             if busy_since is not None:
                 busy_iv.append((busy_since, t))
                 busy_since = None
@@ -179,6 +227,29 @@ def derive_window(run, events):
     if not have_busy_events:
         busy_iv = [(r["t_start"], r["t_end"]) for r in reviews]
     busy_iv = [(max(0.0, a), min(end_all, b)) for a, b in busy_iv if b > 0 and a < end_all]
+    # Grace-end correction: the review running at window_end + grace is not counted, so neither is its
+    # elapsed time. Reviews are serial, so busy time after its first review_start belongs to it alone.
+    open_at_end = cur_review is not None and cur_review[0] <= end_all
+    busy_clipped_s = 0.0
+    if open_at_end:
+        cap = cur_review[0]
+        before = sum(b - a for a, b in busy_iv)
+        busy_iv = [(a, min(b, cap)) for a, b in busy_iv if min(b, cap) > a]
+        busy_clipped_s = before - sum(b - a for a, b in busy_iv)
+
+    # ------------------------------------------------------------------ task supply
+    t_exhausted = None
+    if supply is not None and supply > 0:
+        seen = set()
+        for t, task in sorted(claims, key=lambda x: x[0]):
+            seen.add(task)
+            if len(seen) >= supply:
+                t_exhausted = t
+                break
+    if exhausted_note_t is not None:
+        t_exhausted = exhausted_note_t if t_exhausted is None else min(t_exhausted, exhausted_note_t)
+    truncated = t_exhausted is not None and t_exhausted < we
+    t_count_end = max(warm, t_exhausted) if truncated else we   # attempt-based measures end here
 
     # ------------------------------------------------------------------ reviewer
     busy_h = sum(b - a for a, b in busy_iv) / 3600
@@ -270,24 +341,37 @@ def derive_window(run, events):
                               attempt_no=r["attempt_no"], depth=r["depth"], t_review_min=r["t_start"] / 60,
                               escaped=not hidden_pre[r["head"]][1]))
 
+    for p in prs:
+        p["counted_supply"] = p["counted"] and p["t_submit_min"] * 60 <= t_count_end
     counted = [p for p in prs if p["counted"]]
-    worker_h_post = sum(_overlap(a, b, warm, we) for iv in worker_iv.values() for a, b in iv) / 3600
+    worker_h_full = sum(_overlap(a, b, warm, we) for iv in worker_iv.values() for a, b in iv) / 3600
+    worker_h_post = sum(_overlap(a, b, warm, t_count_end) for iv in worker_iv.values() for a, b in iv) / 3600
     worker_h_all = sum(b - a for iv in worker_iv.values() for a, b in iv) / 3600
-    attempts = len(counted)
+    attempts_full = len(counted)
+    attempts = sum(1 for p in prs if p["counted_supply"])
+    attempt_hours = (t_count_end - warm) / 3600.0
+    durations = [r["duration_s"] if r["duration_s"] else r["t_end"] - r["t_start"] for r in reviews]
     resolved_first = [p for p in prs if p["resolved"]]
     startup = [first_claim[w] - worker_start_t[w] for w in first_claim if w in worker_start_t]
 
     s = dict(
         run_id=run["run_id"], kind=run["kind"], n_workers=run["n_workers"],
         window_min=we / 60, warmup_min=warm / 60, grace_min=grace / 60, hours=hours,
-        attempts=attempts, attempts_all=len(prs),
-        worker_hours=worker_h_post, worker_hours_all=worker_h_all,
+        task_supply=supply, task_supply_source=supply_source if supply is not None else None,
+        tasks_claimed=len({task for _, task in claims}),
+        t_exhausted_min=t_exhausted / 60 if t_exhausted is not None else None,
+        supply_truncated=truncated, attempt_window_end_min=t_count_end / 60, attempt_hours=attempt_hours,
+        attempts=attempts, attempts_full=attempts_full, attempts_all=len(prs),
+        worker_hours=worker_h_post, worker_hours_full=worker_h_full, worker_hours_all=worker_h_all,
         lam=attempts / worker_h_post if worker_h_post > 0 else math.nan,
-        attempts_per_hour=attempts / hours if hours > 0 else math.nan,
+        lam_full=attempts_full / worker_h_full if worker_h_full > 0 else math.nan,
+        attempts_per_hour=attempts / attempt_hours if attempt_hours > 0 else math.nan,
         reviews=n_rev, first_reviews=sum(1 for r in reviews if r["attempt_no"] == 1),
         re_reviews=sum(1 for r in reviews if (r["attempt_no"] or 1) > 1),
         approvals=len(approvals), approvals_resolved=n_ar,
         busy_hours=busy_h, V=V, V_ci=list(rate_ci(n_rev, busy_h)), V_half=halves,
+        review_open_at_end=open_at_end, busy_clipped_min=busy_clipped_s / 60,
+        review_durations_s=durations, review_time_cv=_cv(durations),
         reviewer_util=util, queue_nonempty_share=nonempty / span, mean_waiting_depth=area / span,
         bounces={c: bounces.get(c, 0) for c in BOUNCE_CAUSES}, bounces_total=tot_b,
         b_review=bounces.get("review", 0) / n_rev if n_rev else math.nan,
@@ -317,16 +401,31 @@ def derive_window(run, events):
     return dict(summary=s, prs=prs, approvals=appr_rows)
 
 
+def supply_from_reset(run_dir):
+    """Length of the window's task order from the harness's reset.json, if present."""
+    f = Path(run_dir) / "reset.json"
+    if not f.exists():
+        return None
+    try:
+        order = json.loads(f.read_text()).get("task_order")
+    except (json.JSONDecodeError, AttributeError):
+        return None
+    return len(order) if isinstance(order, list) and order else None
+
+
 def derive_dir(run_dir):
     run, events = load_run(run_dir)
-    return derive_window(run, events)
+    n = supply_from_reset(run_dir)
+    return derive_window(run, events, supply=n, supply_source="reset.json" if n is not None else None)
 
 
 # ---------------------------------------------------------------------- pilot
 def pilot_params(derived, n_pilot=None):
-    """Pool trial + pilot windows into the pre-registered pilot outputs (PLAN-v3 section 3, T2).
-    lambda comes from kind == 'pilot' windows only (T1 is a throttling test at N = 1 then 9); V, b, r0,
-    CI time and review cost are pooled over every window given (T1's PRs are reviewed too)."""
+    """Pool trial + pilot windows into the pre-registered pilot outputs (PLAN-v4 section 2: T1 + T2).
+    lambda comes from kind == 'pilot' windows only (T1 is a throttling test at N = 1 then 12); V, b, r0,
+    CI time, review time and its CV, and review cost are pooled over every window given (T1's PRs are
+    reviewed too). review_cv_ok = (review-time CV <= 0.5) is the pre-registered flag that makes the
+    V-constancy claim confirmatory; it is fixed here, before the first sweep window."""
     S = [d["summary"] for d in derived]
     pil = [s for s in S if s["kind"] == "pilot"] or S
     ns = sorted({s["n_workers"] for s in pil})
@@ -343,6 +442,8 @@ def pilot_params(derived, n_pilot=None):
     nci = sum(s["n_ci"] for s in S)
     nres = sum(s["n_resolved_first"] for s in S)
     lam_ci = rate_ci(att, wh)
+    durs = [x for s in S for x in s.get("review_durations_s", [])]
+    rcv = _cv(durs)
     out = dict(
         n_pilot=n_pilot,
         lambda_pilot=att / wh if wh else math.nan, lambda_ci=list(lam_ci), attempts=att, worker_hours=wh,
@@ -354,9 +455,13 @@ def pilot_params(derived, n_pilot=None):
         b=sum(bc.values()) / nrev if nrev else math.nan,
         escape_rate=bc["escaped_defect"] / nar if nar else math.nan, approvals_resolved=nar,
         r0=sum(s["n_bounced_first"] for s in S) / nres if nres else math.nan, n_resolved_first=nres,
-        completion=(sum(s["finished"] for s in pil) / att) if att else math.nan,
+        completion=(sum(s["finished"] for s in pil) / sum(s.get("attempts_full", s["attempts"]) for s in pil))
+        if sum(s.get("attempts_full", s["attempts"]) for s in pil) else math.nan,
+        supply_truncated_windows=[s["run_id"] for s in S if s.get("supply_truncated")],
         ci_time_min=(sum(s["ci_time_min"] * s["n_ci"] for s in S if s["n_ci"]) / nci) if nci else math.nan,
         review_min_mean=(sum(s["review_min_mean"] * s["reviews"] for s in S if s["reviews"]) / nrev) if nrev else math.nan,
+        review_time_cv=rcv, n_review_durations=len(durs), review_cv_max=REVIEW_CV_MAX,
+        review_cv_ok=bool(rcv == rcv and rcv <= REVIEW_CV_MAX),
         review_tokens_mean=(sum(s["review_tokens_mean"] * s["reviews"] for s in S if s["reviews"]) / nrev) if nrev else math.nan,
         worker_tokens_per_attempt=_nanmean([s["worker_tokens_per_attempt"] for s in S]),
         startup_min=_nanmean([s["startup_min_mean"] for s in S]),
@@ -416,6 +521,7 @@ def main():
             s["V_half1"], s["V_half2"] = s["V_half"][0]["V"], s["V_half"][1]["V"]
             s.pop("V_half")
             s.pop("worker_tokens_per_hour")
+            s.pop("review_durations_s", None)
             flat.append(s)
         write_csv(cd / "windows.csv", flat)
     txt = json.dumps(_clean(res), indent=2)
@@ -425,12 +531,20 @@ def main():
         print(txt)
     else:
         print(f"{'run':28} {'N':>2} {'att':>4} {'lam':>5} {'rev':>4} {'V':>5} {'b_rev':>5} {'b_hid':>5} "
-              f"{'b':>5} {'fin':>4} {'cens':>4} {'esc':>3} {'intf':>4} {'q>0':>4}")
+              f"{'b':>5} {'fin':>4} {'cens':>4} {'esc':>3} {'intf':>4} {'q>0':>4} {'rCV':>4}  supply")
         for d in derived:
             s = d["summary"]
+            if s["supply_truncated"]:
+                sup = (f"TRUNCATED: {s['task_supply']} tasks all claimed at min {s['t_exhausted_min']:.1f}; "
+                       f"attempts/lambda to that minute (whole window: {s['attempts_full']}, {s['lam_full']:.2f})")
+            elif s["task_supply"] is None:
+                sup = "unknown (no task_supply note or reset.json)"
+            else:
+                sup = f"ok ({s['tasks_claimed']}/{s['task_supply']} claimed)"
             print(f"{s['run_id'][:28]:28} {s['n_workers']:>2} {s['attempts']:>4} {s['lam']:>5.2f} {s['reviews']:>4} "
                   f"{s['V']:>5.1f} {s['b_review']:>5.2f} {s['b_hidden']:>5.2f} {s['b']:>5.2f} {s['finished']:>4} "
-                  f"{s['censored']:>4} {s['escaped']:>3} {s['integration_failures']:>4} {s['queue_nonempty_share']:>4.2f}")
+                  f"{s['censored']:>4} {s['escaped']:>3} {s['integration_failures']:>4} {s['queue_nonempty_share']:>4.2f} "
+                  f"{s['review_time_cv']:>4.2f}  {sup}")
 
 
 if __name__ == "__main__":

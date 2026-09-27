@@ -13,7 +13,7 @@ import math
 import numpy as np
 from scipy import optimize, special, stats
 
-# Model constants fixed by PLAN-v3 section 2 (study 1 for p).
+# Model constants fixed by PLAN-v3 section 2 (study 1 for p), unchanged in PLAN-v4.
 ALPHA = 0.1
 BETA = 0.01
 P_COLLISION = 0.005
@@ -27,6 +27,37 @@ RIVAL_LABEL = {
     "linear": "Linear",
 }
 BOUNCE_CAUSES = ("review", "rebase_conflict", "visible_fail", "escaped_defect", "integration_failure")
+
+# ----------------------------------------------------------------------------- PLAN-v4 design point
+# PLAN-v4 section 2: fixed sizes, no pilot gate, three 120-min windows per size in ABBAAB order.
+PLAN_V4 = dict(sizes=(1, 12), reps=3, order="ABBAAB", window_min=120.0, warmup_min=10.0, grace_min=10.0,
+               rival_rework="completion", escape_model="logit_cluster_task", lambda_target=8.0, q=2.0,
+               V_band=(0.8, 1.25), review_cv_max=0.5, min_escape_events=8, alpha_test=0.05,
+               sweep_session_hours=78.0, balance_floor_usd=50.0)
+
+# Result grades (PLAN-v4 section 1). Every result in RESULTS-draft.md carries one of these.
+CONFIRMATORY = "confirmatory"
+CONDITIONAL = "conditional"
+DESCRIPTIVE = "descriptive"
+
+# Simulated operating characteristics at the design point, quoted from PLAN-v4 section 1 and
+# design-search/DESIGN-SEARCH.md (stage C, 800 replicates per truth, design "H lam8 q2 N1/12 120m x3 |
+# T2 1w 8x60m T1r cal120"; confusion matrix from design-search/stageC_final.json). These are stated in
+# the pre-registration; the analysis only prints them next to the results.
+V4_OC = dict(
+    primary_correct=dict(carnot=0.97, usl=0.87, amdahl=1.00, linear=1.00, carnot_lambda_30pct_low=0.70,
+                         burn_1_5x=0.85),
+    # rows: truth; columns: family with the highest likelihood (share of 800 simulated sweeps)
+    confusion=dict(carnot=dict(carnot=0.969, usl=0.028, amdahl=0.0, linear=0.0, tie=0.004),
+                   usl=dict(carnot=0.128, usl=0.666, amdahl=0.201, linear=0.005, tie=0.0),
+                   amdahl=dict(carnot=0.0, usl=0.159, amdahl=0.689, linear=0.153, tie=0.0),
+                   linear=dict(carnot=0.0, usl=0.0, amdahl=0.086, linear=0.914, tie=0.0)),
+    S1r_false_alarm=0.05, S2r_false_alarm=0.53,
+    Vdur_power=dict(service_cv_1=0.19, service_cv_0_5=0.68), Vdur_fpr=0.06,
+    escape_power=dict(a05=0.10, a01=0.03), escape_null=0.05,
+    collision_power=dict(p01_a05=0.09, p05_a05=0.34, p05_a01=0.12),
+    loads=dict(N1=0.92, N12=3.23),
+)
 
 
 # ----------------------------------------------------------------------------- model curves
@@ -89,6 +120,20 @@ def nb_interval(mu, cv=CV_OVERDISPERSION, level=0.95):
         d = stats.poisson(mu)
     else:
         k = nb_size(cv)
+        d = stats.nbinom(k, k / (k + mu))
+    a = (1 - level) / 2
+    return int(d.ppf(a)), int(d.ppf(1 - a))
+
+
+def pooled_interval(mus, cv=CV_OVERDISPERSION, level=0.95):
+    """Predictive interval for the total count over several windows with means mus, each window
+    Poisson-gamma with common-mode CV cv (moment-matched negative binomial for the sum)."""
+    mu = sum(mus)
+    var = mu + cv ** 2 * sum(m * m for m in mus)
+    if var <= mu:
+        d = stats.poisson(max(mu, 1e-9))
+    else:
+        k = mu * mu / (var - mu)
         d = stats.nbinom(k, k / (k + mu))
     a = (1 - level) / 2
     return int(d.ppf(a)), int(d.ppf(1 - a))

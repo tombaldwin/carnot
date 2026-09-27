@@ -47,6 +47,10 @@ def test_end_to_end_dry_run(tmp_path):
     assert summary["reviews"] >= 3 and summary["merges"] >= 1
     evs = read_events(run_dir / "events.jsonl")
     assert evs[0]["type"] == "note"
+    notes = [e["text"] for e in evs if e["type"] == "note"]
+    assert "task_supply n=20" in notes          # the analysis reads the window's task supply from this note
+    i_ge = notes.index("grace_end")
+    assert all(not n.startswith("review_open_at_grace_end") for n in notes[i_ge:])
 
     # Hidden tests never reach any branch: not on the remote, not in the orchestrator's clone.
     hidden_root = run_dir / "_sandbox" / "toy" / "tasks" / "hidden"

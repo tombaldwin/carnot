@@ -1,31 +1,42 @@
 #!/usr/bin/env python3
-"""Primary analysis of the fleet sweep (PLAN-v3 sections 1, 2 and 7).
+"""Primary analysis of the fleet sweep, coded to PLAN-v4 section 1.
 
-    python score.py --pilot pilot.json runs/<w1> runs/<w2> runs/<w3> runs/<w4> \
-        --out-dir results/            # writes results/results.json and results/RESULTS-draft.md
+    python score.py --pilot pilot.json runs/<w1> ... runs/<w6> --out-dir results/
+        # writes results/results.json and results/RESULTS-draft.md
 
-Reads the four sweep windows (two sizes, any order) and the pre-registered pilot parameters, and
-computes:
+Reads the sweep windows (two sizes, any order; PLAN-v4: three at N = 1 and three at N = 12) and the
+pre-registered pilot parameters (pilot.json, including the flag `review_cv_ok`). Every result carries a
+grade fixed in advance (PLAN-v4 section 1):
 
-1. Rival scoring: negative-binomial (Poisson with fixed over-dispersion, CV 0.3) log-likelihood of each
-   window's finished count under each rival's point prediction; likelihood ratios; the family with the
-   highest likelihood. The pooled ratio finished(high) / finished(low) is descriptive only.
-2. The section-1 outcomes and pre-registered surprises, coded PASS / FAIL (N/A when the condition
-   they depend on is not met):
-     S1 finished(high) >= 1.3 x finished(low) while the review queue is non-empty for most of the window
-     S2 finished(high) <= 0.7 x finished(low) while the queue is non-empty
-     S3 b rising with fleet size (one-sided Fisher exact p < 0.05 on bounces per review)
-     S4 V outside +/-25% of the pilot (pooled per size)
-     S5 escape rate flat or falling with queue depth while V rises (> 1.25 x)
-   and O1 (V stable, incl. half-window drift), O2 (finished at N_high inside Carnot's 95% predictive
-   interval), O3 (attempt rate rising), O4 (escaped defects rising with depth), O5 (collisions, descriptive).
-3. V per window and half-window against the pilot's +/-25% band.
-4. Attempts per hour and per agent-hour, low vs high.
-5. Escaped defects: logistic on queue depth at review + time in window + window fixed effects, task as
-   a stratum (conditional logistic). Fewer than 8 escaped-defect events -> descriptive only.
-6. Collisions: logistic of "bounced at least once" on k and m with window fixed effects, censored first
-   attempts excluded; plus the model's own form 1 - s_w (1-p)^k (1-p_m)^m for p-hat.
-7. Descriptive: alpha, beta from carnot.py fit on (N, attempts per hour).
+Confirmatory, primary
+  P1   Review is the binding limit: Carnot's review-capped prediction has a higher likelihood than the
+       best uncapped rival (USL, Amdahl, linear). Negative-binomial likelihood (fixed CV 0.3) of each
+       window's finished count, `completion` reading; the likelihood ratio is reported. A tie (identical
+       predictions) is not "higher".
+Confirmatory, secondary
+  O2   Finished at N_high: the total over the N_high windows lies in Carnot's 95% predictive interval.
+  S3   b_review (review bounces / reviews) does not rise with N: FAIL if one-sided Fisher exact p < 0.05.
+       Rebase conflicts, visible fails, escaped defects and integration failures are reported separately
+       as descriptive (the task set makes rebase conflicts rise with the number of merges).
+  O3   Attempts rise with N: fleet first-attempt rate high / low, exact conditional rate-ratio test,
+       PASS at one-sided p < 0.05 (FAIL if it falls at p < 0.05, else INCONCLUSIVE). Attempts and hours
+       stop at the task-supply exhaustion minute in flagged windows (derive.py).
+Conditionally confirmatory (confirmatory only if pilot.json has review_cv_ok = true, else descriptive)
+  Vratio  V(high)/V(low) with its exact 95% interval: PASS (stable) if the interval lies inside
+          [0.8, 1.25]; FAIL if it lies wholly outside; else INCONCLUSIVE.
+  Vdur    Welch t-test on log review durations, high vs low: FAIL if two-sided p < 0.05.
+  V       both together: PASS if Vratio PASS and Vdur not FAIL; FAIL if either FAILs; else INCONCLUSIVE.
+Descriptive (reported whatever they show, with the simulated power from DESIGN-SEARCH.md)
+  S1r, S2r  observed finished ratio / Carnot's predicted ratio >= 1.3 / <= 0.7 with the queue non-empty
+            (S2r is not a criterion: it fires about half the time under the model's own truth).
+  RANK      four-way ranking with likelihood ratios and the simulated confusion matrix.
+  ESC       escaped defects vs reviewer queue depth, `logit_cluster_task`; < 8 events -> not modelled.
+  COLL      collisions: bounced at least once vs k and m (censored excluded), p-hat in the model form.
+  BOUNCE    bounce causes other than review, by size.
+  alpha, beta from carnot.py fit (three points; not identifiable).
+
+`--plan v3` reproduces the superseded PLAN-v3 codings (S1-S5, O1-O5, V band 0.75-1.25) for the
+design-search scripts; it is not the pre-registered analysis.
 """
 from __future__ import annotations
 
@@ -39,14 +50,16 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import (CV_OVERDISPERSION, RIVAL_LABEL, RIVALS, X_usl, clogit_fit, collision_fit,  # noqa: E402
-                    logit_fit, lr_one_sided, nb_logpmf, rate_ci, rate_ratio_test, two_prop_one_sided,
-                    window_dummies)
+from common import (CONDITIONAL, CONFIRMATORY, CV_OVERDISPERSION, DESCRIPTIVE, PLAN_V4, RIVAL_LABEL,  # noqa: E402
+                    RIVALS, V4_OC, X_usl, clogit_fit, collision_fit, logit_fit, lr_one_sided, nb_logpmf,
+                    pooled_interval, rate_ci, rate_ratio_test, two_prop_one_sided, window_dummies)
 from derive import _clean, derive_dir  # noqa: E402
 from predict import Params, predict_window  # noqa: E402
 from scipy import stats  # noqa: E402
 
-BAND = 0.25
+BAND = 0.25                      # PLAN-v3 V band (superseded; --plan v3 and the design search only)
+V4_BAND = PLAN_V4["V_band"]      # PLAN-v4: stable iff the exact 95% interval of V(high)/V(low) lies inside
+UNCAPPED = ("usl", "amdahl", "linear")
 
 
 def _exp(x):
@@ -56,7 +69,7 @@ def _exp(x):
     except OverflowError:
         return math.inf
 MIN_ESCAPES = 8
-READINGS = ("plan", "recovered", "completion")
+READINGS = ("completion", "plan", "recovered")
 ESCAPE_MODELS = ("clogit_task", "clogit_task_first", "logit_cluster_task")
 
 
@@ -151,26 +164,38 @@ def v_checks(S_lo, S_hi, V_pilot, pilot_reviews=None, pilot_busy=None):
 
 
 def b_checks(S_lo, S_hi):
+    """S3 (PLAN-v4): b_review = review bounces / reviews, one-sided Fisher exact for a rise. The other causes
+    are merge-queue outcomes of approved changes and are reported per approval with a merge-queue result."""
     def pool(SS):
         rev = sum(s["reviews"] for s in SS)
         bb = sum(s["bounces_total"] for s in SS)
         br = sum(s["bounces"]["review"] for s in SS)
         ar = sum(s["approvals_resolved"] for s in SS)
         bh = sum(s["bounces"]["escaped_defect"] + s["bounces"]["integration_failure"] for s in SS)
-        return dict(reviews=rev, bounces=bb, b=bb / rev if rev else math.nan, b_review=br / rev if rev else math.nan,
-                    b_hidden=bh / ar if ar else math.nan, approvals_resolved=ar)
+        causes = {c: sum(s["bounces"][c] for s in SS) for c in S_lo[0]["bounces"]}
+        bo = causes.get("rebase_conflict", 0) + causes.get("visible_fail", 0)
+        return dict(reviews=rev, bounces=bb, bounces_review=br, b=bb / rev if rev else math.nan,
+                    b_review=br / rev if rev else math.nan, b_hidden=bh / ar if ar else math.nan,
+                    b_other=bo / ar if ar else math.nan, approvals_resolved=ar, causes=causes,
+                    per_approval={c: causes[c] / ar if ar else math.nan for c in causes if c != "review"})
     lo, hi = pool(S_lo), pool(S_hi)
     p_up = two_prop_one_sided(lo["bounces"], lo["reviews"], hi["bounces"], hi["reviews"])
-    return dict(low=lo, high=hi, p_rising=p_up)
+    p_rev = two_prop_one_sided(lo["bounces_review"], lo["reviews"], hi["bounces_review"], hi["reviews"])
+    p_cause = {c: two_prop_one_sided(lo["causes"][c], lo["approvals_resolved"], hi["causes"][c], hi["approvals_resolved"])
+               for c in lo["causes"] if c != "review"}
+    return dict(low=lo, high=hi, p_rising=p_up, p_review_rising=p_rev, p_cause_rising_per_approval=p_cause)
 
 
 def attempt_checks(S_lo, S_hi, P: Params):
     def pool(SS):
+        # attempts, attempt_hours, worker_hours stop at the task-supply exhaustion minute in flagged windows
         a = sum(s["attempts"] for s in SS)
-        h = sum(s["hours"] for s in SS)
+        h = sum(s.get("attempt_hours", s["hours"]) for s in SS)
         wh = sum(s["worker_hours"] for s in SS)
         return dict(attempts=a, hours=h, worker_hours=wh, per_hour=a / h if h else math.nan,
-                    per_agent_hour=a / wh if wh else math.nan)
+                    per_agent_hour=a / wh if wh else math.nan,
+                    supply_truncated=[s["run_id"] for s in SS if s.get("supply_truncated")],
+                    attempts_full=sum(s.get("attempts_full", s["attempts"]) for s in SS))
     lo, hi = pool(S_lo), pool(S_hi)
     ratio, p_up, p_down = rate_ratio_test(lo["attempts"], lo["hours"], hi["attempts"], hi["hours"])
     ratio_pa, pa_up, pa_down = rate_ratio_test(lo["attempts"], lo["worker_hours"], hi["attempts"], hi["worker_hours"])
@@ -179,6 +204,49 @@ def attempt_checks(S_lo, S_hi, P: Params):
     return dict(low=lo, high=hi, total_ratio=ratio, p_total_rising=p_up, p_total_falling=p_down,
                 per_agent_ratio=ratio_pa, p_per_agent_rising=pa_up, p_per_agent_falling=pa_down,
                 usl_predicted_per_agent_ratio=usl_pa)
+
+
+def capped_vs_uncapped(rv):
+    """P1: log LR of Carnot (review-capped) against the best uncapped rival. Positive = Carnot higher."""
+    ll = rv["ll"]
+    best_u = max(UNCAPPED, key=lambda r: ll[r])
+    log_lr = ll["carnot"] - ll[best_u]
+    return dict(ll_carnot=ll["carnot"], best_uncapped=best_u, ll_best_uncapped=ll[best_u], log_lr=log_lr,
+                lr=_exp(log_lr), carnot_higher=bool(log_lr > 1e-9), tie=bool(abs(log_lr) <= 1e-9))
+
+
+def _welch_log(a, b):
+    a = np.log(np.asarray([x for x in a if x and x > 0], float))
+    b = np.log(np.asarray([x for x in b if x and x > 0], float))
+    if len(a) < 3 or len(b) < 3:
+        return dict(p=math.nan, n_low=len(a), n_high=len(b), ratio_geo=math.nan)
+    t = stats.ttest_ind(b, a, equal_var=False)
+    return dict(p=float(t.pvalue), t=float(t.statistic), n_low=len(a), n_high=len(b),
+                ratio_geo=float(math.exp(b.mean() - a.mean())))
+
+
+def v_constancy(S_lo, S_hi):
+    """PLAN-v4: V(high)/V(low) with its exact 95% interval against [0.8, 1.25]; Welch on log review durations."""
+    n1, b1, V1, ci1 = _pool_V(S_lo)
+    n2, b2, V2, ci2 = _pool_V(S_hi)
+    ratio = V2 / V1 if V1 and V1 == V1 else math.nan
+    ci = ratio_ci(n1, b1, n2, b2)
+    lo_b, hi_b = V4_BAND
+    if ci[0] == ci[0] and lo_b <= ci[0] and ci[1] <= hi_b:
+        code = "PASS"
+    elif ci[0] == ci[0] and (ci[1] < lo_b or ci[0] > hi_b):
+        code = "FAIL"
+    else:
+        code = "INCONCLUSIVE"
+    d_lo = [x for s in S_lo for x in s.get("review_durations_s", [])]
+    d_hi = [x for s in S_hi for x in s.get("review_durations_s", [])]
+    w = _welch_log(d_lo, d_hi)
+    from derive import _cv
+    return dict(low=dict(reviews=n1, busy_hours=b1, V=V1, V_ci=ci1, review_time_cv=_cv(d_lo)),
+                high=dict(reviews=n2, busy_hours=b2, V=V2, V_ci=ci2, review_time_cv=_cv(d_hi)),
+                ratio=ratio, ratio_ci=ci, band=list(V4_BAND), ratio_code=code, vdur=w,
+                vdur_code="N/A" if w["p"] != w["p"] else ("FAIL" if w["p"] < 0.05 else "PASS"),
+                open_review_clipped=[s["run_id"] for s in S_lo + S_hi if s.get("review_open_at_end")])
 
 
 def escape_analysis(approvals, model="clogit_task"):
@@ -304,18 +372,6 @@ def naive_not_finished_slope(prs):
     return dict(fit_ok=True, coef_k=float(fit["coef"][1]), p_k_one_sided=p1, p_k_two_sided=p2)
 
 
-def pooled_interval(mus, cv=CV_OVERDISPERSION, level=0.95):
-    mu = sum(mus)
-    var = mu + cv ** 2 * sum(m * m for m in mus)
-    if var <= mu:
-        d = stats.poisson(mu)
-    else:
-        k = mu * mu / (var - mu)
-        d = stats.nbinom(k, k / (k + mu))
-    a = (1 - level) / 2
-    return int(d.ppf(a)), int(d.ppf(1 - a))
-
-
 def alpha_beta_descriptive(pilot, S_lo, S_hi):
     try:
         path = Path(__file__).resolve().parents[3] / "plugins/carnot/skills/carnot/scripts/carnot.py"
@@ -336,8 +392,10 @@ def alpha_beta_descriptive(pilot, S_lo, S_hi):
 
 
 # ---------------------------------------------------------------------- main scoring
-def score(derived, pilot, *, rival_rework="plan", escape_model="clogit_task", cv=CV_OVERDISPERSION,
-          do_escape=True, do_collision=True, do_fit=True, window_min=None, warmup_min=None):
+def score(derived, pilot, *, rival_rework=PLAN_V4["rival_rework"], escape_model=PLAN_V4["escape_model"],
+          cv=CV_OVERDISPERSION, do_escape=True, do_collision=True, do_fit=True, window_min=None, warmup_min=None,
+          plan="v4"):
+    """plan='v4' (default): PLAN-v4 codings. plan='v3': the superseded PLAN-v3 codings (design search only)."""
     S = [d["summary"] for d in derived]
     sizes = sorted({s["n_workers"] for s in S})
     if len(sizes) != 2:
@@ -348,7 +406,7 @@ def score(derived, pilot, *, rival_rework="plan", escape_model="clogit_task", cv
     wmin = window_min or S[0]["window_min"]
     umin = warmup_min if warmup_min is not None else S[0]["warmup_min"]
     P = Params.from_pilot(pilot, window_min=wmin, warmup_min=umin, rival_rework=rival_rework)
-    R = dict(sizes=dict(N_low=nl, N_high=nh), pilot=pilot, params=P.as_dict(), cv=cv)
+    R = dict(plan=plan, sizes=dict(N_low=nl, N_high=nh), pilot=pilot, params=P.as_dict(), cv=cv)
     R["windows"] = S
     R["rivals"] = rival_scores(S, P, cv)
     R["rivals_by_reading"] = {}
@@ -387,7 +445,21 @@ def score(derived, pilot, *, rival_rework="plan", escape_model="clogit_task", cv
     lo95, hi95 = pooled_interval(mus_hi, cv)
     obs_hi = sum(s["finished"] for s in S_hi)
     R["O2_detail"] = dict(observed_high_total=obs_hi, predicted_high_total=sum(mus_hi), interval95=[lo95, hi95])
-    R["outcomes"] = code_outcomes(R)
+    if plan == "v3":
+        R["outcomes"] = code_outcomes_v3(R)
+        return _clean(R)
+    R["primary"] = capped_vs_uncapped(R["rivals"])
+    R["primary_by_reading"] = {k: capped_vs_uncapped(v) for k, v in R["rivals_by_reading"].items()}
+    R["V4"] = v_constancy(S_lo, S_hi)
+    rco = pilot.get("review_cv_ok")
+    R["review_cv_ok"] = bool(rco) if isinstance(rco, bool) else False
+    R["review_cv_ok_recorded"] = isinstance(rco, bool)
+    R["supply"] = [dict(run_id=s["run_id"], N=s["n_workers"], task_supply=s.get("task_supply"),
+                        t_exhausted_min=s.get("t_exhausted_min"), attempts=s["attempts"],
+                        attempts_full=s.get("attempts_full")) for s in S if s.get("supply_truncated")]
+    R["supply_unknown"] = [s["run_id"] for s in S if s.get("task_supply") is None]
+    R["operating_characteristics"] = V4_OC
+    R["outcomes"] = code_outcomes_v4(R)
     return _clean(R)
 
 
@@ -395,7 +467,140 @@ def _o(id_, text, value, rule, code, note=""):
     return dict(id=id_, statement=text, value=value, rule=rule, code=code, note=note)
 
 
-def code_outcomes(R):
+def _g(id_, grade, text, value, rule, code, note="", counts_as=None):
+    return dict(id=id_, grade=grade, counts_as=counts_as or grade, statement=text, value=value, rule=rule,
+                code=code, note=note)
+
+
+def code_outcomes_v4(R):
+    """PLAN-v4 section 1, graded in advance."""
+    O = []
+    oc = V4_OC
+    nl, nh = R["sizes"]["N_low"], R["sizes"]["N_high"]
+    pr = R["primary"]
+    sup_hi = [x for x in R.get("supply", []) if x["N"] == nh]
+    note = (f"best uncapped rival: {RIVAL_LABEL[pr['best_uncapped']]}; log LR (Carnot - best uncapped) = {pr['log_lr']:+.2f}, "
+            f"LR = {pr['lr']:.3g}" + (" (tie: identical predictions, counted as not higher)" if pr["tie"] else "") +
+            f". Simulated: correct {oc['primary_correct']['carnot']:.2f} under Carnot truth, "
+            f"{oc['primary_correct']['usl']:.2f} / {oc['primary_correct']['amdahl']:.2f} / {oc['primary_correct']['linear']:.2f} "
+            f"under USL / Amdahl / linear.")
+    if sup_hi:
+        note += (" Supply warning: " + ", ".join(f"{x['run_id']} ran out of tasks at min {x['t_exhausted_min']:.0f}" for x in sup_hi)
+                 + "; finished counts in those windows may be supply-limited.")
+    O.append(_g("P1", CONFIRMATORY, "Review is the binding limit: Carnot's review-capped prediction has a higher likelihood "
+                "than the best uncapped rival (USL, Amdahl, linear)", dict(log_lr=pr["log_lr"], lr=pr["lr"],
+                best_uncapped=pr["best_uncapped"]),
+                f"PASS if log L(Carnot) > max log L(USL, Amdahl, linear), `{R['params']['rival_rework']}` reading, NB CV "
+                f"{R['cv']}", "PASS" if pr["carnot_higher"] else "FAIL", note))
+    d2 = R["O2_detail"]
+    o2 = d2["interval95"][0] <= d2["observed_high_total"] <= d2["interval95"][1]
+    O.append(_g("O2", CONFIRMATORY, f"Finished at N = {nh} lies inside Carnot's 95% predictive interval", d2,
+                f"PASS if the N = {nh} windows' total finished count is in the pooled 95% predictive interval "
+                "(Poisson-gamma, CV 0.3 per window)", "PASS" if o2 else "FAIL",
+                f"observed {d2['observed_high_total']}, predicted {d2['predicted_high_total']:.1f} "
+                f"({d2['interval95'][0]}-{d2['interval95'][1]})"))
+    b = R["b"]
+    pr_ = b["p_review_rising"]
+    O.append(_g("S3", CONFIRMATORY, "The review-bounce share b_review does not rise with fleet size",
+                dict(low=b["low"]["b_review"], high=b["high"]["b_review"], p_one_sided=pr_),
+                "FAIL if b_review(high) > b_review(low) at one-sided Fisher exact p < 0.05 (review bounces / reviews, "
+                "pooled per size); other bounce causes reported separately (BOUNCE)",
+                "N/A" if pr_ != pr_ else ("FAIL" if pr_ < 0.05 else "PASS"),
+                f"b_review {b['low']['bounces_review']}/{b['low']['reviews']} = {b['low']['b_review']:.2f} at N = {nl}, "
+                f"{b['high']['bounces_review']}/{b['high']['reviews']} = {b['high']['b_review']:.2f} at N = {nh}; "
+                f"one-sided p = {pr_:.3f}"))
+    A = R["attempts"]
+    if A["p_total_rising"] < 0.05:
+        c3 = "PASS"
+    elif A["p_total_falling"] < 0.05:
+        c3 = "FAIL"
+    else:
+        c3 = "INCONCLUSIVE"
+    trunc = A["low"]["supply_truncated"] + A["high"]["supply_truncated"]
+    O.append(_g("O3", CONFIRMATORY, "Attempts rise with fleet size (fleet first-attempt rate)",
+                dict(total_ratio=A["total_ratio"], p_one_sided=A["p_total_rising"], per_agent_ratio=A["per_agent_ratio"],
+                     usl_per_agent_ratio=A["usl_predicted_per_agent_ratio"]),
+                "PASS if the high/low first-attempt rate ratio > 1 at one-sided exact p < 0.05; FAIL if < 1 at p < 0.05; "
+                "else INCONCLUSIVE", c3,
+                f"ratio {A['total_ratio']:.2f}, p = {A['p_total_rising']:.3g}" +
+                (f"; attempts and hours cut at task-supply exhaustion in {', '.join(trunc)}" if trunc else "")))
+    V = R["V4"]
+    ok = R["review_cv_ok"]
+    counts = CONFIRMATORY if ok else DESCRIPTIVE
+    why = ("review_cv_ok = true in pilot.json: confirmatory" if ok else
+           ("review_cv_ok = false in pilot.json: descriptive" if R["review_cv_ok_recorded"]
+            else "review_cv_ok not recorded in pilot.json: descriptive"))
+    O.append(_g("Vratio", CONDITIONAL, "The reviewer's pace does not change with load: V(high)/V(low) within [0.8, 1.25]",
+                dict(ratio=V["ratio"], ci=V["ratio_ci"]),
+                "PASS (stable) if the exact 95% interval of V(high)/V(low) lies inside [0.8, 1.25]; FAIL if it lies wholly "
+                "outside; else INCONCLUSIVE", V["ratio_code"],
+                f"V {V['low']['V']:.2f} -> {V['high']['V']:.2f}, ratio {V['ratio']:.2f} ({V['ratio_ci'][0]:.2f}-"
+                f"{V['ratio_ci'][1]:.2f}); {why}", counts_as=counts))
+    w = V["vdur"]
+    O.append(_g("Vdur", CONDITIONAL, "Review durations do not change with load (Welch t-test on log durations, high vs low)",
+                dict(p=w["p"], geo_mean_ratio=w["ratio_geo"], n_low=w["n_low"], n_high=w["n_high"]),
+                "FAIL if two-sided p < 0.05", V["vdur_code"],
+                f"geometric-mean duration ratio {w['ratio_geo']:.2f}, p = {w['p']:.3f}, n = {w['n_low']} / {w['n_high']}; "
+                f"simulated power vs a +/-25% reviewer {oc['Vdur_power']['service_cv_0_5']:.2f} at CV 0.5, "
+                f"{oc['Vdur_power']['service_cv_1']:.2f} at CV 1; {why}", counts_as=counts))
+    if "FAIL" in (V["ratio_code"], V["vdur_code"]):
+        cv_ = "FAIL"
+    elif V["ratio_code"] == "PASS" and V["vdur_code"] == "PASS":
+        cv_ = "PASS"
+    else:
+        cv_ = "INCONCLUSIVE"
+    O.append(_g("V", CONDITIONAL, "V constancy (Vratio and Vdur together)", None,
+                "PASS if Vratio PASS and Vdur PASS; FAIL if either FAILs; else INCONCLUSIVE", cv_, why, counts_as=counts))
+    pooled = R["pooled"]
+    sat = pooled["queue_nonempty_share_high"] >= 0.5
+    rp = pooled["ratio_over_predicted"]
+    nr = (f"observed ratio {pooled['ratio']:.2f} vs Carnot-predicted {pooled['carnot_predicted_ratio']:.2f}; queue non-empty "
+          f"{pooled['queue_nonempty_share_high']:.0%} of the N = {nh} windows")
+    O.append(_g("S1r", DESCRIPTIVE, "Surprise: finished ratio >= 1.3 x Carnot's predicted ratio with the queue non-empty",
+                rp, "FAIL if (observed / predicted ratio) >= 1.3 and queue non-empty >= 50% of the N_high windows",
+                "N/A" if not sat else ("FAIL" if rp >= 1.3 else "PASS"),
+                nr + f"; false-alarm rate under Carnot {oc['S1r_false_alarm']:.2f}"))
+    O.append(_g("S2r", DESCRIPTIVE, "Surprise: finished ratio <= 0.7 x Carnot's predicted ratio (not a criterion)",
+                rp, "FAIL if (observed / predicted ratio) <= 0.7 and queue non-empty >= 50% of the N_high windows",
+                "N/A" if not sat else ("FAIL" if rp <= 0.7 else "PASS"),
+                nr + f"; fires {oc['S2r_false_alarm']:.2f} of the time under Carnot's own truth, so it is not a criterion"))
+    rv = R["rivals"]
+    order = sorted(RIVALS, key=lambda r: -rv["ll"][r])
+    O.append(_g("RANK", DESCRIPTIVE, "Four-way ranking of the rivals (USL vs Amdahl is not claimed)",
+                dict(order=order, ll=rv["ll"]), "reported with the simulated confusion matrix", "REPORTED",
+                "highest likelihood: " + _label(rv["best"]) + "; order " + " > ".join(order)))
+    esc = R.get("escape")
+    if esc is not None:
+        if esc["descriptive_only"]:
+            ce, ne = "N/A", f"{esc['events']} escaped defects < {MIN_ESCAPES}: not modelled"
+        elif not esc.get("fit_ok"):
+            ce, ne = "N/A", "model not estimable"
+        else:
+            ce = "REPORTED"
+            ne = f"OR per waiting change {esc['or_per_depth']:.2f}, one-sided p = {esc['p_one_sided']:.3f}"
+        O.append(_g("ESC", DESCRIPTIVE, "Escaped defects vs reviewer queue depth", esc.get("coef_depth"),
+                    f"`{esc['model']}`, window FE, task-clustered; modelled only with >= {MIN_ESCAPES} events", ce,
+                    ne + f"; simulated power {oc['escape_power']['a05']:.2f} (a null result is not evidence)"))
+    col = R.get("collision")
+    if col is not None:
+        if col.get("fit_ok"):
+            nc = (f"k OR {col['or_k']:.3f} (one-sided p {col['p_k_one_sided']:.3f}); p-hat {col.get('p_hat', math.nan):.4f}")
+            cc = "REPORTED"
+        else:
+            nc, cc = "not estimable", "N/A"
+        O.append(_g("COLL", DESCRIPTIVE, "Collisions: bounced at least once vs changes in flight (k) and file overlap (m)",
+                    None, "logistic with window FE, censored first attempts excluded; p-hat in the model form", cc,
+                    nc + f"; simulated k-slope power {oc['collision_power']['p01_a05']:.2f} at p = 0.01, "
+                    f"{oc['collision_power']['p05_a05']:.2f} at p = 0.05"))
+    O.append(_g("BOUNCE", DESCRIPTIVE, "Bounce causes other than review (rebase conflict, visible fail, escaped defect, "
+                "integration failure) per approval with a merge-queue result", b["p_cause_rising_per_approval"],
+                "reported by size; not a criterion", "REPORTED",
+                "; ".join(f"{c}: {b['low']['causes'][c]} -> {b['high']['causes'][c]}" for c in b["low"]["causes"] if c != "review")))
+    return O
+
+
+def code_outcomes_v3(R):
+    """SUPERSEDED PLAN-v3 codings (score(plan='v3'), used by the design-search scripts only)."""
     O = []
     V = R["V"]
     pooled = R["pooled"]
@@ -515,7 +720,7 @@ def _label(best):
     return " = ".join(RIVAL_LABEL[r] for r in best.split("|")) + (" (tie: identical predictions)" if "|" in best else "")
 
 
-def render_md(R):
+def render_md_v3(R):
     L = ["# Fleet sweep (study 2): results draft", "",
          "Generated by `analysis/score.py`. Everything below follows the pre-registered analysis (PLAN-v3 sections 1, 2, 7);"
          " numbers are filled in by the script, the prose around them is to be written.", ""]
@@ -618,20 +823,228 @@ def render_md(R):
     return "\n".join(L) + "\n"
 
 
+GRADE_TAG = {CONFIRMATORY: "[confirmatory]", CONDITIONAL: "[conditional]", DESCRIPTIVE: "[descriptive]"}
+
+
+def _grade_txt(o):
+    g = o["grade"]
+    if g == CONDITIONAL:
+        return f"conditional -> {o['counts_as']}"
+    return g
+
+
+def render_md(R):
+    if R.get("plan") == "v3":
+        return render_md_v3(R)
+    return render_md_v4(R)
+
+
+def render_md_v4(R):
+    nl, nh = R["sizes"]["N_low"], R["sizes"]["N_high"]
+    OC = R["operating_characteristics"]
+    L = ["# Fleet sweep (study 2): results draft", "",
+         "Generated by `analysis/score.py` from the pre-registered analysis (PLAN-v4 section 1). Numbers are filled in by the "
+         "script; the prose around them is to be written. Every result is labelled **[confirmatory]**, **[conditional]** "
+         "(confirmatory only if the pilot's review-time CV <= 0.5, recorded as `review_cv_ok` before the first sweep window; "
+         "otherwise descriptive) or **[descriptive]** (reported whatever it shows; its simulated power is given so a null "
+         "result is not read as evidence).", ""]
+    L.append(f"Sizes: N_low = {nl}, N_high = {nh}. Windows: {len(R['windows'])} "
+             f"({sum(1 for s in R['windows'] if s['n_workers'] == nl)} at N = {nl}, "
+             f"{sum(1 for s in R['windows'] if s['n_workers'] == nh)} at N = {nh}). Over-dispersion CV fixed at {R['cv']}. "
+             f"Rework reading `{R['params']['rival_rework']}`. review_cv_ok = **{R['review_cv_ok']}**"
+             f"{'' if R['review_cv_ok_recorded'] else ' (not recorded in pilot.json, so treated as false)'}; pilot review-time "
+             f"CV = {_f(R['pilot'].get('review_time_cv'))}.")
+    if R["supply"]:
+        L.append("")
+        L.append("**Task supply ran out** in " + "; ".join(
+            f"{x['run_id']} (N = {x['N']}): all {x['task_supply']} tasks claimed by minute {x['t_exhausted_min']:.1f}, "
+            f"attempts counted to that minute {x['attempts']} (whole window {x['attempts_full']})" for x in R["supply"]) +
+            ". Lambda and the attempt-based results (O3, attempts per hour) use only the time before exhaustion.")
+    if R["supply_unknown"]:
+        L.append(f"\nTask supply unknown (no `task_supply` note or reset.json) for: {', '.join(R['supply_unknown'])}; "
+                 "exhaustion could not be checked there.")
+    L.append("")
+    L.append("## Summary of pre-registered results\n")
+    L.append("| ID | Grade | Statement | Code | Detail |\n|---|---|---|---|---|")
+    for o in R["outcomes"]:
+        L.append(f"| {o['id']} | {_grade_txt(o)} | {o['statement']} | **{o['code']}** | {o['rule']}. {o['note']} |")
+    L.append("")
+
+    # P1
+    L.append("## P1 [confirmatory]: is review the binding limit?\n")
+    rv = R["rivals"]
+    L.append("| Window | N | Finished | " + " | ".join(RIVAL_LABEL[r] for r in RIVALS) + " |")
+    L.append("|---|---|---|" + "---|" * len(RIVALS))
+    for w in rv["windows"]:
+        L.append(f"| {w['run_id']} | {w['N']} | {w['finished']} | " +
+                 " | ".join(f"{w['pred_' + r]:.1f} ({w['ll_' + r]:.2f})" for r in RIVALS) + " |")
+    L.append("| **log-likelihood** | | | " + " | ".join(f"**{rv['ll'][r]:.2f}**" for r in RIVALS) + " |")
+    L.append("")
+    pr = R["primary"]
+    L.append(f"Cells: predicted finished (log-likelihood). Carnot (review-capped) log L = {pr['ll_carnot']:.2f}; best uncapped "
+             f"rival {RIVAL_LABEL[pr['best_uncapped']]}, log L = {pr['ll_best_uncapped']:.2f}. **Likelihood ratio Carnot / best "
+             f"uncapped = {pr['lr']:.3g}** (log {pr['log_lr']:+.2f}): {'Carnot higher' if pr['carnot_higher'] else 'Carnot not higher'}.")
+    L.append(f"Simulated operating characteristics: correct {OC['primary_correct']['carnot']:.2f} under Carnot truth, "
+             f"{OC['primary_correct']['usl']:.2f} / {OC['primary_correct']['amdahl']:.2f} / {OC['primary_correct']['linear']:.2f} "
+             f"under USL / Amdahl / linear truth, {OC['primary_correct']['carnot_lambda_30pct_low']:.2f} if agents are 30% slower "
+             "than assumed.\n")
+    L.append("Sensitivity to the rework reading [descriptive]: " + "; ".join(
+        f"`{k}`: log LR {v['log_lr']:+.2f} vs {v['best_uncapped']}" for k, v in R["primary_by_reading"].items()) + ".\n")
+
+    # O2
+    d2 = R["O2_detail"]
+    L.append(f"## O2 [confirmatory]: finished at N = {nh}\n")
+    L.append(f"Observed total over the N = {nh} windows: {d2['observed_high_total']}. Carnot predicted {d2['predicted_high_total']:.1f}, "
+             f"95% predictive interval {d2['interval95'][0]}-{d2['interval95'][1]}.\n")
+
+    # S3 + bounce causes
+    b = R["b"]
+    L.append("## S3 [confirmatory]: does the review-bounce share rise with N?\n")
+    L.append("| Size | reviews | review bounces | b_review |\n|---|---|---|---|")
+    for lab, n in (("low", nl), ("high", nh)):
+        L.append(f"| N = {n} | {b[lab]['reviews']} | {b[lab]['bounces_review']} | {_f(b[lab]['b_review'])} |")
+    L.append(f"\nOne-sided Fisher exact p for b_review rising: {_f(b['p_review_rising'], '{:.3f}')}.\n")
+    L.append("### Other bounce causes [descriptive]\n")
+    L.append("Per approval with a merge-queue result. Rebase conflicts are built into the task set and grow with the number of "
+             "merges since a branch point, so they are expected to rise with N for reasons unrelated to the reviewer.\n")
+    L.append("| Cause | N = %d count | per approval | N = %d count | per approval | one-sided p rising |" % (nl, nh))
+    L.append("|---|---|---|---|---|---|")
+    for c in b["low"]["causes"]:
+        if c == "review":
+            continue
+        L.append(f"| {c} | {b['low']['causes'][c]} | {_f(b['low']['per_approval'][c])} | {b['high']['causes'][c]} | "
+                 f"{_f(b['high']['per_approval'][c])} | {_f(b['p_cause_rising_per_approval'][c], '{:.3f}')} |")
+    L.append(f"\nApprovals with a merge-queue result: {b['low']['approvals_resolved']} / {b['high']['approvals_resolved']}. "
+             f"All bounces per review (b, the PLAN-v3 S3 measure): {_f(b['low']['b'])} / {_f(b['high']['b'])}, one-sided p "
+             f"{_f(b['p_rising'], '{:.3f}')}.\n")
+
+    # O3
+    A = R["attempts"]
+    L.append("## O3 [confirmatory]: do attempts rise with N?\n")
+    L.append(f"First attempts per hour: N = {nl} {_f(A['low']['per_hour'])} ({A['low']['attempts']} in {A['low']['hours']:.2f} h), "
+             f"N = {nh} {_f(A['high']['per_hour'])} ({A['high']['attempts']} in {A['high']['hours']:.2f} h); ratio "
+             f"{_f(A['total_ratio'])}, one-sided exact p {_f(A['p_total_rising'], '{:.3g}')}.")
+    if A["low"]["supply_truncated"] or A["high"]["supply_truncated"]:
+        L.append(f"Hours end at task-supply exhaustion in {', '.join(A['low']['supply_truncated'] + A['high']['supply_truncated'])} "
+                 f"(whole-window attempts {A['low']['attempts_full']} / {A['high']['attempts_full']}, not used).")
+    L.append(f"\nPer agent-hour [descriptive]: {_f(A['low']['per_agent_hour'])} -> {_f(A['high']['per_agent_hour'])} "
+             f"(ratio {_f(A['per_agent_ratio'])}; USL with alpha, beta fixed predicts {_f(A['usl_predicted_per_agent_ratio'])}).\n")
+
+    # V constancy
+    V4 = R["V4"]
+    o_v = next(o for o in R["outcomes"] if o["id"] == "V")
+    L.append(f"## V constancy [conditional -> {o_v['counts_as']}]\n")
+    L.append(f"{o_v['note']}.\n")
+    L.append("| Window | N | reviews | V | 95% CI | review-time CV | half 1 V (n) | half 2 V (n) |\n|---|---|---|---|---|---|---|---|")
+    for s in R["windows"]:
+        h1, h2 = s["V_half"]
+        L.append(f"| {s['run_id']} | {s['n_workers']} | {s['reviews']} | {_f(s['V'])} | {_f(s['V_ci'][0], '{:.1f}')}-"
+                 f"{_f(s['V_ci'][1], '{:.1f}')} | {_f(s.get('review_time_cv'))} | {_f(h1['V'])} ({h1['n']}) | {_f(h2['V'])} ({h2['n']}) |")
+    for lab, n in (("low", nl), ("high", nh)):
+        v = V4[lab]
+        L.append(f"| pooled | {n} | {v['reviews']} | {_f(v['V'])} | {_f(v['V_ci'][0], '{:.1f}')}-{_f(v['V_ci'][1], '{:.1f}')} | "
+                 f"{_f(v['review_time_cv'])} | | |")
+    w = V4["vdur"]
+    L.append(f"\n- **Vratio:** V({nh})/V({nl}) = {_f(V4['ratio'])}, exact 95% interval {_f(V4['ratio_ci'][0])}-{_f(V4['ratio_ci'][1])} "
+             f"against [{V4['band'][0]}, {V4['band'][1]}] -> **{V4['ratio_code']}**.")
+    L.append(f"- **Vdur:** Welch t-test on log review durations, N = {nh} vs N = {nl}: geometric-mean ratio {_f(w['ratio_geo'])}, "
+             f"p = {_f(w['p'], '{:.3f}')} (n = {w['n_low']} / {w['n_high']}) -> **{V4['vdur_code']}**. Simulated power against a "
+             f"+/-25% reviewer {OC['Vdur_power']['service_cv_0_5']:.2f} at review-time CV 0.5, {OC['Vdur_power']['service_cv_1']:.2f} at CV 1.")
+    if V4["open_review_clipped"]:
+        L.append(f"- A review was still running at the end of grace in {', '.join(V4['open_review_clipped'])}; it is not counted "
+                 "and neither is its busy time (derive.py grace-end correction).")
+    L.append("\nHalf-window V is reported, not coded [descriptive].\n")
+
+    # S1r / S2r
+    p = R["pooled"]
+    L.append("## S1r / S2r [descriptive]\n")
+    L.append(f"Pooled finished(N = {nh}) / finished(N = {nl}) = {_f(p['ratio'])} ({p['finished_high_mean']:.1f} vs "
+             f"{p['finished_low_mean']:.1f} per window); Carnot predicted {_f(p['carnot_predicted_ratio'])}; observed / predicted = "
+             f"{_f(p['ratio_over_predicted'])}. Review queue non-empty {p['queue_nonempty_share_high']:.0%} of the N = {nh} windows, "
+             f"{p['queue_nonempty_share_low']:.0%} of the N = {nl} windows. False-alarm rates under Carnot truth: S1r "
+             f"{OC['S1r_false_alarm']:.2f}, S2r {OC['S2r_false_alarm']:.2f} (S2r is therefore not a criterion).\n")
+
+    # Ranking
+    L.append("## Four-way ranking [descriptive]\n")
+    order = sorted(RIVALS, key=lambda r: -rv["ll"][r])
+    L.append("Order by likelihood: " + " > ".join(f"{RIVAL_LABEL[r]} ({rv['ll'][r]:.2f})" for r in order) +
+             f". Highest: **{_label(rv['best'])}**, LR {rv['lr_best_vs_next']:.3g} over the next. USL vs Amdahl discrimination "
+             "is not claimed.\n")
+    L.append("Simulated confusion matrix at the design point (rows: truth; columns: family with the highest likelihood):\n")
+    L.append("| truth | Carnot | USL | Amdahl | linear | tie |\n|---|---|---|---|---|---|")
+    for t in RIVALS:
+        L.append(f"| {t} | " + " | ".join(f"{OC['confusion'][t][c]:.2f}" for c in (*RIVALS, "tie")) + " |")
+    L.append("\nAll rework readings [descriptive]:")
+    for reading, alt in R["rivals_by_reading"].items():
+        L.append(f"- `{reading}`: best = {_label(alt['best'])}; log LR vs Carnot " +
+                 ", ".join(f"{r} {alt['log_lr_vs_carnot'][r]:+.2f}" for r in RIVALS) + ".")
+    L.append("")
+
+    if "escape" in R:
+        e = R["escape"]
+        L.append("## Escaped defects vs queue depth [descriptive]\n")
+        L.append(f"{e['events']} escaped defects in {e['n']} approvals with a merge-queue result "
+                 f"({'not modelled: fewer than 8 events' if e['descriptive_only'] else 'model reported'}). Model: `{e['model']}`. "
+                 f"Simulated power {OC['escape_power']['a05']:.2f} at alpha 0.05, so a null result is not evidence.\n")
+        L.append("| depth at review | approvals | escaped | rate |\n|---|---|---|---|")
+        for r in e["by_depth"]:
+            L.append(f"| {r['depth']} | {r['approvals']} | {r['escaped']} | {_f(r['rate'])} |")
+        if e.get("fit_ok") and not e["descriptive_only"]:
+            L.append(f"\nDepth coefficient {_f(e['coef_depth'], '{:+.3f}')} (OR {_f(e.get('or_per_depth'))} per waiting change), "
+                     f"LR one-sided p = {_f(e['p_one_sided'], '{:.3f}')}.")
+        for m, es in R.get("escape_sensitivity", {}).items():
+            L.append(f"\nSensitivity `{m}`: coef {_f(es.get('coef_depth'), '{:+.3f}')}, one-sided p {_f(es.get('p_one_sided'), '{:.3f}')}.")
+        L.append("")
+    if "collision" in R:
+        c = R["collision"]
+        L.append("## Collisions: bounced at least once vs k and m [descriptive]\n")
+        if c.get("fit_ok"):
+            L.append(f"{c['n_resolved']} resolved first attempts ({c['n_censored_excluded']} censored excluded), "
+                     f"{c['events']} bounced. Logistic with window FE: k OR {_f(c['or_k'], '{:.3f}')} (p {_f(c['p_k_two_sided'], '{:.3f}')}), "
+                     f"m OR {_f(c['or_m'], '{:.3f}')} (p {_f(c['p_m_two_sided'], '{:.3f}')}). Model form: p-hat = {_f(c.get('p_hat'), '{:.4f}')} "
+                     f"(95% profile interval {_f(c['p_ci'][0], '{:.4f}')}-{_f(c['p_ci'][1], '{:.4f}')}), p_m-hat = {_f(c.get('p_m_hat'), '{:.4f}')}.")
+        else:
+            L.append("Not estimable (too few resolved first attempts or no variation).")
+        L.append(f"Simulated k-slope power {OC['collision_power']['p01_a05']:.2f} at p = 0.01 and {OC['collision_power']['p05_a05']:.2f} "
+                 "at p = 0.05.")
+        nv = R.get("collision_naive_not_finished", {})
+        if nv.get("fit_ok"):
+            L.append(f"\nCheck (review v2, C): the rejected accounting, 'not finished' with censored included, gives a k coefficient of "
+                     f"{nv['coef_k']:+.3f} (one-sided p {nv['p_k_one_sided']:.3f}); it is not used.")
+        L.append("")
+    if "alpha_beta_descriptive" in R:
+        ab = R["alpha_beta_descriptive"]
+        L.append("## carnot.py fit of alpha, beta [descriptive]\n")
+        L.append(f"`{json.dumps(ab)}`\n")
+    L.append("## Per-window derived quantities [descriptive]\n")
+    L.append("| Window | N | attempts (full) | lambda | supply | reviews | V | b_review | b_hidden | b | finished | censored | "
+             "escaped | integration | queue>0 |")
+    L.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    for s in R["windows"]:
+        sup = (f"out at {s['t_exhausted_min']:.0f} min" if s.get("supply_truncated") else
+               ("?" if s.get("task_supply") is None else f"{s.get('tasks_claimed')}/{s['task_supply']}"))
+        L.append(f"| {s['run_id']} | {s['n_workers']} | {s['attempts']} ({s.get('attempts_full', s['attempts'])}) | {_f(s['lam'])} | "
+                 f"{sup} | {s['reviews']} | {_f(s['V'])} | {_f(s['b_review'])} | {_f(s['b_hidden'])} | {_f(s['b'])} | {s['finished']} | "
+                 f"{s['censored']} | {s['escaped']} | {s['integration_failures']} | {_f(s['queue_nonempty_share'])} |")
+    return "\n".join(L) + "\n"
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("runs", nargs="+", help="sweep window run directories")
     ap.add_argument("--pilot", required=True, help="pilot.json (the pre-registered one)")
     ap.add_argument("--out-dir", default=".")
-    ap.add_argument("--rival-rework", choices=list(READINGS), default="plan")
-    ap.add_argument("--escape-model", choices=ESCAPE_MODELS, default="clogit_task")
+    ap.add_argument("--rival-rework", choices=list(READINGS), default=PLAN_V4["rival_rework"])
+    ap.add_argument("--escape-model", choices=ESCAPE_MODELS, default=PLAN_V4["escape_model"])
+    ap.add_argument("--plan", choices=["v4", "v3"], default="v4",
+                    help="v3 = the superseded PLAN-v3 codings (design search only)")
     a = ap.parse_args()
     pilot = json.loads(Path(a.pilot).read_text())
     derived = [derive_dir(r) for r in a.runs]
     bad = [d["summary"]["run_id"] for d in derived if d["summary"]["kind"] != "sweep"]
     if bad:
         print(f"warning: non-sweep runs scored: {bad}", file=sys.stderr)
-    R = score(derived, pilot, rival_rework=a.rival_rework, escape_model=a.escape_model)
+    R = score(derived, pilot, rival_rework=a.rival_rework, escape_model=a.escape_model, plan=a.plan)
     out = Path(a.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     (out / "results.json").write_text(json.dumps(R, indent=2, default=float) + "\n")

@@ -114,8 +114,24 @@ class Orchestrator:
         self._down_since: dt.datetime | None = None
         self.window_start: dt.datetime | None = None
         self.window_end: dt.datetime | None = None
+        # Task supply (PLAN-v4 prep): the window's task list is reset.json's task_order (= TASKS.json on main),
+        # else the catalogue. The watcher notes the moment the last unclaimed task is claimed.
+        self.supply_ids: set[str] = self._supply_ids()
+        self.claimed_supply: set[str] = set()
+        self.exhausted_logged = False
 
     # ------------------------------------------------------------------ helpers
+    def _supply_ids(self) -> set[str]:
+        reset = self.run_dir / "reset.json"
+        if reset.exists():
+            try:
+                order = json.loads(reset.read_text()).get("task_order")
+                if isinstance(order, list) and order:
+                    return {str(x) for x in order}
+            except (json.JSONDecodeError, AttributeError):
+                pass
+        return set(self.tasks)
+
     def _fetch(self) -> None:
         self.repo.run("fetch", "-q", "--prune", "origin",
                       "+refs/heads/main:refs/remotes/origin/main",
@@ -199,6 +215,11 @@ class Orchestrator:
             if task not in self.tasks:
                 self.log.note(f"branch {branch} does not match a task id in the catalogue")
             self.log.emit("claim", worker=worker, task=task, branch=branch)
+            if task in self.supply_ids:
+                self.claimed_supply.add(task)
+                if not self.exhausted_logged and self.claimed_supply >= self.supply_ids:
+                    self.exhausted_logged = True
+                    self.log.note(f"tasks_exhausted n={len(self.supply_ids)}")
         if st.ignored or sha == st.last_head:
             return
         new = self.repo.out("rev-list", sha, "^" + st.last_head, "^origin/main").split()
@@ -544,6 +565,7 @@ class Orchestrator:
         grace_end = self.window_end + dt.timedelta(minutes=rc.grace_min)
         self.phase = "window"
         self.log.note("window_start")
+        self.log.note(f"task_supply n={len(self.supply_ids)}")
         self.start_threads()
         launcher.start_all(self)
 
@@ -568,6 +590,11 @@ class Orchestrator:
                 break
             self.clock.sleep(min(30.0, max(0.0, (grace_end - self.clock.now()).total_seconds())))
         self.phase = "done"
+        with self.lock:
+            open_ch = self.reviewing
+        if open_ch is not None:
+            # Not counted by the analysis, and neither is its busy time (derive.py grace-end correction).
+            self.log.note(f"review_open_at_grace_end task={open_ch.task} head={open_ch.head}")
         self.log.note("grace_end")
         self.shutdown()
         self._check_claude_dir()

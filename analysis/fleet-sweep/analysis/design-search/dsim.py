@@ -292,8 +292,9 @@ def study(cfg):
     lo, hi = min(sizes), max(sizes)
     ext = [x for x in derived if x["summary"]["n_workers"] in (lo, hi)]
     try:
+        # plan="v3": the design search scored the PLAN-v3 codings (S4n, O1n, ...); score.py now defaults to PLAN-v4.
         R = score(ext, pil, rival_rework="completion", escape_model="logit_cluster_task", do_escape=False,
-                  do_collision=False, do_fit=False, window_min=L, warmup_min=10)
+                  do_collision=False, do_fit=False, window_min=L, warmup_min=10, plan="v3")
         oc = {o["id"]: o["code"] for o in R["outcomes"]}
         out["S4n"] = oc.get("S4n")
         out["O1n"] = oc.get("O1n")

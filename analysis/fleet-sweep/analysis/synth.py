@@ -210,6 +210,8 @@ def simulate(truth: Truth, n_workers: int, *, seed: int, window_min=90.0, warmup
         task = order[ptr[0]]
         ptr[0] += 1
         last_claimed[0] = task.id
+        if ptr[0] == len(order):  # as the harness logs it: the last unclaimed task is gone
+            emit(t, "note", text=f"tasks_exhausted n={len(order)}")
         changes[task.id] = dict(task=task, owner=w, attempt=0, head=None, inflight=False, defective=False,
                                 collided=False, merged=False, depth=0)
         emit(t, "claim", worker=w["id"], task=task.id, branch=f"claude/task-{task.id}")
@@ -369,6 +371,7 @@ def simulate(truth: Truth, n_workers: int, *, seed: int, window_min=90.0, warmup
         if truth.usage_every_min > 0:
             at(t + truth.usage_every_min * 60, usage, w)
 
+    emit(0.0, "note", text=f"task_supply n={len(order)}")
     for w in workers:
         at(w["start"] + rng.uniform(0, 5), start_worker, w)
 
@@ -388,13 +391,24 @@ def simulate(truth: Truth, n_workers: int, *, seed: int, window_min=90.0, warmup
 
 
 def simulate_study(truth: Truth, sizes, *, seed: int, reps=2, window_min=90.0, warmup_min=10.0,
-                   grace_min=10.0, with_pilot=True):
-    """T1 trial, T2 pilot, then sweep windows in ABBA order (low, high, high, low for reps=2).
+                   grace_min=10.0, with_pilot=True, pilot_design="v3"):
+    """T1 trial, T2 pilot, then sweep windows in ABBA order (low, high, high, low for reps=2; ABBAAB for
+    reps=3). pilot_design="v4" is PLAN-v4's pilot: T1 = 1 worker for 30 min plus 11 more for the last
+    15 min (12 at once), T2 = eight separate 60-min windows of one worker.
     Returns a list of (run_json, events)."""
     pool = make_task_pool(truth, seed * 31 + 5)
     runs = []
     t0 = T0 + (seed % 100000) * 86400.0
-    if with_pilot:
+    if with_pilot and pilot_design == "v4":
+        sched = [(0.0, 30.0)] + [(15.0, 30.0)] * 11
+        runs.append(simulate(truth, 12, seed=seed * 1000 + 1, window_min=30, warmup_min=0, grace_min=60,
+                             schedule=sched, task_pool=pool, run_id=f"synth-{seed}-T1", kind="trial", t0=t0))
+        for j in range(8):
+            runs.append(simulate(truth, 1, seed=seed * 1000 + 2 + j * 100, window_min=60, warmup_min=warmup_min,
+                                 grace_min=grace_min, task_pool=pool, run_id=f"synth-{seed}-T2-{j + 1}", kind="pilot",
+                                 t0=t0 + (3 + 1.5 * j) * 3600))
+        t0 += 12 * 3600
+    elif with_pilot:
         # T1: 1 worker alone 15 min, then 9 at once 15 min; the reviewer keeps going (long grace) so
         # every T1 PR is reviewed (PLAN-v3 section 3).
         sched = [(0.0, 30.0)] + [(15.0, 30.0)] * 8
@@ -444,15 +458,19 @@ def main():
     ap.add_argument("--no-pilot", action="store_true")
     ap.add_argument("--window-min", type=float, default=90)
     ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--v4", action="store_true",
+                    help="PLAN-v4 design: sizes 1 12, 3 windows each (ABBAAB) of 120 min, v4 pilot (T1 1->12, 8 x 60-min T2)")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
+    if a.v4:
+        a.sizes, a.reps, a.window_min = [1, 12], 3, 120.0
     ov = {}
     for kv in a.set:
         k, v = kv.split("=", 1)
         ov[k] = _coerce(v)
     truth = make_truth(a.truth, **ov)
     runs = simulate_study(truth, a.sizes, seed=a.seed, reps=a.reps, window_min=a.window_min,
-                          with_pilot=not a.no_pilot)
+                          with_pilot=not a.no_pilot, pilot_design="v4" if a.v4 else "v3")
     for run, ev in runs:
         d = write_run(Path(a.out), run, ev)
         print(f"{d}  kind={run['kind']} N={run['n_workers']} events={len(ev)}")

@@ -1,42 +1,54 @@
 {
-  "n_pilot": 2,
-  "lambda_pilot": 5.3999999999999995,
+  "n_pilot": 1,
+  "lambda_pilot": 5.4,
   "lambda_ci": [
-    2.4692238584270005,
-    10.250882070851501
+    3.7820936125972846,
+    7.47587617338543
   ],
-  "attempts": 9,
-  "worker_hours": 1.6666666666666667,
-  "V": 10.363944987005542,
+  "attempts": 36,
+  "worker_hours": 6.666666666666666,
+  "V": 12.588646336828745,
   "V_ci": [
-    5.518364216879187,
-    17.722661564242394
+    9.775576458102726,
+    15.959108876059794
   ],
-  "reviews": 13,
-  "busy_hours": 1.2543486111031639,
+  "reviews": 68,
+  "busy_hours": 5.401692777805858,
   "bounces": {
-    "review": 5,
+    "review": 23,
     "rebase_conflict": 0,
     "visible_fail": 1,
-    "escaped_defect": 1,
-    "integration_failure": 0
+    "escaped_defect": 6,
+    "integration_failure": 1
   },
-  "b_review": 0.38461538461538464,
-  "b_hidden": 0.14285714285714285,
-  "b_other": 0.14285714285714285,
-  "b": 0.5384615384615384,
-  "escape_rate": 0.14285714285714285,
-  "approvals_resolved": 7,
-  "r0": 0.5,
-  "n_resolved_first": 10,
-  "completion": 0.1111111111111111,
-  "ci_time_min": 2.3264880958057583,
-  "review_min_mean": 5.671149999973101,
-  "review_tokens_mean": 8786.846153846154,
-  "worker_tokens_per_attempt": 165481.02777777778,
+  "b_review": 0.3382352941176471,
+  "b_hidden": 0.16279069767441862,
+  "b_other": 0.023255813953488372,
+  "b": 0.45588235294117646,
+  "escape_rate": 0.13953488372093023,
+  "approvals_resolved": 43,
+  "r0": 0.5333333333333333,
+  "n_resolved_first": 45,
+  "completion": 0.6388888888888888,
+  "supply_truncated_windows": [],
+  "ci_time_min": 0.7127635661945786,
+  "review_min_mean": 4.766199509828699,
+  "review_time_cv": 0.9223949290709361,
+  "n_review_durations": 68,
+  "review_cv_max": 0.5,
+  "review_cv_ok": false,
+  "review_tokens_mean": 8783.426470588236,
+  "worker_tokens_per_attempt": 143468.21944444446,
   "startup_min": 2.0,
   "runs": [
     "synth-11-T1",
-    "synth-11-T2"
+    "synth-11-T2-1",
+    "synth-11-T2-2",
+    "synth-11-T2-3",
+    "synth-11-T2-4",
+    "synth-11-T2-5",
+    "synth-11-T2-6",
+    "synth-11-T2-7",
+    "synth-11-T2-8"
   ]
 }
