@@ -27,6 +27,19 @@
     "supply from reset.json (no notes): same truncation from the claims": true,
     "supply 10 > 3 claimed: not truncated": true,
     "supply notes pass the validator": true,
+    "supply: exhausted at minute 30 of 60 (before window_end - 10) -> supply_flagged": true,
+    "supply 10 > 3 claimed: not flagged": true,
+    "tasks out at minute 112: truncated but not flagged; at minute 105: flagged": true,
+    "30 tasks: the N = 12 windows are flagged, P1-nf has no N = 12 left, O2-nf N/A": true,
+    "one N = 12 window flagged: P1-nf and O2-nf computed on the other three": true,
+    "no window flagged: without_flagged is None": true,
+    "calibration log: last job by default, V = verdicts / all call time (errors count as busy)": true,
+    "calibration log: CSV accepted, verdict case-insensitive": true,
+    "calibration log: invalid rows refused": true,
+    "abort rule 4 uses the calibrated V, not the pilot's; not evaluated without a log": true,
+    "the pilot's V is not changed by a calibration log (live reviews only)": true,
+    "clogit likelihood finite when one row dominates a stratum with 2 events (was a math domain error)": true,
+    "derive --pilot refuses a sweep (non-live) run": true,
     "synth --v4 runs": true,
     "validate_schema OK on all synthetic runs": true,
     "v4 layout: T1 + 8 T2 + 3 x N=1 + 3 x N=12": true,
@@ -36,12 +49,14 @@
     "predict: no pilot gate on the v4 path (no REDESIGN_*, no gate decision)": true,
     "predict: all four rivals at N = 1 and 12, 120-min windows": true,
     "predict: O2 interval and operating-characteristics statement": true,
+    "predict: abort rule 4 NOT EVALUATED without a calibration log": true,
     "predict --v3-gate: the gate only as SUPERSEDED": true,
     "score writes RESULTS-draft.md + results.json": true,
     "score: the PLAN-v4 results, each with its pre-set grade": true,
     "RESULTS-draft.md: every section labelled confirmatory / conditional / descriptive": true,
-    "V constancy counts as confirmatory iff review_cv_ok": true,
-    "flipping review_cv_ok flips the V-constancy grade": true
+    "Vdur counts as confirmatory iff review_cv_ok": true,
+    "no combined V result; Vratio descriptive and REPORTED (no equivalence claim)": true,
+    "flipping review_cv_ok flips the Vdur grade": true
   },
   "V": {
     "cv=1.0,carnot": {
@@ -62,16 +77,8 @@
         "O3": {
           "PASS": 1.0
         },
-        "Vratio": {
-          "INCONCLUSIVE": 0.9966666666666667,
-          "FAIL": 0.0033333333333333335
-        },
         "Vdur": {
           "PASS": 0.95,
-          "FAIL": 0.05
-        },
-        "V": {
-          "INCONCLUSIVE": 0.95,
           "FAIL": 0.05
         },
         "S1r": {
@@ -106,17 +113,9 @@
         "O3": {
           "PASS": 1.0
         },
-        "Vratio": {
-          "FAIL": 0.63,
-          "INCONCLUSIVE": 0.37
-        },
         "Vdur": {
           "FAIL": 0.8933333333333333,
           "PASS": 0.10666666666666667
-        },
-        "V": {
-          "FAIL": 0.9,
-          "INCONCLUSIVE": 0.1
         },
         "S1r": {
           "FAIL": 0.53,
@@ -151,14 +150,7 @@
         "O3": {
           "PASS": 1.0
         },
-        "Vratio": {
-          "FAIL": 0.9933333333333333,
-          "INCONCLUSIVE": 0.006666666666666667
-        },
         "Vdur": {
-          "FAIL": 1.0
-        },
-        "V": {
           "FAIL": 1.0
         },
         "S1r": {
@@ -191,13 +183,7 @@
         "O3": {
           "PASS": 1.0
         },
-        "Vratio": {
-          "FAIL": 1.0
-        },
         "Vdur": {
-          "FAIL": 1.0
-        },
-        "V": {
           "FAIL": 1.0
         },
         "S1r": {
@@ -230,17 +216,9 @@
         "O3": {
           "PASS": 1.0
         },
-        "Vratio": {
-          "INCONCLUSIVE": 0.99,
-          "FAIL": 0.01
-        },
         "Vdur": {
           "FAIL": 0.18333333333333332,
           "PASS": 0.8166666666666667
-        },
-        "V": {
-          "FAIL": 0.19,
-          "INCONCLUSIVE": 0.81
         },
         "S1r": {
           "PASS": 0.8833333333333333,
@@ -276,17 +254,9 @@
         "O3": {
           "PASS": 1.0
         },
-        "Vratio": {
-          "INCONCLUSIVE": 0.9666666666666667,
-          "FAIL": 0.03333333333333333
-        },
         "Vdur": {
           "PASS": 0.8,
           "FAIL": 0.2
-        },
-        "V": {
-          "INCONCLUSIVE": 0.79,
-          "FAIL": 0.21
         },
         "S1r": {
           "PASS": 0.9933333333333333,
@@ -320,15 +290,8 @@
         "O3": {
           "PASS": 1.0
         },
-        "Vratio": {
-          "INCONCLUSIVE": 1.0
-        },
         "Vdur": {
           "PASS": 0.96,
-          "FAIL": 0.04
-        },
-        "V": {
-          "INCONCLUSIVE": 0.96,
           "FAIL": 0.04
         },
         "S1r": {
@@ -363,16 +326,9 @@
         "O3": {
           "PASS": 1.0
         },
-        "Vratio": {
-          "INCONCLUSIVE": 1.0
-        },
         "Vdur": {
           "FAIL": 0.6633333333333333,
           "PASS": 0.33666666666666667
-        },
-        "V": {
-          "FAIL": 0.6633333333333333,
-          "INCONCLUSIVE": 0.33666666666666667
         },
         "S1r": {
           "PASS": 0.8733333333333333,
@@ -408,16 +364,9 @@
         "O3": {
           "PASS": 1.0
         },
-        "Vratio": {
-          "INCONCLUSIVE": 1.0
-        },
         "Vdur": {
           "FAIL": 0.7266666666666667,
           "PASS": 0.2733333333333333
-        },
-        "V": {
-          "FAIL": 0.7266666666666667,
-          "INCONCLUSIVE": 0.2733333333333333
         },
         "S1r": {
           "PASS": 0.9766666666666667,

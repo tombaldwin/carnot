@@ -31,7 +31,7 @@ Design (PLAN-v4 section 2, fixed in advance, no pilot gate): N = 1 and 12, 3 win
 
 q = V / lambda1 = 2.33 (target 2). Review demand lambda1 X(N) / (1 - b) as a share of V: N = 1: 0.79, N = 12: 2.94.
 
-- Abort rule 4 (V within +/-30% of 2 x pilot lambda = 10.8/h): V / target = 1.17 -> **OK**.
+- Abort rule 4 (calibrated V within +/-30% of 2 x pilot lambda = 10.8/h): **NOT EVALUATED**, no calibration log given (--calibration). Preview only: live pilot V / target = 1.17.
 - Abort rule 3 (pilot lambda >= 0.5 x target = 4/agent-hour): lambda1 = 5.40 -> **OK**.
 - Task supply (220 tasks per window): no rival's predicted claim rate uses it up within a window. A window that runs out is flagged by derive.py and its attempt-based measures stop at that minute (README decision 19).
 
@@ -67,22 +67,24 @@ Predicted ratio finished(N = 12) / finished(N = 1) (descriptive only; S1r/S2r co
 
 Also predicted by Carnot: V is a property of the reviewer (V(12)/V(1) = 1, review durations unchanged); b_review the same at both sizes; attempts rising with N as lambda1 X(N). The uncapped rivals imply a reviewer that keeps up with demand, i.e. V rising with load.
 
-### Operating characteristics (simulated; PLAN-v4 section 1, DESIGN-SEARCH.md stage C, 800 sweeps per truth)
+### Operating characteristics (simulated; PLAN-v4.1 section 6.8, OPERATING-CHARACTERISTICS.md, design-search/oc_v41.py, 2000 simulated studies per cell)
 
-- **Confirmatory, primary: review is the binding limit.** Carnot's review-capped prediction has a higher likelihood than the best uncapped rival (USL, Amdahl, linear); the likelihood ratio is reported. Correct 0.97 under Carnot truth; 0.87 / 1.00 / 1.00 under USL / Amdahl / linear truth; 0.70 if agents are 30% slower than assumed; 0.85 at 1.5x credit burn with the degrade rule.
+- **Confirmatory, primary: review is the binding limit.** Carnot's review-capped prediction has a higher likelihood than the best uncapped rival (USL, Amdahl, linear); the likelihood ratio is reported. Correct 0.97 under Carnot truth; 0.80 / 1.00 / 1.00 under USL / Amdahl / linear truth. If agents are 30% slower than assumed: 0.76 under Carnot, 0.66 under USL. At 1.5x credit burn with the degrade rule (2 x 120-min windows per size): 0.95 under Carnot, 0.75 under USL.
 - **Confirmatory, secondary** (not identities of the harness): O2, finished at N = 12 inside Carnot's 95% predictive interval; S3, the review-bounce share b_review does not rise with N (one-sided Fisher exact); O3, attempts rise with N (exact rate-ratio test).
-- **Conditionally confirmatory: V constancy.** V(12)/V(1) with its exact 95% interval, stable iff the interval lies inside [0.8, 1.25], plus a Welch test on log review durations (Vdur). Confirmatory only if the pilot's review-time CV <= 0.5 (`review_cv_ok`), else descriptive. Vdur power against a +/-25% reviewer: 0.68 at review-time CV 0.5, 0.19 at CV 1; false-positive rate 0.06.
+- **Conditionally confirmatory: the reviewer's pace does not change with load (Vdur).** Welch test on log review durations, N = 1 against N = 12; fails iff two-sided p < 0.05. Confirmatory only if the pilot's live (T1 + T2) review-time CV <= 0.5 (`review_cv_ok`), else descriptive. Power against a +/-25% reviewer: 0.73 at review-time CV 0.5, 0.18 at CV 1; false-positive rate 0.05 / 0.04. Probability that `review_cv_ok` is set: 1.00 / 0.53 / 0.00 at true CV 0.3 / 0.5 / 0.7 (near 0.5 it is close to a coin toss).
+- **O2 false-alarm rate** under Carnot's own truth: 0.10 at review-time CV 1, 0.04 at CV 0.5 (above the nominal 0.05). S3 false-alarm rate 0.06; O3 power 1.00.
 - **Descriptive** (reported whatever they show; a null result is not evidence):
+  - V(12)/V(1) with its exact 95% interval; no equivalence claim (the interval is about 0.7-1.45 at this design);
   - four-way ranking of the rivals (USL vs Amdahl is not claimed). Simulated confusion matrix, rows = truth, columns = family with the highest likelihood:
 
     | truth | Carnot | USL | Amdahl | linear | tie |
     |---|---|---|---|---|---|
-    | carnot | 0.97 | 0.03 | 0.00 | 0.00 | 0.00 |
-    | usl | 0.13 | 0.67 | 0.20 | 0.01 | 0.00 |
-    | amdahl | 0.00 | 0.16 | 0.69 | 0.15 | 0.00 |
-    | linear | 0.00 | 0.00 | 0.09 | 0.91 | 0.00 |
+    | carnot | 0.96 | 0.02 | 0.00 | 0.00 | 0.01 |
+    | usl | 0.20 | 0.57 | 0.22 | 0.01 | 0.01 |
+    | amdahl | 0.00 | 0.16 | 0.68 | 0.17 | 0.00 |
+    | linear | 0.00 | 0.00 | 0.07 | 0.93 | 0.00 |
 
-  - escaped defects against reviewer queue depth (`logit_cluster_task`, >= 8 events or not modelled): power 0.10 at alpha 0.05;
-  - collisions against in-flight changes (k-slope): power 0.09 at p = 0.01, 0.34 at p = 0.05;
+  - escaped defects against reviewer queue depth (`logit_cluster_task`, >= 8 events or not modelled): power 0.12 at alpha 0.05;
+  - collisions against in-flight changes (k-slope): power 0.08 at p = 0.01, 0.36 at p = 0.05;
   - S1r / S2r surprise ratios: false-alarm rates 0.05 / 0.53 under the model's own truth. S2r fires about half the time under Carnot at N = 12, so it is not a criterion.
 - **Circularity.** At the design point the reviewer is 0.92 loaded with one agent and about 3.2x overloaded with twelve, so a flat finished count at N = 12 is expected by construction and is not itself evidence; the non-identity claims are the ones listed above.

@@ -50,5 +50,6 @@
     "synth-11-T2-6",
     "synth-11-T2-7",
     "synth-11-T2-8"
-  ]
+  ],
+  "review_source": "live T1 + T2 review_end events only; calibration reviews not pooled (PLAN-v4.1 6.2-6.3)"
 }

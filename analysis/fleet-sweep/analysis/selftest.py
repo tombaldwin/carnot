@@ -7,7 +7,9 @@
 
 Parts:
   U  unit checks: derive on hand-built logs with known answers (accounting, the grace-end V correction,
-     task-supply truncation from a note and from reset.json); schema validator accepts synth output and
+     task-supply truncation from a note and from reset.json, the v4.1 supply flag at minute 110, P1 / O2
+     without flagged windows, the calibration-log reader and abort rule 4, derive --pilot refusing
+     non-live runs); schema validator accepts synth output and
      rejects broken lines; CLI end to end at the PLAN-v4 design (synth --v4 -> validate -> derive ->
      predict -> score) in a temp dir, checking that predict has no pilot gate by default (no REDESIGN_*),
      predicts all four rivals at N = 1 and 12 with the operating-characteristics statement, keeps the
@@ -15,8 +17,8 @@ Parts:
   V  the PLAN-v4 design point through the whole pipeline (T1 1 -> 12, eight 60-min T2 windows of one
      worker, sizes 1 and 12, three 120-min windows each, ABBAAB, 220 tasks) under Carnot, USL, Amdahl and
      linear truths and a reviewer 25% faster / slower at N = 12 (skimN / slowN), at review-time CV 1 and
-     0.5: rates of every v4 coding (P1, O2, S3, O3, Vratio, Vdur, S1r, S2r) and of review_cv_ok, with
-     DESIGN-SEARCH's figures alongside.
+     0.5: rates of every v4.1 coding (P1, O2, S3, O3, Vdur, S1r, S2r) and of review_cv_ok, with the
+     pre-registered operating characteristics (common.V4_OC) alongside.
   S  task supply: linear truth with only 120 tasks at the design point, so N = 12 windows run out; lambda
      and the per-agent attempt ratio with and without the truncation.
   D  escaped defects: planted depth effect vs none; detection and false-positive rates per model.
@@ -150,14 +152,90 @@ def unit_supply():
             and abs(s2["t_exhausted_min"] - 30) < 1e-9 and s2["task_supply_source"] == "reset.json" and s2["attempts"] == 2,
         "supply 10 > 3 claimed: not truncated": not s3["supply_truncated"] and s3["attempts"] == 3,
         "supply notes pass the validator": not errs,
+        "supply: exhausted at minute 30 of 60 (before window_end - 10) -> supply_flagged": s["supply_flagged"],
+        "supply 10 > 3 claimed: not flagged": not s3["supply_flagged"],
     }
+
+
+def unit_v41():
+    """PLAN-v4.1: the supply flag at minute 110, P1 / O2 with and without flagged windows, the calibration-log reader
+    (abort rule 4 only), and derive --pilot refusing non-live runs."""
+    import dataclasses
+    from derive import pilot_params
+    from predict import abort_rule_4, load_calibration
+    from score import without_flagged
+    out = {}
+    run = {"run_id": "u", "kind": "sweep", "n_workers": 12, "window_start": iso(T0), "window_end": iso(T0 + 7200),
+           "warmup_min": 10, "grace_min": 10, "task_order_seed": 1, "sandbox_commit": "x", "harness_commit": "x",
+           "worker_model": "x", "reviewer_model": "x", "notes": ""}
+    base = [_ev(0, "note", text="task_supply n=2"), _ev(0, "worker_start", worker="w1", session_id="s"),
+            _ev(12, "claim", worker="w1", task="A", branch="claude/task-A")]
+    late = derive_window(run, base + [_ev(112, "claim", worker="w1", task="B", branch="claude/task-B")])["summary"]
+    early = derive_window(run, base + [_ev(105, "claim", worker="w1", task="B", branch="claude/task-B")])["summary"]
+    out["tasks out at minute 112: truncated but not flagged; at minute 105: flagged"] = (
+        late["supply_truncated"] and not late["supply_flagged"] and early["supply_flagged"])
+    truth = make_truth("carnot", **{**V4_TRUTH, "n_tasks": 30})
+    runs = simulate_study(truth, (1, 12), seed=4242, reps=0, with_pilot=True, pilot_design="v4")
+    pil = pilot_params(derive_all(runs))
+    P = Params.from_pilot(pil, window_min=120.0)
+    sw = [simulate(truth, n, seed=4242000 + i, window_min=120.0, run_id=f"u41-N{n}-{i}", kind="sweep",
+                   t0=T0 + 30 * 3600 + i * 9000) for i, n in enumerate((1, 12, 12, 1))]
+    S = [d["summary"] for d in derive_all(sw)]
+    wf = without_flagged(S, P)
+    out["30 tasks: the N = 12 windows are flagged, P1-nf has no N = 12 left, O2-nf N/A"] = (
+        wf is not None and sorted(wf["flagged"]) == sorted(s["run_id"] for s in S if s["n_workers"] == 12)
+        and wf["P1"] is None and wf["O2"] is None)
+    S2 = [dict(s, supply_flagged=(s["run_id"] == S[1]["run_id"])) for s in S]
+    wf2 = without_flagged(S2, P)
+    out["one N = 12 window flagged: P1-nf and O2-nf computed on the other three"] = (
+        wf2["P1"] is not None and wf2["O2"] is not None and wf2["O2"]["windows"] == 1 and len(wf2["windows_kept"]) == 3)
+    out["no window flagged: without_flagged is None"] = without_flagged([dict(s, supply_flagged=False) for s in S], P) is None
+    with tempfile.TemporaryDirectory() as td:
+        f = Path(td) / "cal.jsonl"
+        rows = [dict(review_id=f"r{i}", duration_s=300.0, verdict="approve", source="reference", expected="approve", job="v1")
+                for i in range(10)] + [dict(review_id="e1", duration_s=600.0, verdict="error", job="v1")]
+        rows += [dict(review_id=f"b{i}", duration_s=120.0, verdict="request_changes", source="broken",
+                      expected="request_changes", job="v2") for i in range(12)]
+        f.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        c2 = load_calibration(f)
+        c1 = load_calibration(f, job="v1")
+        out["calibration log: last job by default, V = verdicts / all call time (errors count as busy)"] = (
+            c2["job"] == "v2" and abs(c2["V"] - 30.0) < 1e-9 and c1["reviews"] == 10 and c1["errors"] == 1
+            and abs(c1["V"] - 10 / (3600 / 3600)) < 1e-9 and c2["catch_rate_broken"] == 1.0)
+        fc = Path(td) / "cal.csv"
+        fc.write_text("review_id,duration_s,verdict,job\nx1,360,approve,a\nx2,360,REQUEST_CHANGES,a\n")
+        out["calibration log: CSV accepted, verdict case-insensitive"] = abs(load_calibration(fc)["V"] - 10.0) < 1e-9
+        bad = Path(td) / "bad.jsonl"
+        bad.write_text(json.dumps(dict(review_id="z", duration_s=-1, verdict="lgtm")) + "\n")
+        try:
+            load_calibration(bad)
+            out["calibration log: invalid rows refused"] = False
+        except SystemExit:
+            out["calibration log: invalid rows refused"] = True
+        a4 = abort_rule_4(P, c1)
+        a4n = abort_rule_4(P, None)
+        out["abort rule 4 uses the calibrated V, not the pilot's; not evaluated without a log"] = (
+            a4["evaluated"] and a4["V"] == c1["V"] and abs(a4["ratio"] - c1["V"] / (2 * P.lam1("carnot"))) < 1e-9
+            and not a4n["evaluated"] and a4n["ok"] is None)
+        out["the pilot's V is not changed by a calibration log (live reviews only)"] = P.V == pil["V"] and pil["review_source"].startswith("live")
+    from common import _clogit_ll
+    ll = _clogit_ll(np.array([20.0, 20.0]), [np.array([[5, 5], [0, 0], [0, 0], [-5, -5.0]])], [np.array([1, 1, 0, 0.0])])
+    out["clogit likelihood finite when one row dominates a stratum with 2 events (was a math domain error)"] = (
+        math.isfinite(ll) and abs(ll - math.log(0.5)) < 1e-9)
+    sweep_d = derive_all(sw[:1])
+    try:
+        pilot_params(sweep_d)
+        out["derive --pilot refuses a sweep (non-live) run"] = False
+    except SystemExit:
+        out["derive --pilot refuses a sweep (non-live) run"] = True
+    return out
 
 
 V4_SYNTH = ["--truth", "carnot", "--v4", "--set", "lam1=6.8", "V0=13.6", "defect_p=0.49", "cv_window=0.3",
             "rework_min=3.53", "ci_hidden_min=0.25", "ci_post_min=0.5", "n_tasks=220"]
-V4_IDS = {"P1": CONFIRMATORY, "O2": CONFIRMATORY, "S3": CONFIRMATORY, "O3": CONFIRMATORY, "Vratio": CONDITIONAL,
-          "Vdur": CONDITIONAL, "V": CONDITIONAL, "S1r": DESCRIPTIVE, "S2r": DESCRIPTIVE, "RANK": DESCRIPTIVE,
-          "ESC": DESCRIPTIVE, "COLL": DESCRIPTIVE, "BOUNCE": DESCRIPTIVE}
+V4_IDS = {"P1": CONFIRMATORY, "O2": CONFIRMATORY, "P1-nf": CONFIRMATORY, "O2-nf": CONFIRMATORY, "S3": CONFIRMATORY,
+          "O3": CONFIRMATORY, "Vdur": CONDITIONAL, "Vratio": DESCRIPTIVE, "S1r": DESCRIPTIVE, "S2r": DESCRIPTIVE,
+          "RANK": DESCRIPTIVE, "ESC": DESCRIPTIVE, "COLL": DESCRIPTIVE, "BOUNCE": DESCRIPTIVE}
 
 
 def unit_cli(outdir=None):
@@ -195,7 +273,9 @@ def unit_cli(outdir=None):
             and pj2.get("params", {}).get("window_min") == 120.0 and pj2.get("params", {}).get("rival_rework") == "completion")
         out["predict: O2 interval and operating-characteristics statement"] = ("O2 (confirmatory" in md
                                                                              and "Operating characteristics" in md
-                                                                             and "0.97" in md and "Circularity" in md)
+                                                                             and f"{V4_OC['primary_correct']['carnot']:.2f}" in md
+                                                                             and "Circularity" in md)
+        out["predict: abort rule 4 NOT EVALUATED without a calibration log"] = "NOT EVALUATED" in md
         r = subprocess.run([PY, str(HERE / "predict.py"), "--pilot", str(td / "pilot.json"), "--v3-gate"],
                            capture_output=True, text=True)
         out["predict --v3-gate: the gate only as SUPERSEDED"] = r.returncode == 0 and "SUPERSEDED" in r.stdout
@@ -215,15 +295,18 @@ def unit_cli(outdir=None):
                 any(t in h for t in ("[confirmatory]", "[conditional", "[descriptive]")) for h in heads)
             cv_ok = R["review_cv_ok"]
             vc = {o["id"]: o["counts_as"] for o in R["outcomes"] if o["grade"] == CONDITIONAL}
-            out["V constancy counts as confirmatory iff review_cv_ok"] = all(
+            out["Vdur counts as confirmatory iff review_cv_ok"] = set(vc) == {"Vdur"} and all(
                 v == (CONFIRMATORY if cv_ok else DESCRIPTIVE) for v in vc.values())
+            out["no combined V result; Vratio descriptive and REPORTED (no equivalence claim)"] = (
+                "V" not in ids and ids.get("Vratio") == DESCRIPTIVE
+                and next(o for o in R["outcomes"] if o["id"] == "Vratio")["code"] == "REPORTED")
             pj["review_cv_ok"] = not cv_ok
             (td / "pilot-flip.json").write_text(json.dumps(pj))
             r2 = subprocess.run([PY, str(HERE / "score.py"), "--pilot", str(td / "pilot-flip.json"), *map(str, sw),
                                  "--out-dir", str(td / "res2")], capture_output=True, text=True)
             R2 = json.loads((td / "res2" / "results.json").read_text()) if r2.returncode == 0 else {"outcomes": []}
             vc2 = {o["id"]: o["counts_as"] for o in R2["outcomes"] if o["grade"] == CONDITIONAL}
-            out["flipping review_cv_ok flips the V-constancy grade"] = bool(vc2) and all(
+            out["flipping review_cv_ok flips the Vdur grade"] = bool(vc2) and all(
                 v == (CONFIRMATORY if not cv_ok else DESCRIPTIVE) for v in vc2.values())
             if outdir is not None:
                 import shutil
@@ -284,6 +367,19 @@ def study_v4(cfg):
     res["best"] = R["rivals"]["best"]
     res["log_lr"] = R["primary"]["log_lr"]
     res["V_ratio"] = R["V4"]["ratio"]
+    res["V_ratio_ci"] = R["V4"]["ratio_ci"]
+    res["vdur_p"] = R["V4"]["vdur"]["p"]
+    res["flagged"] = R.get("supply_flagged", [])
+    wf = R.get("without_flagged")
+    res["P1_nf"] = None if not wf or wf["P1"] is None else bool(wf["P1"]["carnot_higher"])
+    res["O2_nf"] = None if not wf or wf["O2"] is None else bool(wf["O2"]["inside"])
+    if "escape" in R:
+        e = R["escape"]
+        res["esc_events"] = e["events"]
+        res["esc_p"] = None if e["descriptive_only"] else e.get("p_one_sided")
+    if "collision" in R:
+        c = R["collision"]
+        res["coll_p"] = c.get("p_k_one_sided") if c.get("fit_ok") else None
     res["truncated"] = [s["run_id"] for s in R["windows"] if s.get("supply_truncated")]
     hi = [s for s in R["windows"] if s["n_workers"] == 12]
     res["lam12"] = sum(s["attempts"] for s in hi) / sum(s["worker_hours"] for s in hi)
@@ -363,10 +459,11 @@ def main():
     if "U" in a.parts:
         u = unit_derive()
         us = unit_supply()
+        v41 = unit_v41()
         c = unit_cli(outdir)
-        T["unit"] = {**u, **us, **c}
+        T["unit"] = {**u, **us, **v41, **c}
         md += ["## U. Unit checks", ""]
-        for k, v in {**u, **us, **c}.items():
+        for k, v in {**u, **us, **v41, **c}.items():
             if k == "score stderr":
                 md.append(f"- score stderr: `{v}`")
                 continue
@@ -383,17 +480,18 @@ def main():
                "search added (so pilot V is noisier here). Sweep: N = 1 and 12, 3 x 120 min, ABBAAB. Uncapped truths: the "
                "reviewer speeds up with queue depth. skimN / slowN: the reviewer's pace at N = 12 is 1.25x / 0.75x its pace at "
                "N = 1 and in the pilot. Cells: share of scored studies coding the outcome FAIL (P1, O3: share PASS). "
-               "DESIGN-SEARCH figures in brackets where it reports one.", ""]
+               "Pre-registered figures (common.V4_OC, OPERATING-CHARACTERISTICS.md) in brackets.", ""]
         T["V"] = {}
-        ids = ("P1", "O2", "S3", "O3", "Vratio", "Vdur", "V", "S1r", "S2r")
+        ids = ("P1", "O2", "S3", "O3", "Vdur", "S1r", "S2r")
         ref = {("carnot", "P1"): V4_OC["primary_correct"]["carnot"],
                ("usl", "P1"): 1 - V4_OC["primary_correct"]["usl"], ("amdahl", "P1"): 1 - V4_OC["primary_correct"]["amdahl"],
                ("linear", "P1"): 1 - V4_OC["primary_correct"]["linear"],
                ("carnot", "S1r"): V4_OC["S1r_false_alarm"], ("carnot", "S2r"): V4_OC["S2r_false_alarm"]}
-        vdur_ref = {1.0: {"carnot": 0.06, "skimN": 0.21, "slowN": 0.19}, 0.5: {"carnot": 0.05, "skimN": 0.68, "slowN": 0.78}}
-        md.append("| review CV | truth | n | review_cv_ok share | P1 PASS | O2 | S3 | O3 PASS | Vratio FAIL / INCONCL. | Vdur | V | "
-                  "S1r | S2r | Carnot best | median V12/V1 |")
-        md.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+        vdur_ref = {cv: {"carnot": V4_OC["Vdur_fpr"][k], "skimN": V4_OC["Vdur_power"][k], "slowN": V4_OC["Vdur_power"][k]}
+                    for cv, k in ((1.0, "service_cv_1"), (0.5, "service_cv_0_5"))}
+        md.append("| review CV | truth | n | review_cv_ok share | P1 PASS | O2 | S3 | O3 PASS | Vdur | "
+                  "S1r | S2r | Carnot best | median V12/V1 | Vratio 95% CI width (median) |")
+        md.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
         for scv in (1.0, 0.5):
             for tr in ("carnot", "usl", "amdahl", "linear", "skimN", "slowN"):
                 if scv == 0.5 and tr in ("usl", "amdahl", "linear"):
@@ -407,18 +505,21 @@ def main():
                 cvok = float(np.mean([r["review_cv_ok"] for r in ok])) if ok else math.nan
                 cbest = float(np.mean([r["best"] == "carnot" for r in ok])) if ok else math.nan
                 vr = float(np.median([r["V_ratio"] for r in ok if r["V_ratio"] is not None])) if ok else math.nan
+                vw = float(np.median([r["V_ratio_ci"][1] - r["V_ratio_ci"][0] for r in ok if r.get("V_ratio_ci")
+                                      and None not in r["V_ratio_ci"]])) if ok else math.nan
                 T["V"][f"cv={scv},{tr}"] = dict(n=n, rates=cr, review_cv_ok=cvok, carnot_best=cbest, median_V_ratio=vr,
                                                 truncated_share=float(np.mean([bool(r["truncated"]) for r in ok])) if ok else math.nan)
                 rf = lambda i: f" [{ref[(tr, i)]:.2f}]" if (tr, i) in ref and scv == 1.0 else ""
                 vd = f" [{vdur_ref[scv][tr]:.2f}]" if tr in vdur_ref[scv] else ""
                 md.append(f"| {scv} | {tr} | {n} | {cvok:.2f} | {g('P1', 'PASS'):.2f}{rf('P1')} | {g('O2'):.2f} | {g('S3'):.2f} | "
-                          f"{g('O3', 'PASS'):.2f} | {g('Vratio'):.2f} / {g('Vratio', 'INCONCLUSIVE'):.2f} | {g('Vdur'):.2f}{vd} | "
-                          f"{g('V'):.2f} | {g('S1r'):.2f}{rf('S1r')} | {g('S2r'):.2f}{rf('S2r')} | {cbest:.2f} | {vr:.2f} |")
+                          f"{g('O3', 'PASS'):.2f} | {g('Vdur'):.2f}{vd} | "
+                          f"{g('S1r'):.2f}{rf('S1r')} | {g('S2r'):.2f}{rf('S2r')} | {cbest:.2f} | {vr:.2f} | {vw:.2f} |")
                 print("V", scv, tr, n, {i: g(i) for i in ids}, flush=True)
         md.append("")
-        md.append("P1 PASS under an uncapped truth is a wrong call (DESIGN-SEARCH bracket = 1 - its correct rate). Vratio PASS "
-                  "needs the exact 95% interval of V(12)/V(1) inside [0.8, 1.25]; with the review counts of this design it is "
-                  "mostly INCONCLUSIVE, which is why the claim rests on Vdur as well and is conditional on review_cv_ok.")
+        md.append("P1 PASS under an uncapped truth is a wrong call (bracket = 1 - the pre-registered correct rate). Vdur is the "
+                  "reviewer-pace test (PLAN-v4.1 section 6.1): FAIL iff Welch p < 0.05 on log review durations. V(12)/V(1) is "
+                  "descriptive; the last column shows why no equivalence claim is made (its 95% interval is about 0.7 wide). "
+                  "The full operating characteristics, with more replicates, are in OPERATING-CHARACTERISTICS.md.")
         md.append("")
 
     if "S" in a.parts:

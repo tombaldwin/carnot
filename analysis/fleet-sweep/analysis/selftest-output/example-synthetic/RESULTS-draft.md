@@ -8,18 +8,19 @@ Sizes: N_low = 1, N_high = 12. Windows: 6 (3 at N = 1, 3 at N = 12). Over-disper
 
 | ID | Grade | Statement | Code | Detail |
 |---|---|---|---|---|
-| P1 | confirmatory | Review is the binding limit: Carnot's review-capped prediction has a higher likelihood than the best uncapped rival (USL, Amdahl, linear) | **PASS** | PASS if log L(Carnot) > max log L(USL, Amdahl, linear), `completion` reading, NB CV 0.3. best uncapped rival: USL, no review limit; log LR (Carnot - best uncapped) = +1.40, LR = 4.04. Simulated: correct 0.97 under Carnot truth, 0.87 / 1.00 / 1.00 under USL / Amdahl / linear. |
-| O2 | confirmatory | Finished at N = 12 lies inside Carnot's 95% predictive interval | **PASS** | PASS if the N = 12 windows' total finished count is in the pooled 95% predictive interval (Poisson-gamma, CV 0.3 per window). observed 43, predicted 35.5 (20-54) |
+| P1 | confirmatory | Review is the binding limit: Carnot's review-capped prediction has a higher likelihood than the best uncapped rival (USL, Amdahl, linear) | **PASS** | PASS if log L(Carnot) > max log L(USL, Amdahl, linear), `completion` reading, NB CV 0.3. best uncapped rival: USL, no review limit; log LR (Carnot - best uncapped) = +1.40, LR = 4.04. Simulated: correct 0.97 under Carnot truth, 0.80 / 1.00 / 1.00 under USL / Amdahl / linear. |
+| O2 | confirmatory | Finished at N = 12 lies inside Carnot's 95% predictive interval | **PASS** | PASS if the N = 12 windows' total finished count is in the pooled 95% predictive interval (Poisson-gamma, CV 0.3 per window). observed 43, predicted 35.5 (20-54); simulated false-alarm rate under Carnot truth 0.10 at review-time CV 1, 0.04 at 0.5 |
+| P1-nf | confirmatory | P1 without the windows that ran out of tasks before minute 110 (reported beside P1) | **N/A** | as P1, on the unflagged windows only. no window flagged: identical to P1 |
+| O2-nf | confirmatory | O2 without the N = 12 windows that ran out of tasks before minute 110 (reported beside O2) | **N/A** | as O2, on the unflagged windows only. no window flagged: identical to O2 |
 | S3 | confirmatory | The review-bounce share b_review does not rise with fleet size | **PASS** | FAIL if b_review(high) > b_review(low) at one-sided Fisher exact p < 0.05 (review bounces / reviews, pooled per size); other bounce causes reported separately (BOUNCE). b_review 17/45 = 0.38 at N = 1, 18/83 = 0.22 at N = 12; one-sided p = 0.984 |
 | O3 | confirmatory | Attempts rise with fleet size (fleet first-attempt rate) | **PASS** | PASS if the high/low first-attempt rate ratio > 1 at one-sided exact p < 0.05; FAIL if < 1 at p < 0.05; else INCONCLUSIVE. ratio 5.03, p = 2.81e-20 |
-| Vratio | conditional -> descriptive | The reviewer's pace does not change with load: V(high)/V(low) within [0.8, 1.25] | **INCONCLUSIVE** | PASS (stable) if the exact 95% interval of V(high)/V(low) lies inside [0.8, 1.25]; FAIL if it lies wholly outside; else INCONCLUSIVE. V 12.72 -> 14.19, ratio 1.11 (0.77-1.64); review_cv_ok = false in pilot.json: descriptive |
-| Vdur | conditional -> descriptive | Review durations do not change with load (Welch t-test on log durations, high vs low) | **PASS** | FAIL if two-sided p < 0.05. geometric-mean duration ratio 0.76, p = 0.234, n = 45 / 83; simulated power vs a +/-25% reviewer 0.68 at CV 0.5, 0.19 at CV 1; review_cv_ok = false in pilot.json: descriptive |
-| V | conditional -> descriptive | V constancy (Vratio and Vdur together) | **INCONCLUSIVE** | PASS if Vratio PASS and Vdur PASS; FAIL if either FAILs; else INCONCLUSIVE. review_cv_ok = false in pilot.json: descriptive |
+| Vdur | conditional -> descriptive | The reviewer's pace does not change with load (Welch t-test on log review durations, N = 12 vs N = 1) | **PASS** | FAIL iff two-sided p < 0.05, else PASS; no equivalence claim. geometric-mean duration ratio 0.76, p = 0.234, n = 45 / 83; simulated power vs a +/-25% reviewer 0.73 at review-time CV 0.5, 0.18 at CV 1; review_cv_ok = false in pilot.json: descriptive |
+| Vratio | descriptive | V(N = 12) / V(N = 1) with its exact 95% interval (no equivalence claim) | **REPORTED** | reported, not coded. V 12.72 -> 14.19, ratio 1.11 (0.77-1.64) |
 | S1r | descriptive | Surprise: finished ratio >= 1.3 x Carnot's predicted ratio with the queue non-empty | **PASS** | FAIL if (observed / predicted ratio) >= 1.3 and queue non-empty >= 50% of the N_high windows. observed ratio 2.26 vs Carnot-predicted 1.87; queue non-empty 94% of the N = 12 windows; false-alarm rate under Carnot 0.05 |
 | S2r | descriptive | Surprise: finished ratio <= 0.7 x Carnot's predicted ratio (not a criterion) | **PASS** | FAIL if (observed / predicted ratio) <= 0.7 and queue non-empty >= 50% of the N_high windows. observed ratio 2.26 vs Carnot-predicted 1.87; queue non-empty 94% of the N = 12 windows; fires 0.53 of the time under Carnot's own truth, so it is not a criterion |
 | RANK | descriptive | Four-way ranking of the rivals (USL vs Amdahl is not claimed) | **REPORTED** | reported with the simulated confusion matrix. highest likelihood: Carnot, review-capped; order carnot > usl > amdahl > linear |
-| ESC | descriptive | Escaped defects vs reviewer queue depth | **REPORTED** | `logit_cluster_task`, window FE, task-clustered; modelled only with >= 8 events. OR per waiting change 0.90, one-sided p = 0.947; simulated power 0.10 (a null result is not evidence) |
-| COLL | descriptive | Collisions: bounced at least once vs changes in flight (k) and file overlap (m) | **REPORTED** | logistic with window FE, censored first attempts excluded; p-hat in the model form. k OR 0.887 (one-sided p 0.971); p-hat 0.0000; simulated k-slope power 0.09 at p = 0.01, 0.34 at p = 0.05 |
+| ESC | descriptive | Escaped defects vs reviewer queue depth | **REPORTED** | `logit_cluster_task`, window FE, task-clustered; modelled only with >= 8 events. OR per waiting change 0.90, one-sided p = 0.947; simulated power 0.12 (a null result is not evidence) |
+| COLL | descriptive | Collisions: bounced at least once vs changes in flight (k) and file overlap (m) | **REPORTED** | logistic with window FE, censored first attempts excluded; p-hat in the model form. k OR 0.887 (one-sided p 0.971); p-hat 0.0000; simulated k-slope power 0.08 at p = 0.01, 0.36 at p = 0.05 |
 | BOUNCE | descriptive | Bounce causes other than review (rebase conflict, visible fail, escaped defect, integration failure) per approval with a merge-queue result | **REPORTED** | reported by size; not a criterion. rebase_conflict: 0 -> 0; visible_fail: 1 -> 1; escaped_defect: 4 -> 12; integration_failure: 0 -> 2 |
 
 ## P1 [confirmatory]: is review the binding limit?
@@ -35,7 +36,7 @@ Sizes: N_low = 1, N_high = 12. Windows: 6 (3 at N = 1, 3 at N = 12). Over-disper
 | **log-likelihood** | | | **-15.13** | **-16.52** | **-22.26** | **-36.96** |
 
 Cells: predicted finished (log-likelihood). Carnot (review-capped) log L = -15.13; best uncapped rival USL, no review limit, log L = -16.52. **Likelihood ratio Carnot / best uncapped = 4.04** (log +1.40): Carnot higher.
-Simulated operating characteristics: correct 0.97 under Carnot truth, 0.87 / 1.00 / 1.00 under USL / Amdahl / linear truth, 0.70 if agents are 30% slower than assumed.
+Simulated operating characteristics: correct 0.97 under Carnot truth, 0.80 / 1.00 / 1.00 under USL / Amdahl / linear truth; 0.76 / 0.66 (Carnot / USL truth) if agents are 30% slower than assumed.
 
 Sensitivity to the rework reading [descriptive]: `completion`: log LR +1.40 vs usl; `plan`: log LR -0.88 vs usl; `recovered`: log LR +6.53 vs usl.
 
@@ -71,9 +72,9 @@ First attempts per hour: N = 1 5.27 (29 in 5.50 h), N = 12 26.55 (146 in 5.50 h)
 
 Per agent-hour [descriptive]: 5.27 -> 2.21 (ratio 0.42; USL with alpha, beta fixed predicts 0.29).
 
-## V constancy [conditional -> descriptive]
+## Reviewer pace, Vdur [conditional -> descriptive]
 
-review_cv_ok = false in pilot.json: descriptive.
+geometric-mean duration ratio 0.76, p = 0.234, n = 45 / 83; simulated power vs a +/-25% reviewer 0.73 at review-time CV 0.5, 0.18 at CV 1; review_cv_ok = false in pilot.json: descriptive.
 
 | Window | N | reviews | V | 95% CI | review-time CV | half 1 V (n) | half 2 V (n) |
 |---|---|---|---|---|---|---|---|
@@ -86,8 +87,8 @@ review_cv_ok = false in pilot.json: descriptive.
 | pooled | 1 | 45 | 12.72 | 9.3-17.0 | 0.91 | | |
 | pooled | 12 | 83 | 14.19 | 11.3-17.6 | 1.27 | | |
 
-- **Vratio:** V(12)/V(1) = 1.11, exact 95% interval 0.77-1.64 against [0.8, 1.25] -> **INCONCLUSIVE**.
-- **Vdur:** Welch t-test on log review durations, N = 12 vs N = 1: geometric-mean ratio 0.76, p = 0.234 (n = 45 / 83) -> **PASS**. Simulated power against a +/-25% reviewer 0.68 at review-time CV 0.5, 0.19 at CV 1.
+- **Vdur [conditional -> descriptive]:** Welch t-test on log review durations, N = 12 vs N = 1: geometric-mean ratio 0.76, p = 0.234 (n = 45 / 83) -> **PASS** (FAIL iff p < 0.05). Simulated power against a +/-25% reviewer 0.73 at review-time CV 0.5, 0.18 at CV 1; false-positive rate 0.05 / 0.04.
+- **Vratio [descriptive]:** V(12)/V(1) = 1.11, exact 95% interval 0.77-1.64. Reported only; no equivalence claim is made.
 - A review was still running at the end of grace in synth-11-N1-w1, synth-11-N1-w5, synth-11-N12-w2, synth-11-N12-w3, synth-11-N12-w6; it is not counted and neither is its busy time (derive.py grace-end correction).
 
 Half-window V is reported, not coded [descriptive].
@@ -104,10 +105,10 @@ Simulated confusion matrix at the design point (rows: truth; columns: family wit
 
 | truth | Carnot | USL | Amdahl | linear | tie |
 |---|---|---|---|---|---|
-| carnot | 0.97 | 0.03 | 0.00 | 0.00 | 0.00 |
-| usl | 0.13 | 0.67 | 0.20 | 0.01 | 0.00 |
-| amdahl | 0.00 | 0.16 | 0.69 | 0.15 | 0.00 |
-| linear | 0.00 | 0.00 | 0.09 | 0.91 | 0.00 |
+| carnot | 0.96 | 0.02 | 0.00 | 0.00 | 0.01 |
+| usl | 0.20 | 0.57 | 0.22 | 0.01 | 0.01 |
+| amdahl | 0.00 | 0.16 | 0.68 | 0.17 | 0.00 |
+| linear | 0.00 | 0.00 | 0.07 | 0.93 | 0.00 |
 
 All rework readings [descriptive]:
 - `completion`: best = Carnot, review-capped; log LR vs Carnot carnot +0.00, usl -1.40, amdahl -7.13, linear -21.83.
@@ -116,7 +117,7 @@ All rework readings [descriptive]:
 
 ## Escaped defects vs queue depth [descriptive]
 
-16 escaped defects in 93 approvals with a merge-queue result (model reported). Model: `logit_cluster_task`. Simulated power 0.10 at alpha 0.05, so a null result is not evidence.
+16 escaped defects in 93 approvals with a merge-queue result (model reported). Model: `logit_cluster_task`. Simulated power 0.12 at alpha 0.05, so a null result is not evidence.
 
 | depth at review | approvals | escaped | rate |
 |---|---|---|---|
@@ -127,14 +128,14 @@ All rework readings [descriptive]:
 
 Depth coefficient -0.102 (OR 0.90 per waiting change), LR one-sided p = 0.947.
 
-Sensitivity `clogit_task`: coef -3.970, one-sided p 0.857.
+Sensitivity `clogit_task`: coef -4.307, one-sided p 0.857.
 
-Sensitivity `clogit_task_first`: coef -6.166, one-sided p 0.934.
+Sensitivity `clogit_task_first`: coef -6.167, one-sided p 0.857.
 
 ## Collisions: bounced at least once vs k and m [descriptive]
 
 98 resolved first attempts (90 censored excluded), 47 bounced. Logistic with window FE: k OR 0.887 (p 0.058), m OR 1.198 (p 0.323). Model form: p-hat = 0.0000 (95% profile interval 0.0000-0.0248), p_m-hat = 0.0224.
-Simulated k-slope power 0.09 at p = 0.01 and 0.34 at p = 0.05.
+Simulated k-slope power 0.08 at p = 0.01 and 0.36 at p = 0.05.
 
 Check (review v2, C): the rejected accounting, 'not finished' with censored included, gives a k coefficient of +0.244 (one-sided p 0.000); it is not used.
 

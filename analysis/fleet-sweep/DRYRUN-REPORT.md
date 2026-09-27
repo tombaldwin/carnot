@@ -302,3 +302,56 @@ In the tasks repo, the new helper scripts are `export_for_harness.py` and `pair_
    the private GitHub remote before T1.
 
 Not blocking: merge-queue time (§2) and the hidden-test runner (§1, fixed).
+
+## 7. 220-task rerun (PLAN-v4.1)
+
+Date: 2026-09-27. The task set now has 220 validated tasks. Same setup as sections 1-3 (local bare
+remote, simulated workers and reviewer, time scale 10), with SimWorker λ = 8 per agent-hour (was 7) and
+SimReviewer V = 14 (mean 257 s, CV 0.4). Configs `dryrun/config.rerun-N12.toml` and `config.rerun-N1.toml`
+(separate local remotes); analysis output in `dryrun/analysis-v41/`. Tasks are named by id only.
+
+**Export and validation.** `export_for_harness.py` wrote all 220 tasks; the harness's `validate-tasks`
+passed **220 of 220** (each fails on base, passes hidden and visible tests with its reference; 6 min 20 s).
+
+**N = 12, one 120-min window (seed 2002):**
+
+| | Value |
+|---|---|
+| Tasks claimed in the window | **182 of 220** (38 left); no `tasks_exhausted` note |
+| Claims by minute 30 / 60 / 90 / 110 / 120 | 53 / 99 / 144 / 169 / 182 |
+| Last claim | **minute 119.0** |
+| First attempts counted (post warm-up); λ | 164; 7.45 per agent-hour over the whole window, not truncated, not flagged |
+| Claim races | 6 (logged, 0 git or harness errors) |
+| Reviews, V | 28, V = 13.2 (8.8-19.1); one review open at grace end, clipped (decision 20) |
+| Merge-queue passes | 24: mean **1.34 s**, max **2.21 s** real time; the 12 passes that merged: mean 2.02 s, max 2.21 s |
+| Post-rebase hidden set | up to 12 tasks |
+
+Merge-queue time stays at about 0.04 min per change against the 0.75 min limit (about 20x headroom),
+as in section 2. The supply lasts the window: at the observed claim rate (about 91 per hour) the 220 tasks
+would last about 145 min. It would run out inside a 120-min window only if the claim rate rose above
+220 / 2 h = 110 per hour, i.e. about 9.2 claims per agent-hour at N = 12 (15% above the λ target of 8).
+The minute-110 flag (PLAN-v4.1 section 6.6) and the truncation of attempt-based measures cover that case.
+
+**N = 1, one 120-min window (seed 2001):** 15 claims, last at minute 109.1; 14 counted first attempts
+(λ = 7.64); 22 reviews, V = 13.4; 12 merges; merge queue mean 1.87 s, max 2.19 s. Three bounces were
+`integration_failure`, all of task T108 after the SimWorker resolved its textual conflict with T019 by
+keeping both sides. That pair is one of the 120 conflicting pairs that need a real resolution (section 3:
+keep-both-sides leaves the hidden tests failing), so this is a simulated-worker artefact; it also shows
+the post-rebase hidden check catching a bad resolution as intended.
+
+**Analysis chain on the new logs (code as amended for v4.1):**
+- `validate_schema`: both OK, 0 errors; 1 warning (the N = 12 review that ended after grace, ignored).
+- `derive.py --pilot` now refuses these runs (kind `dry-run` is not a live T1/T2 run); with
+  `--allow-nonlive`: λ 7.64 (4.2-12.8), V 13.4 (8.4-20.3), review-time CV 0.44, `review_cv_ok` true,
+  `review_source` records the non-live runs.
+- `predict.py`: q = 1.75, loads 1.05 / 3.88 at N = 1 / 12, no rival uses up 220 tasks within a window.
+  Without a calibration log, abort rule 4 prints NOT EVALUATED. With a proxy calibration log (the 51
+  simulated review durations in the calibration-log format, to exercise the reader only) calibrated
+  V = 13.6, 0.89 of target -> OK.
+- `score.py`: P1 PASS (log LR +6.18 over USL); O2 PASS (7 finished, interval 4-24); P1-nf / O2-nf N/A
+  (no window flagged); S3 PASS; O3 PASS; Vdur PASS (p = 0.85); Vratio 0.99 (0.54-1.81), reported only.
+
+**Status of section 6's list:** 1 (supply) fixed by the 220 tasks plus the flag; 2 (S3 on b_review), 3
+(v4 alignment, now v4.1: Welch test as the reviewer-pace test, no combined V, no equivalence claim) and 4
+(grace-end bias) are in the analysis code; 5 (worker prompt) is in `prompts/worker.md`; 6 (real config)
+remains for the operator before T1.

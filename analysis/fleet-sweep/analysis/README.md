@@ -1,7 +1,9 @@
 # Fleet sweep (study 2): pre-registered analysis
 
-Coded to **PLAN-v4** (fixed sizes N = 1 and 12, three 120-min windows each, no pilot gate, claims graded
-confirmatory / conditional / descriptive in advance). PLAN-v3's gate and outcome codings are kept only
+Coded to **PLAN-v4** as amended by its section 6 (**v4.1**: fixed sizes N = 1 and 12, three 120-min windows
+each, no pilot gate, claims graded confirmatory / conditional / descriptive in advance; the reviewer-pace test is
+the Welch test on log review durations; live-only pilot; calibration log for abort rule 4 only; supply flag at
+minute 110). PLAN-v3's gate and outcome codings are kept only
 behind explicit flags (`predict.py --v3-gate`, `score.py --plan v3`) so the design search can be
 reproduced; they are superseded.
 
@@ -17,9 +19,9 @@ cd /Users/tom/git/carnot/analysis/fleet-sweep/analysis
 |---|---|
 | `common.py` | Model curves (USL, Amdahl, linear), timestamps, the negative-binomial likelihood (Poisson with fixed CV 0.3), logistic / conditional-logistic fitters, the model-form collision fit. |
 | `validate_schema.py` | Checks `events.jsonl` (+ `run.json`) against SCHEMA.md: fields, types, enums, timestamps, ordering, serial reviews, attempt numbering, merges only of approved + green heads. Exit 1 on errors. |
-| `derive.py` | Per-window quantities (PLAN-v3 section 6 accounting) and per-PR / per-approval tables, with the task-supply truncation and the grace-end V correction; `--pilot` pools T1 + T2 into the pilot parameters, including `review_time_cv` and the flag `review_cv_ok`. |
-| `predict.py` | PLAN-v4 pre-registration table: point predictions for the four rivals at N = 1 and 12 (per window and per three windows), the O2 interval, design-point loads, abort rules 3-5, the task-supply check, and the operating-characteristics statement. `--v3-gate` adds the superseded PLAN-v3 gate for reference. |
-| `score.py` | PLAN-v4 section 1: P1 (capped vs best uncapped likelihood ratio), O2, S3 (b_review), O3, V constancy (Vratio, Vdur; conditional on `review_cv_ok`), and the descriptive S1r/S2r, four-way ranking, escapes, collisions and bounce causes, each graded; writes `RESULTS-draft.md` and `results.json`. `--plan v3` gives the superseded codings. |
+| `derive.py` | Per-window quantities (PLAN-v3 section 6 accounting) and per-PR / per-approval tables, with the task-supply truncation and flag (minute 110) and the grace-end V correction; `--pilot` pools the live T1 + T2 runs (and nothing else) into the pilot parameters, including `review_time_cv` and the flag `review_cv_ok`. |
+| `predict.py` | PLAN-v4.1 pre-registration table: point predictions for the four rivals at N = 1 and 12 (per window and per three windows), the O2 interval, design-point loads, abort rules 3-5 (rule 4 from the calibration log, `--calibration`), the task-supply check, and the operating-characteristics statement. `--v3-gate` adds the superseded PLAN-v3 gate for reference. |
+| `score.py` | PLAN-v4.1: P1 (capped vs best uncapped likelihood ratio) and O2, each also without the windows flagged for running out of tasks (P1-nf, O2-nf), S3 (b_review), O3, the reviewer-pace test Vdur (Welch on log review durations; conditional on `review_cv_ok`), and the descriptive Vratio, S1r/S2r, four-way ranking, escapes, collisions and bounce causes, each graded; writes `RESULTS-draft.md` and `results.json`. `--plan v3` gives the superseded codings. |
 | `synth.py` | Discrete-event simulation of the harness (workers, FIFO reviewer, serial merge queue, re-reviews, censoring) writing SCHEMA.md logs under a chosen truth, with the harness's `task_supply` / `tasks_exhausted` notes. `--v4` gives PLAN-v4's pilot and sweep layout. |
 | `selftest.py` | Unit checks plus the simulation study at the PLAN-v4 design point (every v4 coding under four truths and a load-dependent reviewer), the task-supply check, and planted escape and collision effects. Writes `selftest-output/SELFTEST.md` and `selftest.json`. |
 
@@ -32,12 +34,14 @@ $PY selftest.py                      # -> selftest-output/SELFTEST.md, selftest.
 # 1. Every run directory, as soon as it is written (and on the dry run's logs)
 $PY validate_schema.py ../runs/<run_id>
 
-# 2. After T1 and the eight T2 windows: the pilot parameters (fixes review_cv_ok)
+# 2. After T1 and the eight T2 windows: the pilot parameters (fixes review_cv_ok), live runs only
 $PY derive.py --pilot ../runs/<T1> ../runs/<T2-1> ... ../runs/<T2-8> --out pilot.json
+#    (refuses runs whose kind is not trial / pilot; --allow-nonlive only for a dry run of the chain)
 
 # 3. Point predictions and the pre-registration table (PLAN-v4 defaults: N = 1 and 12, 3 x 120 min, `completion`)
-$PY predict.py --pilot pilot.json --task-supply <tasks in TASKS.json> --burn <$ per session-hour> \
-    --balance <credits left, $> --md prediction.md --json prediction.json
+$PY predict.py --pilot pilot.json --calibration calibration.jsonl --task-supply <tasks in TASKS.json> \
+    --burn <$ per session-hour> --balance <credits left, $> --md prediction.md --json prediction.json
+#    --calibration: the calibration-review log (below), read for abort rule 4 only
 #    (by hand: --lambda-pilot --n-pilot --V --b-review --b-hidden [--b-other] --r0 --completion --ci-time-min)
 #    --v3-gate appends the superseded PLAN-v3 gate for reference; the v4 path never computes it
 
@@ -65,22 +69,53 @@ Before T2:
 1. Code hashes: `shasum -a 256 analysis/*.py` (and the harness's).
 2. The definitions and decisions: this README's "Definitions" and "Decisions" sections, and the
    docstrings of `derive.py`, `predict.py` and `score.py`.
-3. The result codings and grades from `score.py` (`code_outcomes_v4`): P1, O2, S3, O3 confirmatory;
-   Vratio, Vdur, V conditional on `review_cv_ok`; S1r, S2r, RANK, ESC, COLL, BOUNCE descriptive, with the
-   rules in the RESULTS table's "Detail" column.
+3. The result codings and grades from `score.py` (`code_outcomes_v4`): P1, O2 (each also without flagged
+   windows: P1-nf, O2-nf), S3, O3 confirmatory; Vdur conditional on `review_cv_ok`; Vratio, S1r, S2r, RANK,
+   ESC, COLL, BOUNCE descriptive, with the rules in the RESULTS table's "Detail" column.
 4. `selftest-output/SELFTEST.md` and `selftest.json`, and the synthetic example in
    `selftest-output/example-synthetic/` (pilot, prediction table and RESULTS-draft with every result
    graded).
-5. The operating characteristics (`common.V4_OC`, printed by `predict.py`), quoted from PLAN-v4
-   section 1 and DESIGN-SEARCH.md.
+5. The operating characteristics (`common.V4_OC`, printed by `predict.py`), recomputed for v4.1 by
+   `design-search/oc_v41.py` and tabulated in `../OPERATING-CHARACTERISTICS.md` (PLAN-v4.1 section 6.8); they
+   replace the DESIGN-SEARCH figures.
 
 After T1 and T2, before the first sweep window:
 
 6. `pilot.json` (lambda, V with interval, b by cause, r0, completion share, CI time, review time, its CV
-   and **`review_cv_ok`**, tokens, start-up time).
+   and **`review_cv_ok`**, tokens, start-up time; all from live T1 + T2 reviews, `review_source`).
+6a. The calibration-review log and predict.py's abort-rule-4 line (calibrated V against 2 x pilot lambda).
 7. `prediction.md` / `prediction.json`: the point-prediction table (finished and attempts per window and
    per three windows for each rival at N = 1 and 12, with 95% predictive intervals), the O2 interval,
    the design-point loads and abort rules 3-5.
+
+## Calibration-review log (PLAN-v4.1 section 6.3)
+
+The offline reviews that set the reviewer's job (PLAN-v4 section 5 step 2: pilot PRs re-reviewed, reference
+and deliberately broken solutions) are logged in a file of their own, not in a harness run directory. One
+review per line, **JSONL** (or **CSV** with a header row and the same column names):
+
+```json
+{"review_id": "cal-0001", "duration_s": 251.3, "verdict": "approve", "source": "reference", "task": "T042",
+ "expected": "approve", "job": "v1", "reviewer_model": "opus-5.5", "t": "2026-10-01T09:12:00.000Z"}
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `review_id` | yes | unique id |
+| `duration_s` | yes | wall-clock seconds of the reviewer call, from hand-over to parsed verdict, including an immediate retry |
+| `verdict` | yes | `approve`, `request_changes` or `error` (a call that produced no verdict); case-insensitive |
+| `source` | no | `pilot_pr`, `reference`, `broken` or `other` |
+| `task` | no | task id |
+| `expected` | no | `approve` (reference) or `request_changes` (broken); for the descriptive catch / false-reject rates |
+| `job` | no | version of the review-job definition being calibrated; default: the last row's job |
+| `reviewer_model`, `t` | no | for the record |
+
+`predict.py --calibration <file> [--calibration-job <job>]` reads it **for abort rule 4 only**: calibrated
+V = rows with a verdict / (sum of every row's `duration_s`, errors included) per hour, for one job version,
+against 2 x pilot lambda (+/-30%). If the rule fails, the job is redefined and recalibrated under a new `job`
+value in the same file. The log is never pooled into the pilot's V, b or review-time CV (derive.py refuses a
+path that is not a run directory), so `review_cv_ok` depends on live reviews only. Catch rate on broken
+solutions, false-reject rate on references, review-time CV and error count are printed as descriptive.
 
 ## Definitions as implemented (PLAN-v3 section 6, carried over by PLAN-v4)
 
@@ -95,8 +130,8 @@ After T1 and T2, before the first sweep window:
 - **Review**: a `review_end`. Queue depth at review = `queue_depth` of the head's first `review_start`.
 - **V** = reviews / reviewer-busy hours (reviewer_busy/idle intervals, clipped to window + grace, and
   clipped at the start of a review still running at window_end + grace; decision 20).
-- **Review-time CV** = sample sd / mean of `duration_s` over counted reviews; the pilot's value sets
-  `review_cv_ok` = (CV <= 0.5).
+- **Review-time CV** = sample sd / mean of `duration_s` over counted reviews; the pilot's value, from the
+  live T1 + T2 reviews only, sets `review_cv_ok` = (CV <= 0.5).
 - **b_review** = review bounces / reviews; **b_hidden** = (escaped + integration) / approvals with a
   merge-queue outcome; **b_other** = (rebase conflicts + visible fails) / the same; **b** = all bounces
   / reviews.
@@ -104,7 +139,9 @@ After T1 and T2, before the first sweep window:
   flagged `supply_truncated`, attempts and worker-hours stop at the task-supply exhaustion minute
   (decision 19); `attempts_full`, `lam_full`, `worker_hours_full` keep the whole counting window.
 - **Task supply**: tasks in the window's TASKS.json (`task_supply` note, else reset.json); exhausted at
-  the `tasks_exhausted` note, else at the claim that makes every task claimed.
+  the `tasks_exhausted` note, else at the claim that makes every task claimed. **Flagged**
+  (`supply_flagged`) if exhausted more than 10 min before window_end, i.e. before minute 110 of a 120-min
+  window (decision 30).
 - **k, m**: as logged at the first submit (derive does not recompute them).
 - Per-PR "bounced at least once" and "resolved" (= bounced or finished); the collision logistic uses
   resolved first attempts only.
@@ -112,7 +149,7 @@ After T1 and T2, before the first sweep window:
 ## Decisions where PLAN-v3, PLAN-v4 or SCHEMA.md was ambiguous
 
 Decisions 1-18 were made for PLAN-v3; those marked *superseded* no longer apply to the pre-registered
-(PLAN-v4) path. Decisions 19-29 were made for PLAN-v4.
+(PLAN-v4) path. Decisions 19-29 were made for PLAN-v4, 30-34 for its section 6 amendments (v4.1).
 
 1. **Warm-up and finished.** Finished counts only changes first submitted after the warm-up (as the
    review's simulation did); a warm-up change merged later is not counted.
@@ -206,11 +243,11 @@ Decisions 1-18 were made for PLAN-v3; those marked *superseded* no longer apply 
     reviews (one-sided Fisher exact, FAIL at p < 0.05). Rebase conflicts, visible fails, escaped defects and
     integration failures are reported per approval with a merge-queue result, by size (BOUNCE,
     descriptive), with the all-causes b beside them.
-22. **V constancy coding.** Vratio: the exact (conditional binomial) 95% interval of V(12)/V(1); PASS
+22. *Superseded by decision 32.* **V constancy coding.** Vratio: the exact (conditional binomial) 95% interval of V(12)/V(1); PASS
     ("stable") if it lies inside [0.8, 1.25], FAIL if it lies wholly outside, else INCONCLUSIVE. Vdur:
     Welch t-test on log `duration_s` of the counted reviews, N = 12 vs N = 1, FAIL at two-sided p < 0.05.
     Combined V: PASS if both PASS, FAIL if either FAILs, else INCONCLUSIVE.
-23. **`review_cv_ok`.** Set by `derive.py --pilot` from the pooled T1 + T2 review durations (CV <= 0.5) and
+23. **`review_cv_ok`.** Set by `derive.py --pilot` from the pooled live T1 + T2 review durations (CV <= 0.5; decision 31) and
     recorded in pilot.json before the first sweep window. `score.py` reads it from pilot.json only (no
     command-line override, so it cannot be changed after the sweep); if absent it is treated as false and
     V constancy is descriptive.
@@ -226,7 +263,7 @@ Decisions 1-18 were made for PLAN-v3; those marked *superseded* no longer apply 
 26. **P1.** Carnot's log-likelihood minus the best of USL, Amdahl and linear, under `completion`; PASS iff
     positive. A tie (identical predictions, e.g. no window where review binds) is not "higher" and fails,
     as ties counted as failures in the design search. The other two readings are reported as sensitivity.
-27. **Operating characteristics** are constants in `common.V4_OC`, quoted from PLAN-v4 section 1 and
+27. *Superseded by decision 33.* **Operating characteristics** are constants in `common.V4_OC`, quoted from PLAN-v4 section 1 and
     DESIGN-SEARCH.md (stage C, recommended design; the confusion matrix is from `stageC_final.json`). They
     are printed next to the results, never recomputed by score.py.
 28. **The design search keeps PLAN-v3 codings.** `design-search/dsim.py` now calls `score(..., plan="v3")`,
@@ -236,38 +273,49 @@ Decisions 1-18 were made for PLAN-v3; those marked *superseded* no longer apply 
 29. **synth.py** logs the harness's `task_supply` / `tasks_exhausted` notes (no change to its random
     streams) and has a `pilot_design="v4"` / `--v4` layout: T1 of 1 worker for 30 min plus 11 more for the
     last 15 min, eight separate 60-min T2 windows of one worker, sweep 1/12 x 3 x 120 min ABBAAB.
+30. **Supply flag at minute 110 (PLAN-v4.1 section 6.6).** With 220 tasks a window should not run out, but if
+    one does before minute 110 (more than 10 min before window_end) derive.py sets `supply_flagged` (truncation,
+    decision 19, still applies to any exhaustion before window_end). score.py codes P1 and O2 on all windows and
+    reports them again without the flagged windows as P1-nf and O2-nf (same grade, shown beside them; N/A when
+    nothing is flagged or when a size has no unflagged window left). Attempt-based measures stop at the
+    exhaustion minute as before.
+31. **Live-only pilot; calibration log (PLAN-v4.1 sections 6.2-6.3).** `derive.py --pilot` takes run
+    directories of kind `trial` or `pilot` only (T1, T2) and records `review_source`; `--allow-nonlive` exists
+    only to push a dry run through the chain. The calibration reviews go in the calibration-review log above,
+    which only `predict.py --calibration` reads, for abort rule 4. Without it predict.py prints rule 4 as NOT
+    EVALUATED (the live V is shown as a preview). Near the 0.5 threshold `review_cv_ok` is close to a coin toss
+    (OPERATING-CHARACTERISTICS.md), and the pre-registration says so.
+32. **Reviewer pace (PLAN-v4.1 section 6.1).** The conditional-confirmatory test is `Vdur`: Welch t-test on log
+    `duration_s` of the counted reviews, N = 12 against N = 1, FAIL iff two-sided p < 0.05, else PASS;
+    confirmatory iff `review_cv_ok`. `Vratio` (V(12)/V(1) with its exact conditional-binomial 95% interval) is
+    descriptive and coded REPORTED: no band and no equivalence claim, since with about 40 and 75 reviews the
+    interval is roughly 0.7-1.45. The combined `V` result is removed.
+33. **Operating characteristics recomputed (PLAN-v4.1 section 6.8).** `design-search/oc_v41.py` simulates the
+    final setup (220 tasks, grace-end fix, live-only pilot of T1 + 8 x 60-min T2, Haiku assumptions of
+    DESIGN-SEARCH, the v4.1 codings) and `../OPERATING-CHARACTERISTICS.md` tabulates the result; `common.V4_OC`
+    holds those figures and predict.py / score.py print them.
+34. **Conditional-logit likelihood in log space.** `common._clogit_ll` computed the elementary symmetric
+    polynomial on a linear scale, which underflowed to 0 (math domain error, crashing score.py) when one row
+    dominated a stratum with two or more events. oc_v41.py hit it in one of 1000 simulated sweeps through the
+    `clogit_task` escape sensitivity model. The recursion now runs in log space (`logaddexp`); values are
+    unchanged where the old code worked (checked against brute-force enumeration).
 
 ## Self-test results (300 replicates per cell; full tables in `selftest-output/SELFTEST.md`)
 
-All 42 unit and end-to-end checks pass, including the grace-end V correction (a hand-built log with a
-review open at grace end), task-supply truncation from the note and from reset.json, predict.py's v4
-output (no REDESIGN_*, all four rivals at N = 1 and 12, the OC statement), `--v3-gate` kept as
-SUPERSEDED, and a grade on every result, with the V-constancy grade following `review_cv_ok`.
-`selftest-output/example-synthetic/` has one synthetic v4 pilot, prediction table and RESULTS-draft.
+All 57 unit and end-to-end checks pass, including the grace-end V correction (a hand-built log with a
+review open at grace end), task-supply truncation from the note and from reset.json, the v4.1 supply flag
+(out at minute 105: flagged; at 112: truncated only), P1-nf / O2-nf on flagged windows, the calibration-log
+reader (JSONL and CSV, job versions, invalid rows refused) and abort rule 4 using the calibrated V (NOT
+EVALUATED without a log), derive --pilot refusing a non-live run, the clogit likelihood no longer failing when
+one row dominates a stratum (decision 34), predict.py's v4 output (no REDESIGN_*, all four rivals at N = 1 and
+12, the OC statement), `--v3-gate` kept as SUPERSEDED, a grade on every result, Vdur the only conditional result
+and its grade following `review_cv_ok`, and no combined V result. `selftest-output/example-synthetic/` has one
+synthetic v4 pilot, prediction table and RESULTS-draft.
 
-At the PLAN-v4 design point (synth: lambda 6.8, V 13.6, 220 tasks, pilot without the free calibration
-reviews), share of 300 simulated studies:
-
-- **P1** correct: 0.97 under Carnot (DESIGN-SEARCH 0.97), wrong 0.20 under USL (0.13 with calibration),
-  0.00 under Amdahl and linear. A reviewer 25% faster at N = 12 (skimN) is still read as capped 0.86 of
-  the time.
-- **O2** fails 0.13 under Carnot truth at review-time CV 1 (0.04 at CV 0.5), so its false-alarm rate is
-  above 5%; it fails 0.64 / 0.98 / 1.00 under USL / Amdahl / linear.
-- **S3** (b_review) fails 0.08 under Carnot, 0.01-0.04 under the uncapped truths.
-- **O3** passes in every truth (1.00).
-- **Vratio** is INCONCLUSIVE in essentially every study, under every truth: with about 40 reviews at
-  N = 1 and 75 at N = 12 the exact interval of V(12)/V(1) is roughly 0.7-1.45, never inside [0.8, 1.25]
-  (that needs about 150 reviews per size). It can FAIL (uncapped truths: 0.63-1.00) but not PASS, so the
-  combined V claim can only fail or be inconclusive.
-- **Vdur** false alarms 0.05 (CV 1) / 0.04 (CV 0.5); power against the +/-25% reviewer 0.18-0.20 at CV 1
-  and 0.66-0.73 at CV 0.5, matching DESIGN-SEARCH (0.19-0.21, 0.68-0.78).
-- **review_cv_ok** is never true at review-time CV 1 and true in 0.52-0.62 of pilots when the true CV is
-  exactly 0.5: near the threshold the flag is a coin toss.
-- **S1r / S2r** false alarms under Carnot 0.05 / 0.53, as DESIGN-SEARCH.
-- **Task supply** (linear truth, the fastest supply use): with 120 tasks, 93% of studies have N = 12
-  windows that run out; the truncated lambda(12) is 4.92 against 4.39 uncut (lambda(1) 5.36; per-agent
-  ratio 0.94 instead of about 0.82). With 220 tasks 3% still run out.
-- **Escaped defects** (sizes 1/5, PLAN-v3 layout): `logit_cluster_task` detects a planted g = 0.1 / 0.2 in
-  6% / 4% of sweeps overall (22% / 14% given >= 8 events); null 1% overall (11% given >= 8 events).
-  **Collisions**: k-slope power 0.10-0.16 at p = 0.02-0.05; with censored first attempts excluded the
-  p = 0 false-positive rate is 4-6%, against 77-92% for the rejected "not finished" outcome.
+Part V (the design point, 300 studies per cell) agrees with the pre-registered operating characteristics
+within simulation error. Those are computed with 2000 studies per cell by `design-search/oc_v41.py` and
+tabulated in `../OPERATING-CHARACTERISTICS.md`: P1 correct 0.965 / 0.80 / 1.00 / 1.00 under Carnot / USL /
+Amdahl / linear truth; O2 false alarms 0.10 (review-time CV 1) and 0.04 (CV 0.5); S3 0.06; Vdur false
+positives 0.04-0.05 and power against a +/-25% reviewer 0.18 (CV 1) and 0.73 (CV 0.5); `review_cv_ok` set in
+1.00 / 0.53 / 0.00 of pilots at true CV 0.3 / 0.5 / 0.7. Part S: with 120 tasks, 93% of linear-truth studies
+have N = 12 windows that run out; with 220, 3%.

@@ -277,5 +277,9 @@ These are listed in the build report and should be pre-registered or overruled:
     window count; claims of ids not in the list do not.
 14. **Review open at grace end**: noted as `review_open_at_grace_end`; the review is still allowed to
     finish (and is logged after `grace_end`), but the analysis drops it and its busy time.
-15. **Worker prompt, conflicts**: the prompt states that conflicts with `main` are common and are
+15. **Calibration reviews are not windows.** The offline calibration of the reviewer (PLAN-v4 section 5 step 2)
+    is logged in the analysis's calibration-review log format (analysis/README.md), which only `predict.py`
+    reads, for abort rule 4. It is never written as a run directory, so it cannot enter the pilot's V, b or
+    review-time CV (PLAN-v4.1 section 6.3).
+16. **Worker prompt, conflicts**: the prompt states that conflicts with `main` are common and are
     resolved by merging `origin/main` into the task branch before re-submitting (DRYRUN-REPORT §6.5).

@@ -12,9 +12,11 @@ Confirmatory, primary
   P1   Review is the binding limit: Carnot's review-capped prediction has a higher likelihood than the
        best uncapped rival (USL, Amdahl, linear). Negative-binomial likelihood (fixed CV 0.3) of each
        window's finished count, `completion` reading; the likelihood ratio is reported. A tie (identical
-       predictions) is not "higher".
+       predictions) is not "higher". Coded on all windows; also reported without the windows flagged
+       for running out of tasks before minute 110 (PLAN-v4.1 section 6.6; P1-nf).
 Confirmatory, secondary
   O2   Finished at N_high: the total over the N_high windows lies in Carnot's 95% predictive interval.
+       Also reported without flagged windows (O2-nf).
   S3   b_review (review bounces / reviews) does not rise with N: FAIL if one-sided Fisher exact p < 0.05.
        Rebase conflicts, visible fails, escaped defects and integration failures are reported separately
        as descriptive (the task set makes rebase conflicts rise with the number of merges).
@@ -22,11 +24,12 @@ Confirmatory, secondary
        PASS at one-sided p < 0.05 (FAIL if it falls at p < 0.05, else INCONCLUSIVE). Attempts and hours
        stop at the task-supply exhaustion minute in flagged windows (derive.py).
 Conditionally confirmatory (confirmatory only if pilot.json has review_cv_ok = true, else descriptive)
-  Vratio  V(high)/V(low) with its exact 95% interval: PASS (stable) if the interval lies inside
-          [0.8, 1.25]; FAIL if it lies wholly outside; else INCONCLUSIVE.
-  Vdur    Welch t-test on log review durations, high vs low: FAIL if two-sided p < 0.05.
-  V       both together: PASS if Vratio PASS and Vdur not FAIL; FAIL if either FAILs; else INCONCLUSIVE.
-Descriptive (reported whatever they show, with the simulated power from DESIGN-SEARCH.md)
+  Vdur    The reviewer's pace does not change with load: Welch t-test on log review durations, N_high vs
+          N_low; FAIL iff two-sided p < 0.05, else PASS (PLAN-v4.1 section 6.1). review_cv_ok comes from the
+          live T1 + T2 reviews only (derive.py --pilot).
+Descriptive (reported whatever they show, with the simulated power from OPERATING-CHARACTERISTICS.md)
+  Vratio    V(high)/V(low) with its exact 95% interval, reported only: no equivalence claim is made (with
+            about 40 and 75 reviews the interval is roughly 0.7-1.45, so it cannot show stability).
   S1r, S2r  observed finished ratio / Carnot's predicted ratio >= 1.3 / <= 0.7 with the queue non-empty
             (S2r is not a criterion: it fires about half the time under the model's own truth).
   RANK      four-way ranking with likelihood ratios and the simulated confusion matrix.
@@ -58,7 +61,6 @@ from predict import Params, predict_window  # noqa: E402
 from scipy import stats  # noqa: E402
 
 BAND = 0.25                      # PLAN-v3 V band (superseded; --plan v3 and the design search only)
-V4_BAND = PLAN_V4["V_band"]      # PLAN-v4: stable iff the exact 95% interval of V(high)/V(low) lies inside
 UNCAPPED = ("usl", "amdahl", "linear")
 
 
@@ -226,25 +228,20 @@ def _welch_log(a, b):
 
 
 def v_constancy(S_lo, S_hi):
-    """PLAN-v4: V(high)/V(low) with its exact 95% interval against [0.8, 1.25]; Welch on log review durations."""
+    """PLAN-v4.1 section 6.1: the Welch test on log review durations (high vs low) is the reviewer-pace test,
+    FAIL iff two-sided p < 0.05. V(high)/V(low) and its exact 95% interval are descriptive (no band, no
+    equivalence claim)."""
     n1, b1, V1, ci1 = _pool_V(S_lo)
     n2, b2, V2, ci2 = _pool_V(S_hi)
     ratio = V2 / V1 if V1 and V1 == V1 else math.nan
     ci = ratio_ci(n1, b1, n2, b2)
-    lo_b, hi_b = V4_BAND
-    if ci[0] == ci[0] and lo_b <= ci[0] and ci[1] <= hi_b:
-        code = "PASS"
-    elif ci[0] == ci[0] and (ci[1] < lo_b or ci[0] > hi_b):
-        code = "FAIL"
-    else:
-        code = "INCONCLUSIVE"
     d_lo = [x for s in S_lo for x in s.get("review_durations_s", [])]
     d_hi = [x for s in S_hi for x in s.get("review_durations_s", [])]
     w = _welch_log(d_lo, d_hi)
     from derive import _cv
     return dict(low=dict(reviews=n1, busy_hours=b1, V=V1, V_ci=ci1, review_time_cv=_cv(d_lo)),
                 high=dict(reviews=n2, busy_hours=b2, V=V2, V_ci=ci2, review_time_cv=_cv(d_hi)),
-                ratio=ratio, ratio_ci=ci, band=list(V4_BAND), ratio_code=code, vdur=w,
+                ratio=ratio, ratio_ci=ci, vdur=w,
                 vdur_code="N/A" if w["p"] != w["p"] else ("FAIL" if w["p"] < 0.05 else "PASS"),
                 open_review_clipped=[s["run_id"] for s in S_lo + S_hi if s.get("review_open_at_end")])
 
@@ -450,17 +447,42 @@ def score(derived, pilot, *, rival_rework=PLAN_V4["rival_rework"], escape_model=
         return _clean(R)
     R["primary"] = capped_vs_uncapped(R["rivals"])
     R["primary_by_reading"] = {k: capped_vs_uncapped(v) for k, v in R["rivals_by_reading"].items()}
+    R["supply_flagged"] = [s["run_id"] for s in S if s.get("supply_flagged")]
+    R["without_flagged"] = without_flagged(S, P, cv)
     R["V4"] = v_constancy(S_lo, S_hi)
     rco = pilot.get("review_cv_ok")
     R["review_cv_ok"] = bool(rco) if isinstance(rco, bool) else False
     R["review_cv_ok_recorded"] = isinstance(rco, bool)
     R["supply"] = [dict(run_id=s["run_id"], N=s["n_workers"], task_supply=s.get("task_supply"),
                         t_exhausted_min=s.get("t_exhausted_min"), attempts=s["attempts"],
-                        attempts_full=s.get("attempts_full")) for s in S if s.get("supply_truncated")]
+                        attempts_full=s.get("attempts_full"), flagged=bool(s.get("supply_flagged")))
+                   for s in S if s.get("supply_truncated")]
     R["supply_unknown"] = [s["run_id"] for s in S if s.get("task_supply") is None]
     R["operating_characteristics"] = V4_OC
     R["outcomes"] = code_outcomes_v4(R)
     return _clean(R)
+
+
+def without_flagged(S, P: Params, cv=CV_OVERDISPERSION):
+    """PLAN-v4.1 section 6.6: P1 and O2 recomputed on the windows that did not run out of tasks before minute
+    110 (derive.py `supply_flagged`). None when no window is flagged (identical to the main result); N/A parts
+    when a size has no unflagged window left."""
+    flagged = [s["run_id"] for s in S if s.get("supply_flagged")]
+    if not flagged:
+        return None
+    keep = [s for s in S if not s.get("supply_flagged")]
+    nh = max(s["n_workers"] for s in S)
+    out = dict(flagged=flagged, windows_kept=[s["run_id"] for s in keep], P1=None, O2=None)
+    if len({s["n_workers"] for s in keep}) == 2:
+        out["P1"] = capped_vs_uncapped(rival_scores(keep, P, cv))
+    hi = [s for s in keep if s["n_workers"] == nh]
+    if hi:
+        mus = [predict_window(P, s["n_workers"], hours=s["hours"])["carnot"]["finished"] for s in hi]
+        lo95, hi95 = pooled_interval(mus, cv)
+        obs = sum(s["finished"] for s in hi)
+        out["O2"] = dict(observed_high_total=obs, predicted_high_total=sum(mus), interval95=[lo95, hi95],
+                         windows=len(hi), inside=bool(lo95 <= obs <= hi95))
+    return out
 
 
 def _o(id_, text, value, rule, code, note=""):
@@ -487,6 +509,10 @@ def code_outcomes_v4(R):
     if sup_hi:
         note += (" Supply warning: " + ", ".join(f"{x['run_id']} ran out of tasks at min {x['t_exhausted_min']:.0f}" for x in sup_hi)
                  + "; finished counts in those windows may be supply-limited.")
+    wf = R.get("without_flagged")
+    if wf:
+        note += (f" Windows flagged for running out of tasks before minute 110: {', '.join(wf['flagged'])}; "
+                 "see P1-nf for the result without them.")
     O.append(_g("P1", CONFIRMATORY, "Review is the binding limit: Carnot's review-capped prediction has a higher likelihood "
                 "than the best uncapped rival (USL, Amdahl, linear)", dict(log_lr=pr["log_lr"], lr=pr["lr"],
                 best_uncapped=pr["best_uncapped"]),
@@ -498,7 +524,31 @@ def code_outcomes_v4(R):
                 f"PASS if the N = {nh} windows' total finished count is in the pooled 95% predictive interval "
                 "(Poisson-gamma, CV 0.3 per window)", "PASS" if o2 else "FAIL",
                 f"observed {d2['observed_high_total']}, predicted {d2['predicted_high_total']:.1f} "
-                f"({d2['interval95'][0]}-{d2['interval95'][1]})"))
+                f"({d2['interval95'][0]}-{d2['interval95'][1]}); simulated false-alarm rate under Carnot truth "
+                f"{oc['O2_false_alarm']['service_cv_1']:.2f} at review-time CV 1, {oc['O2_false_alarm']['service_cv_0_5']:.2f} at 0.5"))
+    # PLAN-v4.1 section 6.6: P1 and O2 without the windows that ran out of tasks before minute 110
+    if not wf:
+        c1, n1_, c2, n2_ = "N/A", "no window flagged: identical to P1", "N/A", "no window flagged: identical to O2"
+        v1 = v2 = None
+    else:
+        p1n = wf["P1"]
+        if p1n is None:
+            c1, n1_, v1 = "N/A", "no unflagged window left at one of the sizes", None
+        else:
+            c1 = "PASS" if p1n["carnot_higher"] else "FAIL"
+            v1 = dict(log_lr=p1n["log_lr"], lr=p1n["lr"], best_uncapped=p1n["best_uncapped"])
+            n1_ = f"log LR {p1n['log_lr']:+.2f} vs {RIVAL_LABEL[p1n['best_uncapped']]} on {len(wf['windows_kept'])} windows"
+        o2n = wf["O2"]
+        if o2n is None:
+            c2, n2_, v2 = "N/A", f"no unflagged N = {nh} window left", None
+        else:
+            c2, v2 = ("PASS" if o2n["inside"] else "FAIL"), o2n
+            n2_ = (f"observed {o2n['observed_high_total']} in {o2n['windows']} window(s), predicted "
+                   f"{o2n['predicted_high_total']:.1f} ({o2n['interval95'][0]}-{o2n['interval95'][1]})")
+    O.append(_g("P1-nf", CONFIRMATORY, "P1 without the windows that ran out of tasks before minute 110 (reported beside P1)",
+                v1, "as P1, on the unflagged windows only", c1, n1_))
+    O.append(_g("O2-nf", CONFIRMATORY, f"O2 without the N = {nh} windows that ran out of tasks before minute 110 "
+                "(reported beside O2)", v2, "as O2, on the unflagged windows only", c2, n2_))
     b = R["b"]
     pr_ = b["p_review_rising"]
     O.append(_g("S3", CONFIRMATORY, "The review-bounce share b_review does not rise with fleet size",
@@ -530,27 +580,19 @@ def code_outcomes_v4(R):
     why = ("review_cv_ok = true in pilot.json: confirmatory" if ok else
            ("review_cv_ok = false in pilot.json: descriptive" if R["review_cv_ok_recorded"]
             else "review_cv_ok not recorded in pilot.json: descriptive"))
-    O.append(_g("Vratio", CONDITIONAL, "The reviewer's pace does not change with load: V(high)/V(low) within [0.8, 1.25]",
-                dict(ratio=V["ratio"], ci=V["ratio_ci"]),
-                "PASS (stable) if the exact 95% interval of V(high)/V(low) lies inside [0.8, 1.25]; FAIL if it lies wholly "
-                "outside; else INCONCLUSIVE", V["ratio_code"],
-                f"V {V['low']['V']:.2f} -> {V['high']['V']:.2f}, ratio {V['ratio']:.2f} ({V['ratio_ci'][0]:.2f}-"
-                f"{V['ratio_ci'][1]:.2f}); {why}", counts_as=counts))
     w = V["vdur"]
-    O.append(_g("Vdur", CONDITIONAL, "Review durations do not change with load (Welch t-test on log durations, high vs low)",
+    vp = oc["Vdur_power"]
+    O.append(_g("Vdur", CONDITIONAL, "The reviewer's pace does not change with load (Welch t-test on log review durations, "
+                f"N = {nh} vs N = {nl})",
                 dict(p=w["p"], geo_mean_ratio=w["ratio_geo"], n_low=w["n_low"], n_high=w["n_high"]),
-                "FAIL if two-sided p < 0.05", V["vdur_code"],
-                f"geometric-mean duration ratio {w['ratio_geo']:.2f}, p = {w['p']:.3f}, n = {w['n_low']} / {w['n_high']}; "
-                f"simulated power vs a +/-25% reviewer {oc['Vdur_power']['service_cv_0_5']:.2f} at CV 0.5, "
-                f"{oc['Vdur_power']['service_cv_1']:.2f} at CV 1; {why}", counts_as=counts))
-    if "FAIL" in (V["ratio_code"], V["vdur_code"]):
-        cv_ = "FAIL"
-    elif V["ratio_code"] == "PASS" and V["vdur_code"] == "PASS":
-        cv_ = "PASS"
-    else:
-        cv_ = "INCONCLUSIVE"
-    O.append(_g("V", CONDITIONAL, "V constancy (Vratio and Vdur together)", None,
-                "PASS if Vratio PASS and Vdur PASS; FAIL if either FAILs; else INCONCLUSIVE", cv_, why, counts_as=counts))
+                "FAIL iff two-sided p < 0.05, else PASS; no equivalence claim", V["vdur_code"],
+                f"geometric-mean duration ratio {_f(w['ratio_geo'])}, p = {_f(w['p'], '{:.3f}')}, n = {w['n_low']} / {w['n_high']}; "
+                f"simulated power vs a +/-25% reviewer {vp['service_cv_0_5']:.2f} at review-time CV 0.5, "
+                f"{vp['service_cv_1']:.2f} at CV 1; {why}", counts_as=counts))
+    O.append(_g("Vratio", DESCRIPTIVE, f"V(N = {nh}) / V(N = {nl}) with its exact 95% interval (no equivalence claim)",
+                dict(ratio=V["ratio"], ci=V["ratio_ci"]), "reported, not coded", "REPORTED",
+                f"V {_f(V['low']['V'])} -> {_f(V['high']['V'])}, ratio {_f(V['ratio'])} ({_f(V['ratio_ci'][0])}-"
+                f"{_f(V['ratio_ci'][1])})"))
     pooled = R["pooled"]
     sat = pooled["queue_nonempty_share_high"] >= 0.5
     rp = pooled["ratio_over_predicted"]
@@ -858,7 +900,8 @@ def render_md_v4(R):
         L.append("")
         L.append("**Task supply ran out** in " + "; ".join(
             f"{x['run_id']} (N = {x['N']}): all {x['task_supply']} tasks claimed by minute {x['t_exhausted_min']:.1f}, "
-            f"attempts counted to that minute {x['attempts']} (whole window {x['attempts_full']})" for x in R["supply"]) +
+            f"attempts counted to that minute {x['attempts']} (whole window {x['attempts_full']})"
+            f"{'; FLAGGED (before minute 110)' if x.get('flagged') else ''}" for x in R["supply"]) +
             ". Lambda and the attempt-based results (O3, attempts per hour) use only the time before exhaustion.")
     if R["supply_unknown"]:
         L.append(f"\nTask supply unknown (no `task_supply` note or reset.json) for: {', '.join(R['supply_unknown'])}; "
@@ -886,8 +929,15 @@ def render_md_v4(R):
              f"uncapped = {pr['lr']:.3g}** (log {pr['log_lr']:+.2f}): {'Carnot higher' if pr['carnot_higher'] else 'Carnot not higher'}.")
     L.append(f"Simulated operating characteristics: correct {OC['primary_correct']['carnot']:.2f} under Carnot truth, "
              f"{OC['primary_correct']['usl']:.2f} / {OC['primary_correct']['amdahl']:.2f} / {OC['primary_correct']['linear']:.2f} "
-             f"under USL / Amdahl / linear truth, {OC['primary_correct']['carnot_lambda_30pct_low']:.2f} if agents are 30% slower "
-             "than assumed.\n")
+             f"under USL / Amdahl / linear truth; {OC['primary_correct']['carnot_lambda_30pct_low']:.2f} / "
+             f"{OC['primary_correct']['usl_lambda_30pct_low']:.2f} (Carnot / USL truth) if agents are 30% slower than assumed.\n")
+    wf = R.get("without_flagged")
+    if wf:
+        p1n = wf["P1"]
+        L.append("Without the windows flagged for running out of tasks before minute 110 (" + ", ".join(wf["flagged"]) + "): " +
+                 ("no unflagged window left at one size.\n" if p1n is None else
+                  f"log LR {p1n['log_lr']:+.2f} vs {RIVAL_LABEL[p1n['best_uncapped']]} -> "
+                  f"{'Carnot higher' if p1n['carnot_higher'] else 'Carnot not higher'}.\n"))
     L.append("Sensitivity to the rework reading [descriptive]: " + "; ".join(
         f"`{k}`: log LR {v['log_lr']:+.2f} vs {v['best_uncapped']}" for k, v in R["primary_by_reading"].items()) + ".\n")
 
@@ -896,6 +946,13 @@ def render_md_v4(R):
     L.append(f"## O2 [confirmatory]: finished at N = {nh}\n")
     L.append(f"Observed total over the N = {nh} windows: {d2['observed_high_total']}. Carnot predicted {d2['predicted_high_total']:.1f}, "
              f"95% predictive interval {d2['interval95'][0]}-{d2['interval95'][1]}.\n")
+    wf = R.get("without_flagged")
+    if wf:
+        o2n = wf["O2"]
+        L.append("Without the windows flagged for running out of tasks before minute 110 (" + ", ".join(wf["flagged"]) + "): " +
+                 ("no N = %d window left.\n" % nh if o2n is None else
+                  f"observed {o2n['observed_high_total']} in {o2n['windows']} window(s), predicted {o2n['predicted_high_total']:.1f}, "
+                  f"95% interval {o2n['interval95'][0]}-{o2n['interval95'][1]} -> {'inside' if o2n['inside'] else 'outside'}.\n"))
 
     # S3 + bounce causes
     b = R["b"]
@@ -932,8 +989,8 @@ def render_md_v4(R):
 
     # V constancy
     V4 = R["V4"]
-    o_v = next(o for o in R["outcomes"] if o["id"] == "V")
-    L.append(f"## V constancy [conditional -> {o_v['counts_as']}]\n")
+    o_v = next(o for o in R["outcomes"] if o["id"] == "Vdur")
+    L.append(f"## Reviewer pace, Vdur [conditional -> {o_v['counts_as']}]\n")
     L.append(f"{o_v['note']}.\n")
     L.append("| Window | N | reviews | V | 95% CI | review-time CV | half 1 V (n) | half 2 V (n) |\n|---|---|---|---|---|---|---|---|")
     for s in R["windows"]:
@@ -945,11 +1002,13 @@ def render_md_v4(R):
         L.append(f"| pooled | {n} | {v['reviews']} | {_f(v['V'])} | {_f(v['V_ci'][0], '{:.1f}')}-{_f(v['V_ci'][1], '{:.1f}')} | "
                  f"{_f(v['review_time_cv'])} | | |")
     w = V4["vdur"]
-    L.append(f"\n- **Vratio:** V({nh})/V({nl}) = {_f(V4['ratio'])}, exact 95% interval {_f(V4['ratio_ci'][0])}-{_f(V4['ratio_ci'][1])} "
-             f"against [{V4['band'][0]}, {V4['band'][1]}] -> **{V4['ratio_code']}**.")
-    L.append(f"- **Vdur:** Welch t-test on log review durations, N = {nh} vs N = {nl}: geometric-mean ratio {_f(w['ratio_geo'])}, "
-             f"p = {_f(w['p'], '{:.3f}')} (n = {w['n_low']} / {w['n_high']}) -> **{V4['vdur_code']}**. Simulated power against a "
-             f"+/-25% reviewer {OC['Vdur_power']['service_cv_0_5']:.2f} at review-time CV 0.5, {OC['Vdur_power']['service_cv_1']:.2f} at CV 1.")
+    L.append(f"\n- **Vdur [conditional -> {o_v['counts_as']}]:** Welch t-test on log review durations, N = {nh} vs N = {nl}: "
+             f"geometric-mean ratio {_f(w['ratio_geo'])}, p = {_f(w['p'], '{:.3f}')} (n = {w['n_low']} / {w['n_high']}) -> "
+             f"**{V4['vdur_code']}** (FAIL iff p < 0.05). Simulated power against a +/-25% reviewer "
+             f"{OC['Vdur_power']['service_cv_0_5']:.2f} at review-time CV 0.5, {OC['Vdur_power']['service_cv_1']:.2f} at CV 1; "
+             f"false-positive rate {OC['Vdur_fpr']['service_cv_0_5']:.2f} / {OC['Vdur_fpr']['service_cv_1']:.2f}.")
+    L.append(f"- **Vratio [descriptive]:** V({nh})/V({nl}) = {_f(V4['ratio'])}, exact 95% interval {_f(V4['ratio_ci'][0])}-"
+             f"{_f(V4['ratio_ci'][1])}. Reported only; no equivalence claim is made.")
     if V4["open_review_clipped"]:
         L.append(f"- A review was still running at the end of grace in {', '.join(V4['open_review_clipped'])}; it is not counted "
                  "and neither is its busy time (derive.py grace-end correction).")

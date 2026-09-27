@@ -32,7 +32,7 @@ BOUNCE_CAUSES = ("review", "rebase_conflict", "visible_fail", "escaped_defect", 
 # PLAN-v4 section 2: fixed sizes, no pilot gate, three 120-min windows per size in ABBAAB order.
 PLAN_V4 = dict(sizes=(1, 12), reps=3, order="ABBAAB", window_min=120.0, warmup_min=10.0, grace_min=10.0,
                rival_rework="completion", escape_model="logit_cluster_task", lambda_target=8.0, q=2.0,
-               V_band=(0.8, 1.25), review_cv_max=0.5, min_escape_events=8, alpha_test=0.05,
+               review_cv_max=0.5, min_escape_events=8, alpha_test=0.05,
                sweep_session_hours=78.0, balance_floor_usd=50.0)
 
 # Result grades (PLAN-v4 section 1). Every result in RESULTS-draft.md carries one of these.
@@ -40,22 +40,28 @@ CONFIRMATORY = "confirmatory"
 CONDITIONAL = "conditional"
 DESCRIPTIVE = "descriptive"
 
-# Simulated operating characteristics at the design point, quoted from PLAN-v4 section 1 and
-# design-search/DESIGN-SEARCH.md (stage C, 800 replicates per truth, design "H lam8 q2 N1/12 120m x3 |
-# T2 1w 8x60m T1r cal120"; confusion matrix from design-search/stageC_final.json). These are stated in
-# the pre-registration; the analysis only prints them next to the results.
+# Simulated operating characteristics at the design point, PLAN-v4.1 section 6.8: recomputed by
+# design-search/oc_v41.py with the final setup (220-task supply, the grace-end V fix, a live-only pilot of T1
+# plus eight 60-min T2 windows with no calibration pooling, Haiku assumptions as in DESIGN-SEARCH, the v4.1
+# codings) and tabulated in ../OPERATING-CHARACTERISTICS.md. These, not the DESIGN-SEARCH figures, go into the
+# pre-registration; the analysis only prints them next to the results (copied from oc_v41.json by hand).
 V4_OC = dict(
-    primary_correct=dict(carnot=0.97, usl=0.87, amdahl=1.00, linear=1.00, carnot_lambda_30pct_low=0.70,
-                         burn_1_5x=0.85),
-    # rows: truth; columns: family with the highest likelihood (share of 800 simulated sweeps)
-    confusion=dict(carnot=dict(carnot=0.969, usl=0.028, amdahl=0.0, linear=0.0, tie=0.004),
-                   usl=dict(carnot=0.128, usl=0.666, amdahl=0.201, linear=0.005, tie=0.0),
-                   amdahl=dict(carnot=0.0, usl=0.159, amdahl=0.689, linear=0.153, tie=0.0),
-                   linear=dict(carnot=0.0, usl=0.0, amdahl=0.086, linear=0.914, tie=0.0)),
+    source="OPERATING-CHARACTERISTICS.md, design-search/oc_v41.py, 2000 simulated studies per cell",
+    primary_correct=dict(carnot=0.97, usl=0.80,  # carnot: 0.965 (1930 of 2000), rounded
+                         amdahl=1.00, linear=1.00, carnot_lambda_30pct_low=0.76,
+                         usl_lambda_30pct_low=0.66, burn_1_5x=0.95, usl_burn_1_5x=0.75),
+    # rows: truth; columns: family with the highest likelihood (base scenario, review-time CV 1)
+    confusion=dict(carnot=dict(carnot=0.965, usl=0.023, amdahl=0.001, linear=0.0, tie=0.012),
+                   usl=dict(carnot=0.198, usl=0.570, amdahl=0.221, linear=0.008, tie=0.005),
+                   amdahl=dict(carnot=0.002, usl=0.158, amdahl=0.675, linear=0.166, tie=0.0),
+                   linear=dict(carnot=0.0, usl=0.001, amdahl=0.069, linear=0.931, tie=0.0)),
+    O2_false_alarm=dict(service_cv_1=0.10, service_cv_0_5=0.04),
+    S3_false_alarm=0.06, O3_power=1.00,
     S1r_false_alarm=0.05, S2r_false_alarm=0.53,
-    Vdur_power=dict(service_cv_1=0.19, service_cv_0_5=0.68), Vdur_fpr=0.06,
-    escape_power=dict(a05=0.10, a01=0.03), escape_null=0.05,
-    collision_power=dict(p01_a05=0.09, p05_a05=0.34, p05_a01=0.12),
+    Vdur_power=dict(service_cv_1=0.18, service_cv_0_5=0.73), Vdur_fpr=dict(service_cv_1=0.04, service_cv_0_5=0.05),
+    review_cv_ok_prob=dict(cv_0_3=1.00, cv_0_5=0.53, cv_0_7=0.00),
+    escape_power=dict(a05=0.12, a01=0.04), escape_null=0.06,
+    collision_power=dict(p01_a05=0.08, p05_a05=0.36, p05_a01=0.15), collision_null=0.05,
     loads=dict(N1=0.92, N12=3.23),
 )
 
@@ -245,14 +251,13 @@ def _clogit_ll(beta, strata_X, strata_y):
         eta = Xs @ beta
         d = int(ys.sum())
         num = float(eta[ys == 1].sum())
-        # log of the elementary symmetric polynomial e_d(exp(eta)) by DP in log space
-        m = eta.max()
-        w = np.exp(eta - m)
-        e = np.zeros(d + 1)
-        e[0] = 1.0
-        for wi in w:
-            e[1:] = e[1:] + wi * e[:-1]
-        ll += num - (math.log(e[d]) + d * m)
+        # log of the elementary symmetric polynomial e_d(exp(eta)) by DP, fully in log space (a linear-scale DP
+        # underflows to e_d = 0 when one row dominates a stratum with d >= 2 events; found by oc_v41.py)
+        le = np.full(d + 1, -np.inf)
+        le[0] = 0.0
+        for ei in eta:
+            le[1:] = np.logaddexp(le[1:], ei + le[:-1])
+        ll += num - float(le[d])
     return ll
 
 

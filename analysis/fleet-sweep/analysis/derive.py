@@ -46,6 +46,9 @@ listed in README.md):
   supply shortfall cannot look like coordination drag. `attempts_full`, `worker_hours_full`,
   `lam_full` keep the whole counting window; finished / censored / rework_open are over the whole
   counting window (finished + censored + rework_open = attempts_full).
+  **Flag (PLAN-v4.1 section 6.6, README decision 30):** a window whose tasks ran out more than 10 min
+  before window_end (before minute 110 of a 120-min window) is also flagged `supply_flagged`; score.py
+  reports P1 and O2 with and without the flagged windows.
 * Merge-queue ("CI") time per change: from max(approval, previous change's queue exit) to its merge or
   queue bounce, FIFO.
 """
@@ -66,6 +69,7 @@ from common import BOUNCE_CAUSES, parse_t, rate_ci  # noqa: E402
 
 MQ_CAUSES = ("rebase_conflict", "visible_fail", "escaped_defect", "integration_failure")
 REVIEW_CV_MAX = 0.5   # PLAN-v4 section 1: V constancy is confirmatory only if the pilot's review-time CV <= 0.5
+SUPPLY_FLAG_BEFORE_END_MIN = 10.0  # PLAN-v4.1 section 6.6: flagged if the tasks ran out before minute 110 of 120
 SUPPLY_RE = re.compile(r"^task_supply\s+n=(\d+)")
 EXHAUSTED_RE = re.compile(r"^tasks_exhausted\b")
 
@@ -361,6 +365,7 @@ def derive_window(run, events, supply=None, supply_source=None):
         tasks_claimed=len({task for _, task in claims}),
         t_exhausted_min=t_exhausted / 60 if t_exhausted is not None else None,
         supply_truncated=truncated, attempt_window_end_min=t_count_end / 60, attempt_hours=attempt_hours,
+        supply_flagged=bool(t_exhausted is not None and t_exhausted < we - SUPPLY_FLAG_BEFORE_END_MIN * 60),
         attempts=attempts, attempts_full=attempts_full, attempts_all=len(prs),
         worker_hours=worker_h_post, worker_hours_full=worker_h_full, worker_hours_all=worker_h_all,
         lam=attempts / worker_h_post if worker_h_post > 0 else math.nan,
@@ -420,13 +425,26 @@ def derive_dir(run_dir):
 
 
 # ---------------------------------------------------------------------- pilot
-def pilot_params(derived, n_pilot=None):
+LIVE_KINDS = ("trial", "pilot")   # T1 and T2: the only live reviews that may enter the pilot (PLAN-v4.1 section 6.3)
+
+
+def pilot_params(derived, n_pilot=None, allow_nonlive=False):
     """Pool trial + pilot windows into the pre-registered pilot outputs (PLAN-v4 section 2: T1 + T2).
     lambda comes from kind == 'pilot' windows only (T1 is a throttling test at N = 1 then 12); V, b, r0,
     CI time, review time and its CV, and review cost are pooled over every window given (T1's PRs are
     reviewed too). review_cv_ok = (review-time CV <= 0.5) is the pre-registered flag that makes the
-    V-constancy claim confirmatory; it is fixed here, before the first sweep window."""
+    reviewer-pace test (Vdur) confirmatory; it is fixed here, before the first sweep window.
+
+    Live reviews only (PLAN-v4.1 sections 6.2-6.3, README decision 31): V, b, r0 and the review-time CV come
+    from the review_end events of the T1 and T2 run logs given here and nothing else. The offline calibration
+    reviews live in a separate calibration log (README "Calibration-review log") that only predict.py reads,
+    for abort rule 4; they are never pooled into V, b or the CV. Runs whose kind is not trial or pilot
+    (a sweep window or a dry run) are refused unless allow_nonlive (dry runs of the chain only)."""
     S = [d["summary"] for d in derived]
+    bad = [s["run_id"] for s in S if s["kind"] not in LIVE_KINDS]
+    if bad and not allow_nonlive:
+        raise SystemExit(f"--pilot takes live T1 / T2 runs only (kind trial or pilot); got {bad}. "
+                         "Use --allow-nonlive only for a dry run of the analysis chain.")
     pil = [s for s in S if s["kind"] == "pilot"] or S
     ns = sorted({s["n_workers"] for s in pil})
     if n_pilot is None:
@@ -466,6 +484,8 @@ def pilot_params(derived, n_pilot=None):
         worker_tokens_per_attempt=_nanmean([s["worker_tokens_per_attempt"] for s in S]),
         startup_min=_nanmean([s["startup_min_mean"] for s in S]),
         runs=[s["run_id"] for s in S],
+        review_source="live T1 + T2 review_end events only; calibration reviews not pooled (PLAN-v4.1 6.2-6.3)"
+        + ("" if not bad else f"; NON-LIVE runs included for a dry run: {bad}"),
     )
     return out
 
@@ -500,12 +520,18 @@ def main():
     ap.add_argument("runs", nargs="+", help="run directories (each with run.json + events.jsonl)")
     ap.add_argument("--pilot", action="store_true", help="pool the runs into pilot parameters (T1 + T2)")
     ap.add_argument("--n-pilot", type=int, default=None)
+    ap.add_argument("--allow-nonlive", action="store_true",
+                    help="--pilot only: accept runs whose kind is not trial/pilot (dry runs of the chain; never for the study)")
     ap.add_argument("--out", default=None, help="write JSON here")
     ap.add_argument("--csv-dir", default=None, help="also write per-window, per-PR and per-approval CSVs")
     a = ap.parse_args()
+    for r in a.runs:
+        if not Path(r).is_dir():
+            raise SystemExit(f"{r}: not a run directory. derive.py reads harness run directories only; a calibration "
+                             "log is read by predict.py --calibration (abort rule 4) and never pooled into the pilot.")
     derived = [derive_dir(r) for r in a.runs]
     if a.pilot:
-        res = pilot_params(derived, a.n_pilot)
+        res = pilot_params(derived, a.n_pilot, allow_nonlive=a.allow_nonlive)
     else:
         res = dict(windows=[d["summary"] for d in derived], prs=[p for d in derived for p in d["prs"]],
                    approvals=[x for d in derived for x in d["approvals"]])
@@ -535,7 +561,8 @@ def main():
         for d in derived:
             s = d["summary"]
             if s["supply_truncated"]:
-                sup = (f"TRUNCATED: {s['task_supply']} tasks all claimed at min {s['t_exhausted_min']:.1f}; "
+                sup = (f"{'FLAGGED, ' if s['supply_flagged'] else ''}"
+                       f"TRUNCATED: {s['task_supply']} tasks all claimed at min {s['t_exhausted_min']:.1f}; "
                        f"attempts/lambda to that minute (whole window: {s['attempts_full']}, {s['lam_full']:.2f})")
             elif s["task_supply"] is None:
                 sup = "unknown (no task_supply note or reset.json)"

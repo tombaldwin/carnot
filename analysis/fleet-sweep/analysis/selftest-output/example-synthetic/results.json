@@ -56,7 +56,8 @@
       "synth-11-T2-6",
       "synth-11-T2-7",
       "synth-11-T2-8"
-    ]
+    ],
+    "review_source": "live T1 + T2 review_end events only; calibration reviews not pooled (PLAN-v4.1 6.2-6.3)"
   },
   "params": {
     "lambda_pilot": 5.4,
@@ -93,6 +94,7 @@
       "supply_truncated": false,
       "attempt_window_end_min": 120.0,
       "attempt_hours": 1.8333333333333333,
+      "supply_flagged": false,
       "attempts": 12,
       "attempts_full": 12,
       "attempts_all": 15,
@@ -215,6 +217,7 @@
       "supply_truncated": false,
       "attempt_window_end_min": 120.0,
       "attempt_hours": 1.8333333333333333,
+      "supply_flagged": false,
       "attempts": 7,
       "attempts_full": 7,
       "attempts_all": 7,
@@ -331,6 +334,7 @@
       "supply_truncated": false,
       "attempt_window_end_min": 120.0,
       "attempt_hours": 1.8333333333333333,
+      "supply_flagged": false,
       "attempts": 10,
       "attempts_full": 10,
       "attempts_all": 10,
@@ -444,6 +448,7 @@
       "supply_truncated": false,
       "attempt_window_end_min": 120.0,
       "attempt_hours": 1.8333333333333333,
+      "supply_flagged": false,
       "attempts": 46,
       "attempts_full": 46,
       "attempts_all": 48,
@@ -587,6 +592,7 @@
       "supply_truncated": false,
       "attempt_window_end_min": 120.0,
       "attempt_hours": 1.8333333333333333,
+      "supply_flagged": false,
       "attempts": 68,
       "attempts_full": 68,
       "attempts_all": 74,
@@ -727,6 +733,7 @@
       "supply_truncated": false,
       "attempt_window_end_min": 120.0,
       "attempt_hours": 1.8333333333333333,
+      "supply_flagged": false,
       "attempts": 32,
       "attempts_full": 32,
       "attempts_all": 34,
@@ -1622,12 +1629,12 @@
           "rate": 0.05714285714285714
         }
       ],
-      "coef_depth": -3.9699812822542215,
+      "coef_depth": -4.3066657556813706,
       "se_depth": null,
-      "or_per_depth": 0.018873786406581092,
-      "coef_time": -6.261636818243772,
-      "p_one_sided": 0.8574217894788285,
-      "p_two_sided": 0.285156421042343,
+      "or_per_depth": 0.01347841508534853,
+      "coef_time": -6.799997764010994,
+      "p_one_sided": 0.8574230589610905,
+      "p_two_sided": 0.28515388207781894,
       "fit_ok": true,
       "informative_strata": 9,
       "informative_rows": 21,
@@ -1668,12 +1675,12 @@
           "rate": 0.05714285714285714
         }
       ],
-      "coef_depth": -6.1655041532563555,
+      "coef_depth": -6.167295901671301,
       "se_depth": null,
-      "or_per_depth": 0.0021006590434847023,
-      "coef_time": -3.3564526045807255,
-      "p_one_sided": 0.9340672717879857,
-      "p_two_sided": 0.1318654564240288,
+      "or_per_depth": 0.002096898560898596,
+      "coef_time": -3.365271197031899,
+      "p_one_sided": 0.8574232519190603,
+      "p_two_sided": 0.28515349616187946,
       "fit_ok": true,
       "informative_strata": 3,
       "informative_rows": 7,
@@ -1784,6 +1791,8 @@
       "tie": false
     }
   },
+  "supply_flagged": [],
+  "without_flagged": null,
   "V4": {
     "low": {
       "reviews": 45,
@@ -1810,11 +1819,6 @@
       0.7666326252375429,
       1.64032439015495
     ],
-    "band": [
-      0.8,
-      1.25
-    ],
-    "ratio_code": "INCONCLUSIVE",
     "vdur": {
       "p": 0.23445468925119814,
       "t": -1.1960924792140046,
@@ -1836,61 +1840,79 @@
   "supply": [],
   "supply_unknown": [],
   "operating_characteristics": {
+    "source": "OPERATING-CHARACTERISTICS.md, design-search/oc_v41.py, 2000 simulated studies per cell",
     "primary_correct": {
       "carnot": 0.97,
-      "usl": 0.87,
+      "usl": 0.8,
       "amdahl": 1.0,
       "linear": 1.0,
-      "carnot_lambda_30pct_low": 0.7,
-      "burn_1_5x": 0.85
+      "carnot_lambda_30pct_low": 0.76,
+      "usl_lambda_30pct_low": 0.66,
+      "burn_1_5x": 0.95,
+      "usl_burn_1_5x": 0.75
     },
     "confusion": {
       "carnot": {
-        "carnot": 0.969,
-        "usl": 0.028,
-        "amdahl": 0.0,
+        "carnot": 0.965,
+        "usl": 0.023,
+        "amdahl": 0.001,
         "linear": 0.0,
-        "tie": 0.004
+        "tie": 0.012
       },
       "usl": {
-        "carnot": 0.128,
-        "usl": 0.666,
-        "amdahl": 0.201,
-        "linear": 0.005,
-        "tie": 0.0
+        "carnot": 0.198,
+        "usl": 0.57,
+        "amdahl": 0.221,
+        "linear": 0.008,
+        "tie": 0.005
       },
       "amdahl": {
-        "carnot": 0.0,
-        "usl": 0.159,
-        "amdahl": 0.689,
-        "linear": 0.153,
+        "carnot": 0.002,
+        "usl": 0.158,
+        "amdahl": 0.675,
+        "linear": 0.166,
         "tie": 0.0
       },
       "linear": {
         "carnot": 0.0,
-        "usl": 0.0,
-        "amdahl": 0.086,
-        "linear": 0.914,
+        "usl": 0.001,
+        "amdahl": 0.069,
+        "linear": 0.931,
         "tie": 0.0
       }
     },
+    "O2_false_alarm": {
+      "service_cv_1": 0.1,
+      "service_cv_0_5": 0.04
+    },
+    "S3_false_alarm": 0.06,
+    "O3_power": 1.0,
     "S1r_false_alarm": 0.05,
     "S2r_false_alarm": 0.53,
     "Vdur_power": {
-      "service_cv_1": 0.19,
-      "service_cv_0_5": 0.68
+      "service_cv_1": 0.18,
+      "service_cv_0_5": 0.73
     },
-    "Vdur_fpr": 0.06,
+    "Vdur_fpr": {
+      "service_cv_1": 0.04,
+      "service_cv_0_5": 0.05
+    },
+    "review_cv_ok_prob": {
+      "cv_0_3": 1.0,
+      "cv_0_5": 0.53,
+      "cv_0_7": 0.0
+    },
     "escape_power": {
-      "a05": 0.1,
-      "a01": 0.03
+      "a05": 0.12,
+      "a01": 0.04
     },
-    "escape_null": 0.05,
+    "escape_null": 0.06,
     "collision_power": {
-      "p01_a05": 0.09,
-      "p05_a05": 0.34,
-      "p05_a01": 0.12
+      "p01_a05": 0.08,
+      "p05_a05": 0.36,
+      "p05_a01": 0.15
     },
+    "collision_null": 0.05,
     "loads": {
       "N1": 0.92,
       "N12": 3.23
@@ -1909,7 +1931,7 @@
       },
       "rule": "PASS if log L(Carnot) > max log L(USL, Amdahl, linear), `completion` reading, NB CV 0.3",
       "code": "PASS",
-      "note": "best uncapped rival: USL, no review limit; log LR (Carnot - best uncapped) = +1.40, LR = 4.04. Simulated: correct 0.97 under Carnot truth, 0.87 / 1.00 / 1.00 under USL / Amdahl / linear."
+      "note": "best uncapped rival: USL, no review limit; log LR (Carnot - best uncapped) = +1.40, LR = 4.04. Simulated: correct 0.97 under Carnot truth, 0.80 / 1.00 / 1.00 under USL / Amdahl / linear."
     },
     {
       "id": "O2",
@@ -1926,7 +1948,27 @@
       },
       "rule": "PASS if the N = 12 windows' total finished count is in the pooled 95% predictive interval (Poisson-gamma, CV 0.3 per window)",
       "code": "PASS",
-      "note": "observed 43, predicted 35.5 (20-54)"
+      "note": "observed 43, predicted 35.5 (20-54); simulated false-alarm rate under Carnot truth 0.10 at review-time CV 1, 0.04 at 0.5"
+    },
+    {
+      "id": "P1-nf",
+      "grade": "confirmatory",
+      "counts_as": "confirmatory",
+      "statement": "P1 without the windows that ran out of tasks before minute 110 (reported beside P1)",
+      "value": null,
+      "rule": "as P1, on the unflagged windows only",
+      "code": "N/A",
+      "note": "no window flagged: identical to P1"
+    },
+    {
+      "id": "O2-nf",
+      "grade": "confirmatory",
+      "counts_as": "confirmatory",
+      "statement": "O2 without the N = 12 windows that ran out of tasks before minute 110 (reported beside O2)",
+      "value": null,
+      "rule": "as O2, on the unflagged windows only",
+      "code": "N/A",
+      "note": "no window flagged: identical to O2"
     },
     {
       "id": "S3",
@@ -1958,10 +2000,25 @@
       "note": "ratio 5.03, p = 2.81e-20"
     },
     {
-      "id": "Vratio",
+      "id": "Vdur",
       "grade": "conditional",
       "counts_as": "descriptive",
-      "statement": "The reviewer's pace does not change with load: V(high)/V(low) within [0.8, 1.25]",
+      "statement": "The reviewer's pace does not change with load (Welch t-test on log review durations, N = 12 vs N = 1)",
+      "value": {
+        "p": 0.23445468925119814,
+        "geo_mean_ratio": 0.7589147611715796,
+        "n_low": 45,
+        "n_high": 83
+      },
+      "rule": "FAIL iff two-sided p < 0.05, else PASS; no equivalence claim",
+      "code": "PASS",
+      "note": "geometric-mean duration ratio 0.76, p = 0.234, n = 45 / 83; simulated power vs a +/-25% reviewer 0.73 at review-time CV 0.5, 0.18 at CV 1; review_cv_ok = false in pilot.json: descriptive"
+    },
+    {
+      "id": "Vratio",
+      "grade": "descriptive",
+      "counts_as": "descriptive",
+      "statement": "V(N = 12) / V(N = 1) with its exact 95% interval (no equivalence claim)",
       "value": {
         "ratio": 1.114973588065971,
         "ci": [
@@ -1969,34 +2026,9 @@
           1.64032439015495
         ]
       },
-      "rule": "PASS (stable) if the exact 95% interval of V(high)/V(low) lies inside [0.8, 1.25]; FAIL if it lies wholly outside; else INCONCLUSIVE",
-      "code": "INCONCLUSIVE",
-      "note": "V 12.72 -> 14.19, ratio 1.11 (0.77-1.64); review_cv_ok = false in pilot.json: descriptive"
-    },
-    {
-      "id": "Vdur",
-      "grade": "conditional",
-      "counts_as": "descriptive",
-      "statement": "Review durations do not change with load (Welch t-test on log durations, high vs low)",
-      "value": {
-        "p": 0.23445468925119814,
-        "geo_mean_ratio": 0.7589147611715796,
-        "n_low": 45,
-        "n_high": 83
-      },
-      "rule": "FAIL if two-sided p < 0.05",
-      "code": "PASS",
-      "note": "geometric-mean duration ratio 0.76, p = 0.234, n = 45 / 83; simulated power vs a +/-25% reviewer 0.68 at CV 0.5, 0.19 at CV 1; review_cv_ok = false in pilot.json: descriptive"
-    },
-    {
-      "id": "V",
-      "grade": "conditional",
-      "counts_as": "descriptive",
-      "statement": "V constancy (Vratio and Vdur together)",
-      "value": null,
-      "rule": "PASS if Vratio PASS and Vdur PASS; FAIL if either FAILs; else INCONCLUSIVE",
-      "code": "INCONCLUSIVE",
-      "note": "review_cv_ok = false in pilot.json: descriptive"
+      "rule": "reported, not coded",
+      "code": "REPORTED",
+      "note": "V 12.72 -> 14.19, ratio 1.11 (0.77-1.64)"
     },
     {
       "id": "S1r",
@@ -2049,7 +2081,7 @@
       "value": -0.10153320101852321,
       "rule": "`logit_cluster_task`, window FE, task-clustered; modelled only with >= 8 events",
       "code": "REPORTED",
-      "note": "OR per waiting change 0.90, one-sided p = 0.947; simulated power 0.10 (a null result is not evidence)"
+      "note": "OR per waiting change 0.90, one-sided p = 0.947; simulated power 0.12 (a null result is not evidence)"
     },
     {
       "id": "COLL",
@@ -2059,7 +2091,7 @@
       "value": null,
       "rule": "logistic with window FE, censored first attempts excluded; p-hat in the model form",
       "code": "REPORTED",
-      "note": "k OR 0.887 (one-sided p 0.971); p-hat 0.0000; simulated k-slope power 0.09 at p = 0.01, 0.34 at p = 0.05"
+      "note": "k OR 0.887 (one-sided p 0.971); p-hat 0.0000; simulated k-slope power 0.08 at p = 0.01, 0.36 at p = 0.05"
     },
     {
       "id": "BOUNCE",

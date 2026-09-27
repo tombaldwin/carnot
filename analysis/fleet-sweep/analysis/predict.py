@@ -5,6 +5,7 @@
     python predict.py --pilot pilot.json --burn 2.10 --balance 240     # adds abort rule 5 (credits)
     python predict.py --lambda-pilot 7 --n-pilot 1 --V 14 --b-review 0.25 --b-hidden 0.1 --r0 0.3 \
                       --completion 0.7 --ci-time-min 0.5              # parameters by hand
+    python predict.py --pilot pilot.json --calibration calibration.jsonl   # abort rule 4 from the calibration log
     python predict.py --pilot pilot.json --v3-gate                    # SUPERSEDED PLAN-v3 gate, for reference only
 
 PLAN-v4 (the default path): fleet sizes N = 1 and N = 12, fixed in advance; three windows per size of
@@ -13,7 +14,14 @@ term; no pilot gate. The output is the pre-registration table: pilot inputs, des
 rule 4 (calibrated V within +/-30% of 2 x pilot lambda), point predictions (finished and attempts per
 window, 95% predictive intervals) for Carnot, USL, Amdahl and linear at each size, the O2 interval for
 the total finished over the three N = 12 windows, and the operating-characteristics statement with the
-confirmatory / conditional / descriptive split of PLAN-v4 section 1.
+confirmatory / conditional / descriptive split of PLAN-v4 section 1 (as amended in section 6, v4.1).
+
+Calibration log (PLAN-v4.1 section 6.3; format in README "Calibration-review log"): the offline reviews
+of pilot PRs, reference and deliberately broken solutions. predict.py reads it for abort rule 4 only:
+calibrated V = verdicts / (sum of all call durations, errors included) per hour, for one review-job
+version. It never enters the pilot's V, b or review-time CV, which come from live T1 + T2 reviews only
+(derive.py --pilot). Without --calibration, rule 4 is shown as NOT EVALUATED, with the live pilot V as a
+preview only.
 
 `--v3-gate` runs PLAN-v3's q-gate (N_low, N_high, REDESIGN_* decisions). PLAN-v4 section 2 dropped it
 ("No pilot gate"); it is kept only so the design search and older outputs can be reproduced, and its
@@ -52,7 +60,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (ALPHA, BETA, CV_OVERDISPERSION, P_COLLISION, PLAN_V4, RIVAL_LABEL, RIVALS,  # noqa: E402
-                    V4_OC, X_for, X_usl, nb_interval, pooled_interval)
+                    V4_OC, X_for, X_usl, nb_interval, pooled_interval, rate_ci)
 
 N_MAX_BUDGET = 8   # PLAN-v3 gate only (superseded)
 N_SEARCH = 20
@@ -314,11 +322,88 @@ def pilot_inputs_md(P: Params, pilot):
     return L
 
 
-def abort_rule_4(P: Params):
-    """PLAN-v4 section 4 rule 4: calibrated V within +/-30% of 2 x pilot lambda (per agent-hour at N = 1)."""
+CAL_VERDICTS = ("approve", "request_changes")
+CAL_SOURCES = ("pilot_pr", "reference", "broken", "other")
+
+
+def load_calibration(path, job=None):
+    """Read a calibration-review log (JSONL, or CSV with a header) and summarise one review-job version.
+
+    Required per row: review_id (unique), duration_s (> 0, wall-clock seconds of the reviewer call including
+    any retry), verdict (approve | request_changes | error). Optional: source (pilot_pr | reference | broken |
+    other), task, expected (approve | request_changes), job (the review-job version; default the job of the
+    last row), reviewer_model, t (ISO time). Rows of other jobs are ignored. Busy time is the sum of every
+    row's duration_s (errors included, as live busy time includes crash-and-retry time); calibrated V =
+    verdict rows / busy hours."""
+    import csv
+    path = Path(path)
+    text = path.read_text()
+    if path.suffix.lower() == ".csv":
+        rows = list(csv.DictReader(text.splitlines()))
+    else:
+        rows = [json.loads(ln) for ln in text.splitlines() if ln.strip()]
+    errs = []
+    seen = set()
+    for i, r in enumerate(rows, 1):
+        for k in ("review_id", "duration_s", "verdict"):
+            if r.get(k) in (None, ""):
+                errs.append(f"row {i}: missing {k}")
+        try:
+            r["duration_s"] = float(r["duration_s"])
+            if not r["duration_s"] > 0:
+                errs.append(f"row {i}: duration_s must be > 0")
+        except (TypeError, ValueError, KeyError):
+            errs.append(f"row {i}: duration_s not a number")
+        v = str(r.get("verdict", "")).strip().lower()
+        r["verdict"] = v
+        if v not in (*CAL_VERDICTS, "error"):
+            errs.append(f"row {i}: verdict {v!r} not approve / request_changes / error")
+        if r.get("source") not in (None, "") and r["source"] not in CAL_SOURCES:
+            errs.append(f"row {i}: source {r['source']!r} not in {CAL_SOURCES}")
+        if r.get("expected") not in (None, "") and r["expected"] not in CAL_VERDICTS:
+            errs.append(f"row {i}: expected {r['expected']!r} not approve / request_changes")
+        if r.get("review_id") in seen:
+            errs.append(f"row {i}: duplicate review_id {r.get('review_id')!r}")
+        seen.add(r.get("review_id"))
+    if errs:
+        raise SystemExit(f"{path}: calibration log invalid:\n  " + "\n  ".join(errs[:20]))
+    if not rows:
+        raise SystemExit(f"{path}: calibration log is empty")
+    jobs = [str(r.get("job") or "") for r in rows]
+    job = jobs[-1] if job is None else str(job)
+    rows = [r for r, j in zip(rows, jobs) if j == job]
+    if not rows:
+        raise SystemExit(f"{path}: no rows for job {job!r}")
+    n = sum(1 for r in rows if r["verdict"] in CAL_VERDICTS)
+    busy_h = sum(r["duration_s"] for r in rows) / 3600.0
+    d = [r["duration_s"] for r in rows if r["verdict"] in CAL_VERDICTS]
+    mean = sum(d) / len(d) if d else math.nan
+    cv = (math.sqrt(sum((x - mean) ** 2 for x in d) / (len(d) - 1)) / mean) if len(d) > 1 else math.nan
+    lab = [r for r in rows if r.get("expected") in CAL_VERDICTS and r["verdict"] in CAL_VERDICTS]
+    broken = [r for r in lab if r["expected"] == "request_changes"]
+    good = [r for r in lab if r["expected"] == "approve"]
+    lo, hi = rate_ci(n, busy_h) if busy_h > 0 else (math.nan, math.nan)
+    return dict(path=str(path), job=job, rows=len(rows), reviews=n, errors=len(rows) - n, busy_hours=busy_h,
+                V=n / busy_h if busy_h > 0 else math.nan, V_ci=[lo, hi], review_s_mean=mean, review_time_cv=cv,
+                by_source={s_: sum(1 for r in rows if (r.get("source") or "other") == s_) for s_ in CAL_SOURCES},
+                catch_rate_broken=(sum(r["verdict"] == "request_changes" for r in broken) / len(broken)) if broken else None,
+                false_reject_reference=(sum(r["verdict"] == "request_changes" for r in good) / len(good)) if good else None,
+                note="descriptive except V, which is used for abort rule 4 only; never pooled into the pilot")
+
+
+def abort_rule_4(P: Params, cal=None):
+    """PLAN-v4 section 4 rule 4 (as amended in 6.3): the calibrated V, from the calibration log, within +/-30% of
+    2 x pilot lambda (per agent-hour at N = 1). Without a calibration log the rule is not evaluated; the live
+    pilot V is shown as a preview only."""
     target = PLAN_V4["q"] * P.lam1("carnot")
-    ratio = P.V / target
-    return dict(V=P.V, target=target, ratio=ratio, ok=0.7 <= ratio <= 1.3)
+    if cal is None:
+        ratio = P.V / target
+        return dict(evaluated=False, V=None, V_live_preview=P.V, target=target, ratio=None,
+                    ratio_live_preview=ratio, ok=None, source="not evaluated: no calibration log (--calibration)")
+    ratio = cal["V"] / target
+    return dict(evaluated=True, V=cal["V"], V_ci=cal["V_ci"], target=target, ratio=ratio, ok=bool(0.7 <= ratio <= 1.3),
+                source=f"calibration log {Path(cal['path']).name}, job {cal['job']!r}, {cal['reviews']} reviews",
+                V_live_preview=P.V)
 
 
 def credit_rule(burn, balance):
@@ -365,21 +450,29 @@ def oc_statement_md():
     oc = V4_OC
     pc = oc["primary_correct"]
     cm = oc["confusion"]
-    L = ["### Operating characteristics (simulated; PLAN-v4 section 1, DESIGN-SEARCH.md stage C, 800 sweeps per truth)", ""]
+    L = [f"### Operating characteristics (simulated; PLAN-v4.1 section 6.8, {oc['source']})", ""]
     L.append(f"- **Confirmatory, primary: review is the binding limit.** Carnot's review-capped prediction has a higher "
              f"likelihood than the best uncapped rival (USL, Amdahl, linear); the likelihood ratio is reported. Correct "
              f"{pc['carnot']:.2f} under Carnot truth; {pc['usl']:.2f} / {pc['amdahl']:.2f} / {pc['linear']:.2f} under USL / Amdahl / "
-             f"linear truth; {pc['carnot_lambda_30pct_low']:.2f} if agents are 30% slower than assumed; {pc['burn_1_5x']:.2f} at "
-             "1.5x credit burn with the degrade rule.")
+             f"linear truth. If agents are 30% slower than assumed: {pc['carnot_lambda_30pct_low']:.2f} under Carnot, "
+             f"{pc['usl_lambda_30pct_low']:.2f} under USL. At 1.5x credit burn with the degrade rule (2 x 120-min windows per "
+             f"size): {pc['burn_1_5x']:.2f} under Carnot, {pc['usl_burn_1_5x']:.2f} under USL.")
     L.append("- **Confirmatory, secondary** (not identities of the harness): O2, finished at N = 12 inside Carnot's 95% "
              "predictive interval; S3, the review-bounce share b_review does not rise with N (one-sided Fisher exact); "
              "O3, attempts rise with N (exact rate-ratio test).")
-    L.append(f"- **Conditionally confirmatory: V constancy.** V(12)/V(1) with its exact 95% interval, stable iff the interval "
-             f"lies inside [{PLAN_V4['V_band'][0]}, {PLAN_V4['V_band'][1]}], plus a Welch test on log review durations (Vdur). "
-             f"Confirmatory only if the pilot's review-time CV <= {PLAN_V4['review_cv_max']} (`review_cv_ok`), else descriptive. "
-             f"Vdur power against a +/-25% reviewer: {oc['Vdur_power']['service_cv_0_5']:.2f} at review-time CV 0.5, "
-             f"{oc['Vdur_power']['service_cv_1']:.2f} at CV 1; false-positive rate {oc['Vdur_fpr']:.2f}.")
+    L.append(f"- **Conditionally confirmatory: the reviewer's pace does not change with load (Vdur).** Welch test on log "
+             f"review durations, N = 1 against N = 12; fails iff two-sided p < 0.05. Confirmatory only if the pilot's live "
+             f"(T1 + T2) review-time CV <= {PLAN_V4['review_cv_max']} (`review_cv_ok`), else descriptive. Power against a "
+             f"+/-25% reviewer: {oc['Vdur_power']['service_cv_0_5']:.2f} at review-time CV 0.5, "
+             f"{oc['Vdur_power']['service_cv_1']:.2f} at CV 1; false-positive rate {oc['Vdur_fpr']['service_cv_0_5']:.2f} / "
+             f"{oc['Vdur_fpr']['service_cv_1']:.2f}. Probability that `review_cv_ok` is set: "
+             f"{oc['review_cv_ok_prob']['cv_0_3']:.2f} / {oc['review_cv_ok_prob']['cv_0_5']:.2f} / "
+             f"{oc['review_cv_ok_prob']['cv_0_7']:.2f} at true CV 0.3 / 0.5 / 0.7 (near 0.5 it is close to a coin toss).")
+    L.append(f"- **O2 false-alarm rate** under Carnot's own truth: {oc['O2_false_alarm']['service_cv_1']:.2f} at review-time CV 1, "
+             f"{oc['O2_false_alarm']['service_cv_0_5']:.2f} at CV 0.5 (above the nominal 0.05). S3 false-alarm rate "
+             f"{oc['S3_false_alarm']:.2f}; O3 power {oc['O3_power']:.2f}.")
     L.append("- **Descriptive** (reported whatever they show; a null result is not evidence):")
+    L.append("  - V(12)/V(1) with its exact 95% interval; no equivalence claim (the interval is about 0.7-1.45 at this design);")
     L.append("  - four-way ranking of the rivals (USL vs Amdahl is not claimed). Simulated confusion matrix, rows = truth, "
              "columns = family with the highest likelihood:")
     L.append("")
@@ -413,8 +506,15 @@ def to_markdown_v4(P: Params, pred, pilot, ar4, credits=None):
     L.append("\n### Design-point load and abort rules\n")
     L.append(f"q = V / lambda1 = {pred['q']:.2f} (target {PLAN_V4['q']:g}). Review demand lambda1 X(N) / (1 - b) as a share "
              "of V: " + ", ".join(f"N = {n}: {v:.2f}" for n, v in pred["loads"].items()) + ".\n")
-    L.append(f"- Abort rule 4 (V within +/-30% of 2 x pilot lambda = {ar4['target']:.1f}/h): V / target = {ar4['ratio']:.2f} -> "
-             f"**{'OK' if ar4['ok'] else 'FAIL: redefine the review job and recalibrate before any sweep window'}**.")
+    if ar4["evaluated"]:
+        L.append(f"- Abort rule 4 (calibrated V within +/-30% of 2 x pilot lambda = {ar4['target']:.1f}/h; {ar4['source']}): "
+                 f"calibrated V = {ar4['V']:.2f} ({ar4['V_ci'][0]:.1f}-{ar4['V_ci'][1]:.1f}), V / target = {ar4['ratio']:.2f} -> "
+                 f"**{'OK' if ar4['ok'] else 'FAIL: redefine the review job and recalibrate before any sweep window'}**. "
+                 f"(Live pilot V = {ar4['V_live_preview']:.2f}; the calibration reviews are not pooled into it.)")
+    else:
+        L.append(f"- Abort rule 4 (calibrated V within +/-30% of 2 x pilot lambda = {ar4['target']:.1f}/h): **NOT EVALUATED**, "
+                 f"no calibration log given (--calibration). Preview only: live pilot V / target = "
+                 f"{ar4['ratio_live_preview']:.2f}.")
     lam_floor = 0.5 * PLAN_V4["lambda_target"]
     L.append(f"- Abort rule 3 (pilot lambda >= 0.5 x target = {lam_floor:g}/agent-hour): lambda1 = {P.lam1('carnot'):.2f} -> "
              f"**{'OK' if P.lam1('carnot') >= lam_floor else 'FAIL: report as a pilot, no sweep'}**.")
@@ -473,6 +573,9 @@ def main():
                     help="fleet sizes (PLAN-v4: 1 12)")
     ap.add_argument("--reps", type=int, default=PLAN_V4["reps"], help="windows per size (PLAN-v4: 3)")
     ap.add_argument("--task-supply", type=int, default=None, help="tasks per window (TASKS.json length), for the supply check")
+    ap.add_argument("--calibration", default=None,
+                    help="calibration-review log (JSONL or CSV; README 'Calibration-review log'), for abort rule 4 only")
+    ap.add_argument("--calibration-job", default=None, help="review-job version in the calibration log (default: the last row's)")
     ap.add_argument("--burn", type=float, default=None, help="$ per worker session-hour measured in T1/T2")
     ap.add_argument("--balance", type=float, default=None, help="credits left before the sweep, $ (abort rule 5)")
     ap.add_argument("--v3-gate", action="store_true",
@@ -499,10 +602,11 @@ def main():
     pred = v4_predictions(P, sorted(a.sizes), a.reps)
     if a.task_supply:
         pred["supply"] = dict(n=a.task_supply, by_rival=supply_check(P, a.task_supply, sorted(a.sizes)))
-    ar4 = abort_rule_4(P)
+    cal = load_calibration(a.calibration, a.calibration_job) if a.calibration else None
+    ar4 = abort_rule_4(P, cal)
     credits = credit_rule(a.burn, a.balance) if a.burn is not None and a.balance is not None else None
     md = to_markdown_v4(P, pred, pilot, ar4, credits)
-    out = dict(plan="PLAN-v4", params=P.as_dict(), design=dict(PLAN_V4), predictions=pred, abort_rule_4=ar4,
+    out = dict(plan="PLAN-v4.1", params=P.as_dict(), design=dict(PLAN_V4), predictions=pred, abort_rule_4=ar4, calibration=cal,
                credits=credits, operating_characteristics=V4_OC,
                review_cv_ok=pilot.get("review_cv_ok"), review_time_cv=pilot.get("review_time_cv"))
     if a.v3_gate:
