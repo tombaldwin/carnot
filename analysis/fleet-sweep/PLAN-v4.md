@@ -93,3 +93,31 @@ figure is stated in the pre-registration before the sweep.
 6. Pre-registration committed and pushed: pilot measurements, calibrated V, point predictions, the
    confirmatory/descriptive split with operating characteristics.
 7. Paid: the sweep.
+
+## 6. Amendments before pre-registration (v4.1)
+
+Found by aligning the analysis code with this plan and running it on the dry-run logs
+(analysis/README.md decisions 19–29). Settled here, before any hash is taken.
+
+1. **Reviewer pace.** The ratio V(12)/V(1) cannot be shown "stable" inside [0.8, 1.25] at this design:
+   with about 40 and 75 reviews its 95% interval is roughly 0.7–1.45. So the conditional-confirmatory
+   test is the Welch test on log review durations, N = 1 against N = 12, which **fails if p < 0.05
+   (two-sided)**. It is confirmatory only if the pilot's live review-time CV is at most 0.5, and
+   descriptive otherwise. The ratio is reported with its interval as descriptive; no equivalence claim
+   is made.
+2. **Review-time CV** comes from the live T1 and T2 reviews only. Near the 0.5 threshold the decision is
+   close to a coin toss, and the pre-registration says so.
+3. **Calibration reviews** set the reviewer's job (abort rule 4, from a simple log of review durations).
+   They are not pooled into the pilot's V, b or CV, which come from live reviews only.
+4. **O2's false-alarm rate** under the model's own truth is about 0.13, not 0.05, at review-time CV 1.
+   Stated in the pre-registration.
+5. **S3** is on review bounces only (b_review). Rebase conflicts, visible fails, escaped defects and
+   integration failures are reported separately by fleet size.
+6. **Task supply.** 220 tasks. A window that runs out of tasks before minute 110 is flagged; P1 and O2
+   are reported with and without flagged windows, and attempt-based measures stop at the minute the
+   tasks ran out.
+7. **Completion share** is measured in the eight 60-minute pilot windows and applied to 120-minute
+   sweep windows. Kept, because many short pilot windows anchor the rivals better; stated as a
+   limitation.
+8. **Operating characteristics** are recomputed with 220 tasks, the grace-end fix and live-only pilot
+   data, and those figures, not the design-search ones, go into the pre-registration.
