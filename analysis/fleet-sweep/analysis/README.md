@@ -1,11 +1,26 @@
 # Fleet sweep (study 2): pre-registered analysis
 
-**Default: PLAN-v5** (review automated and fast; `v5.py`, decisions 44-53). `score.py` and `predict.py` run the v5
-codings unless given `--plan v4` (or `--plan v3`). The v5 design and grades come from
-`design-search/DESIGN-SEARCH-v5.md`; the simulated operating characteristics are in `../OPERATING-CHARACTERISTICS-v5.md`
-(`v5.V5_OC`). In short: N = 1 and 12, twelve 90-min windows at N = 1 and three at N = 12, no separate pilot; SCALE
-(per-agent finished output falls with N) is the confirmatory primary test, COLL (collisions against merges since a
-change's base) confirmatory secondary, everything else descriptive.
+**Default: PLAN-v6** (`v6.py`; `score.py` / `predict.py` run it unless given `--plan v5` or `--plan v4`). T1 showed one
+serial reviewer binding at N = 12, so v6 crosses fleet size N in {1, 12} with parallel reviewers K in {1, 3}: six 45-min
+windows at each (N = 1, K) cell, three at (12, 3), four at (12, 1), after T1b (one slot 90 min, then twelve 30 min).
+SCALE (per-agent output bends, on the K = 3 and N = 1 windows) is confirmatory primary; CAP (one reviewer caps output at
+N = 12) and COLL confirmatory secondary; the rest descriptive. Design: `design-search/DESIGN-SEARCH-v6.md`; operating
+characteristics: `../OPERATING-CHARACTERISTICS-v6.md` (`v6.V6_OC`); T1 parameters: `t1_params.py` ->
+`design-search/t1_params_public.json` (numbers only; per-task rows go to a private file outside this repo). The v6
+process is `synth.py --v6` (`V6_TRUTH`, K reviewers); `validate_schema.py` and `derive.py` accept `n_reviewers` and the
+`reviewer` field (SCHEMA.md).
+
+```sh
+$PY predict.py [--session-h-per-day 20] [--cells 1x1=6 1x3=6 12x3=3 12x1=4]   # PLAN-v6 pre-registration table
+$PY score.py ../runs/<w1> ... ../runs/<w19> --out-dir results/                 # PLAN-v6 codings
+$PY -c "import v6, derive; r, e = derive.load_run('<T1b dir>'); print(v6.throttle_v6(r, e, exclude=[]))"   # abort rule 1
+$PY synth.py --v6 --family measured --seed 1 --out /tmp/synth-v6                  # T1b + the v6 sweep, synthetic
+```
+
+*Superseded, kept behind `--plan v5`:* PLAN-v5 (review automated and fast; `v5.py`, decisions 44-53). The v5 design and
+grades come from `design-search/DESIGN-SEARCH-v5.md`; the simulated operating characteristics are in
+`../OPERATING-CHARACTERISTICS-v5.md` (`v5.V5_OC`). In short: N = 1 and 12, twelve 90-min windows at N = 1 and three at
+N = 12, no separate pilot; SCALE confirmatory primary, COLL confirmatory secondary, everything else descriptive.
 
 *Superseded, kept behind `--plan v4`:* coded to **PLAN-v4** as amended by its section 6 (**v4.1**: fixed sizes N = 1 and 12, three 120-min windows
 each, no pilot gate, claims graded confirmatory / conditional / descriptive in advance; the reviewer-pace test is

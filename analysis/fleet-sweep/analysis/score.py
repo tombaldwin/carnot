@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""Primary analysis of the fleet sweep. Default: PLAN-v5 (v5.py); `--plan v4` / `--plan v3`: the superseded codings.
+"""Primary analysis of the fleet sweep. Default: PLAN-v6 (v6.py); `--plan v5` / `v4` / `v3`: the superseded codings.
+
+PLAN-v6 (N x reviewers K; graded in advance, PLAN-v6 section 5, v6.GRADES_V6):
+  SCALE [confirmatory, primary]      per-agent finished output falls from N = 1 to N = 12 on the K = 3 windows (review
+                                     not binding) and every N = 1 window; also SCALE-nf.
+  CAP [confirmatory, secondary]      at N = 12, finished output with K = 1 is lower than with K = 3 (the review ceiling).
+  COLL [confirmatory, secondary]     as v5.
+  K1, CAPFIT, ESC-N, ESC, FAMILY, UTIL, THROTTLE (rule 1b), COLL-m, COLL-k, LAMBDA, BOUNCE, EFFORT [descriptive].
+  run.json carries n_reviewers (absent = 1); reviewer events carry `reviewer` when K > 1 (SCHEMA.md).
 
     python score.py runs/<w1> ... runs/<w11> --out-dir results/ [--effort-log effort.jsonl] [--pilot pilot.json]
         # PLAN-v5: writes results/results.json and results/RESULTS-draft.md
@@ -1134,14 +1142,22 @@ def main():
     ap.add_argument("--out-dir", default=".")
     ap.add_argument("--rival-rework", choices=list(READINGS), default=PLAN_V4["rival_rework"])
     ap.add_argument("--escape-model", choices=ESCAPE_MODELS, default=PLAN_V4["escape_model"])
-    ap.add_argument("--plan", choices=["v5", "v4", "v3"], default="v5",
-                    help="v5 (default): PLAN-v5; v4: the superseded PLAN-v4.2 codings; v3: PLAN-v3 (design search only)")
+    ap.add_argument("--plan", choices=["v6", "v5", "v4", "v3"], default="v6",
+                    help="v6 (default): PLAN-v6; v5: PLAN-v5; v4: the superseded PLAN-v4.2 codings; v3: PLAN-v3 (design search only)")
     a = ap.parse_args()
     derived = [derive_dir(r) for r in a.runs]
     bad = [d["summary"]["run_id"] for d in derived if d["summary"]["kind"] != "sweep"]
     if bad:
         print(f"warning: non-sweep runs scored: {bad}", file=sys.stderr)
-    if a.plan == "v5":
+    if a.plan == "v6":
+        import v5
+        import v6
+        from derive import load_run
+        effort = v5.load_effort_log(a.effort_log) if a.effort_log else None
+        raw = [load_run(r) for r in a.runs]
+        R = _clean(v6.score_v6(derived, effort_rows=effort, raw=raw))
+        md = v6.render_md_v6(R)
+    elif a.plan == "v5":
         import v5
         pilot = json.loads(Path(a.pilot).read_text()) if a.pilot else None
         effort = v5.load_effort_log(a.effort_log) if a.effort_log else None

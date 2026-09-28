@@ -111,6 +111,24 @@ class Truth:
     escape_k: float = 0.0             # reviewer miss probability x (1 + escape_k k): escapes rising with changes in flight
     file_zipf: float = 0.8            # file popularity exponent in make_task_pool
     files_per_task: tuple = (1, 1, 2, 2, 3)
+    # ---- PLAN-v6 process (T1-measured; all defaults leave v4 / v5 behaviour and their random streams unchanged)
+    v6: bool = False                  # the T1-calibrated slot cycle below (sessions only)
+    n_reviewers: int = 1              # K parallel reviewers sharing one FIFO queue (v6 logs carry `reviewer`)
+    service_quantiles: tuple = ()     # service_dist = "empirical": review seconds at the 0, 5, ..., 100th percentiles
+    review_contention: float = 0.0    # review time x (1 + review_contention (K - 1)): parallel local calls slowing each other
+    rearm_s: float = 20.1             # v6: slot freed -> session_launch (the routine re-arm), gamma CV rearm_cv
+    rearm_cv: float = 0.11
+    rework_msg_s: float = 1.5         # v6: slot freed -> session_message (rework follow-up)
+    startup_median_s: float = 85.0    # v6: session_launch -> branch pushed, lognormal
+    startup_logsd: float = 0.28
+    work_median_s: float = 83.0       # v6: branch pushed -> first READY (coding), lognormal
+    work_logsd: float = 0.45
+    rework_median_s: float = 70.0     # v6: rework message -> next READY, lognormal
+    rework_logsd: float = 0.33
+    throttle_factor: float = 1.0      # v6: service-side slowdown of start-up, coding and rework when N > 1 (rule 1 OCs)
+    throttle_startup: bool = True     # v6: whether the throttle also slows start-up (False: coding / rework only)
+    drag_startup: bool = False        # v6: False (default): coordination drag stretches only the work (coding, rework),
+                                      # by enough that the per-agent cycle scales as N / X(N); True: every leg / (X / N)
 
     def X(self, n):
         if self.family in ("carnot", "usl"):
@@ -156,6 +174,54 @@ V5_FAMILIES = {
 def make_truth_v5(name="carnot", **overrides) -> Truth:
     kw = dict(V5_TRUTH)
     kw.update(V5_FAMILIES[name])
+    kw.update(overrides)
+    return Truth(**kw)
+
+
+# PLAN-v6 process (design-search/DESIGN-SEARCH-v6.md), calibrated on the live trials T1 and T0c (2026-09-28;
+# design-search/t1_params_public.json, from t1_params.py, numbers only). Per task on a slot: re-arm 20 s (the routine
+# re-arm call), start-up (launch -> branch pushed) lognormal median 85 s, coding (pushed -> READY) lognormal median
+# 83 s, rework (message -> READY) lognormal median 70 s, the rework follow-up sent 1.5 s after a slot frees. Review:
+# the pooled T1 + T0c durations (134 reviews, median 20.1 s, p90 29.3 s, max 38.9 s; no dependence on queue depth),
+# K reviewers on one FIFO queue. 39% of reviews request changes on first and rework attempts alike (46 / 117), and
+# 2 of 71 approvals failed hidden tests (defect_p 0.20, catch0 0.915, false_reject 0.26, no rework discount). Merge
+# queue ~5.8 s per change. Collisions per other change merged since the change's base at p = 0.0075 (T1: 5 collided
+# first passes, all rebase conflicts, over 658 merges of exposure); 0.5% background integration failures. lambda at
+# N = 1 comes out at about 14-15 first submissions per slot-hour (T1 phase A 16, T0c 13.3; 12-slot phase 13.6).
+T1_REVIEW_Q = (10.4, 13.09, 14.06, 14.88, 15.31, 16.19, 17.43, 18.2, 18.87, 19.56, 20.13, 20.7, 21.47, 22.43, 23.22,
+               24.19, 25.66, 27.84, 29.34, 31.59, 38.92)   # fallback (same numbers); read from t1_params_public.json below
+V6_TRUTH = dict(V5_TRUTH, v6=True, service_dist="empirical", service_quantiles=T1_REVIEW_Q, n_reviewers=1,
+                rearm_s=20.1, rearm_cv=0.11, rework_msg_s=1.5, startup_median_s=85.0, startup_logsd=0.28,
+                work_median_s=83.0, work_logsd=0.45, rework_median_s=70.0, rework_logsd=0.33,
+                defect_p=0.20, catch0=0.915, false_reject=0.26, rework_defect_factor=1.0, review_error_p=0.015,
+                ci_hidden_min=0.3 / 60, rebase_s=1.4, ci_post_min=4.1 / 60, p=0.0075, conflict_share=0.9,
+                integration_bg=0.005)
+V6_FAMILIES = {
+    "linear": dict(family="linear", p=0.0),
+    "mild": dict(family="amdahl", alpha=0.03, p=0.0),
+    "amdahl": dict(family="amdahl", alpha=0.1, p=0.0),
+    "usl": dict(family="usl", alpha=0.1, beta=0.01, p=0.0),
+    "carnot": dict(family="carnot", alpha=0.1, beta=0.01, p=0.0075),
+    "measured": dict(family="linear", p=0.0075),   # linear workers with T1's collision rate (not a SCALE null)
+}
+
+
+def _load_t1_quantiles():
+    f = Path(__file__).resolve().parent / "design-search" / "t1_params_public.json"
+    try:
+        d = json.loads(f.read_text())
+        q = d.get("review_pooled_quantiles_s") or d["review"]["quantiles_s"]
+        return tuple(float(q[f"p{i}"]) for i in range(0, 101, 5))
+    except Exception:
+        return T1_REVIEW_Q
+
+
+V6_TRUTH["service_quantiles"] = _load_t1_quantiles()
+
+
+def make_truth_v6(name="carnot", **overrides) -> Truth:
+    kw = dict(V6_TRUTH)
+    kw.update(V6_FAMILIES[name])
     kw.update(overrides)
     return Truth(**kw)
 
@@ -275,7 +341,10 @@ def simulate(truth: Truth, n_workers: int, *, seed: int, window_min=90.0, warmup
     ptr = [0]
     last_claimed = [None]
     reviewq = deque()
-    rev = dict(busy=False)
+    K = max(1, int(truth.n_reviewers))
+    tag_rev = truth.v6 or K > 1       # v6 / K > 1 logs name the reviewer on its events
+    revs = [dict(id=f"r{i + 1}", busy=False) for i in range(K)]
+    rev = revs[0]                     # K = 1: the single reviewer (v4 / v5 code path, unchanged)
     mq = deque()
     mqs = dict(busy=False)
 
@@ -334,7 +403,7 @@ def simulate(truth: Truth, n_workers: int, *, seed: int, window_min=90.0, warmup
              attempt_no=ch["attempt"], lines_changed=ch["task"].lines if ch["attempt"] == 1 else rng.randint(5, 60),
              files=list(ch["task"].files), k=k, m=m)
         reviewq.append(task_id)
-        if not rev["busy"]:
+        if any(not r["busy"] for r in revs):
             start_review(t)
         if truth.per_task_sessions:
             slot_free(t, w)
@@ -343,32 +412,47 @@ def simulate(truth: Truth, n_workers: int, *, seed: int, window_min=90.0, warmup
             worker_next(w, t)
 
     # ---------------------------------------------------------------- reviewer
-    def start_review(t):
+    def rv_f(r):
+        return dict(reviewer=r["id"]) if tag_rev else {}
+
+    def empirical_s():
+        q = truth.service_quantiles
+        u = rng.random() * (len(q) - 1)
+        i = min(int(u), len(q) - 2)
+        return q[i] + (q[i + 1] - q[i]) * (u - i)
+
+    def start_review(t, r=None):
+        if r is None:
+            r = next(x for x in revs if not x["busy"]) if K > 1 else rev
         task_id = reviewq.popleft()
         ch = changes[task_id]
         depth = len(reviewq)
         ch["depth"] = depth
-        if not rev["busy"]:
-            emit(t, "reviewer_busy")
-            rev["busy"] = True
-        emit(t, "review_start", task=task_id, head=ch["head"], queue_depth=depth)
+        if not r["busy"]:
+            emit(t, "reviewer_busy", **rv_f(r))
+            r["busy"] = True
+        emit(t, "review_start", task=task_id, head=ch["head"], queue_depth=depth, **rv_f(r))
         rate = truth.V0 * max(truth.reviewer_min_factor, 1 + truth.reviewer_load * depth) / 3600.0
         if truth.service_dist == "uniform":
             svc = lambda: rng.uniform(truth.service_lo_s, truth.service_hi_s)
+        elif truth.service_dist == "empirical":
+            svc = lambda: empirical_s() * (1 + truth.review_contention * (K - 1))
         else:
             svc = lambda: gamma_time(1 / rate, truth.service_cv)
         dur = svc()
         if rng.random() < truth.review_error_p:
             t_err = t + dur * rng.random()
-            at(t_err, review_error, task_id, ch["head"])
+            at(t_err, review_error, task_id, ch["head"], r)
             dur = (t_err - t) + svc()
-        at(t + dur, review_end, task_id, ch["head"], t)
+        at(t + dur, review_end, task_id, ch["head"], t, r)
 
-    def review_error(t, task_id, head):
-        emit(t, "review_error", task=task_id, head=head, error="synthetic: reviewer call failed, retried")
-        emit(t, "review_start", task=task_id, head=head, queue_depth=len(reviewq))
+    def review_error(t, task_id, head, r=None):
+        f = rv_f(r) if r is not None else {}
+        emit(t, "review_error", task=task_id, head=head, error="synthetic: reviewer call failed, retried", **f)
+        emit(t, "review_start", task=task_id, head=head, queue_depth=len(reviewq), **f)
 
-    def review_end(t, task_id, head, t_start):
+    def review_end(t, task_id, head, t_start, r=None):
+        r = r or rev
         ch = changes[task_id]
         depth = ch["depth"]
         if ch["defective"]:
@@ -383,7 +467,7 @@ def simulate(truth: Truth, n_workers: int, *, seed: int, window_min=90.0, warmup
         emit(t, "review_end", task=task_id, head=head, verdict=verdict,
              reason="acceptance criterion not met" if reject else "looks good",
              tokens_in=int(4000 + 30 * ch["task"].lines + rng.randint(0, 3000)),
-             tokens_out=int(300 + rng.randint(0, 900)), duration_s=round(t - t_start, 3))
+             tokens_out=int(300 + rng.randint(0, 900)), duration_s=round(t - t_start, 3), **rv_f(r))
         if reject:
             bounce(t, task_id, "review")
         else:
@@ -393,10 +477,10 @@ def simulate(truth: Truth, n_workers: int, *, seed: int, window_min=90.0, warmup
                 mqs["busy"] = True
                 mq_start(t)
         if reviewq:
-            start_review(t)
+            start_review(t, r)   # the same reviewer takes the next change: it stays busy (no idle/busy pair)
         else:
-            emit(t, "reviewer_idle")
-            rev["busy"] = False
+            emit(t, "reviewer_idle", **rv_f(r))
+            r["busy"] = False
 
     # ---------------------------------------------------------------- merge queue
     def mq_start(t):
@@ -531,6 +615,9 @@ def simulate(truth: Truth, n_workers: int, *, seed: int, window_min=90.0, warmup
                 task_id = rework_q.popleft()
                 ch = changes[task_id]
                 tok = occupy(t, w, task_id)
+                if truth.v6:
+                    at(t + truth.rework_msg_s, v6_rework, w, task_id, tok)
+                    continue
                 emit(t, "session_message", slot=w["id"], task=task_id, session_id=ch["session"], kind="rework")
                 ch["base"] = t    # the rework prompt says to merge origin/main first
                 mean = truth.rework_min * 60
@@ -545,6 +632,11 @@ def simulate(truth: Truth, n_workers: int, *, seed: int, window_min=90.0, warmup
             changes[task.id] = dict(task=task, owner=w, attempt=0, head=None, inflight=False, defective=False,
                                     collided=False, merged=False, depth=0, session=f"session_{_hex(rng, 8)}")
             tok = occupy(t, w, task.id)
+            if truth.v6:
+                if ptr[0] == len(order):
+                    emit(t, "note", text=f"tasks_exhausted n={len(order)}")
+                at(t + gamma_time(truth.rearm_s, truth.rearm_cv), v6_launch, w, task.id, tok)
+                continue
             emit(t, "session_launch", slot=w["id"], task=task.id, session_id=changes[task.id]["session"], attempt_no=1)
             changes[task.id]["base"] = t
             if ptr[0] == len(order):
@@ -553,6 +645,55 @@ def simulate(truth: Truth, n_workers: int, *, seed: int, window_min=90.0, warmup
             at(t_up, session_branch, w, task.id, tok)
             rate = truth.lam1 * drag(t) * mult / 3600.0
             at(t_up + gamma_time(1 / rate, truth.work_cv), do_submit, w, task.id, tok)
+
+    def lognorm(median, logsd):
+        return median * math.exp(logsd * rng.gauss(0.0, 1.0))
+
+    # v6 work stretch: with drag_startup = False, provisioning (re-arm, start-up) is not slowed by coordination, so the
+    # work legs are stretched by s(g) chosen to make the whole per-task cycle scale as 1 / g, g = X(N) / N (the rival's
+    # per-agent share): s = (C / g - (C - P)) / P, C the mean cycle per task at N = 1 and P its work part.
+    b_rev = truth.defect_p * truth.catch0 + (1 - truth.defect_p) * truth.false_reject
+    legs = b_rev / max(1 - b_rev, 1e-9)
+    e_up = truth.startup_median_s * math.exp(truth.startup_logsd ** 2 / 2)
+    P_work = truth.work_median_s * math.exp(truth.work_logsd ** 2 / 2) + legs * truth.rework_median_s * math.exp(truth.rework_logsd ** 2 / 2)
+    C_cyc = truth.rearm_s + e_up + legs * truth.rework_msg_s + P_work
+
+    def work_stretch(g):
+        if truth.drag_startup or g >= 1.0:
+            return 1.0 / g
+        return (C_cyc / g - (C_cyc - P_work)) / P_work
+
+    def v6_slow(t, startup=False):
+        """Duration multiplier for worker-side legs: the window's speed multiplier, coordination drag (work legs only,
+        unless drag_startup), and a service-side throttle when more than one slot is active."""
+        f = 1.0 / mult
+        g = drag(t)
+        if startup:
+            if truth.drag_startup:
+                f /= g
+        else:
+            f *= work_stretch(g)
+        if truth.throttle_factor != 1.0 and n_active(t) > 1 and (not startup or truth.throttle_startup):
+            f *= truth.throttle_factor
+        return f
+
+    def v6_launch(t, w, task_id, token):
+        if w.get("token") != token or t >= w["end"]:
+            return
+        ch = changes[task_id]
+        emit(t, "session_launch", slot=w["id"], task=task_id, session_id=ch["session"], attempt_no=1)
+        ch["base"] = t
+        t_up = t + lognorm(truth.startup_median_s, truth.startup_logsd) * v6_slow(t, startup=True)
+        at(t_up, session_branch, w, task_id, token)
+        at(t_up + lognorm(truth.work_median_s, truth.work_logsd) * v6_slow(t), do_submit, w, task_id, token)
+
+    def v6_rework(t, w, task_id, token):
+        if w.get("token") != token or t >= w["end"]:
+            return
+        ch = changes[task_id]
+        emit(t, "session_message", slot=w["id"], task=task_id, session_id=ch["session"], kind="rework")
+        ch["base"] = t
+        at(t + lognorm(truth.rework_median_s, truth.rework_logsd) * v6_slow(t), do_submit, w, task_id, token)
 
     def session_branch(t, w, task_id, token):
         if w.get("token") == token and t < w["end"]:
@@ -595,6 +736,8 @@ def simulate(truth: Truth, n_workers: int, *, seed: int, window_min=90.0, warmup
            "task_order_seed": int(order_seed), "sandbox_commit": "synthetic", "harness_commit": "synthetic",
            "worker_model": "synthetic", "reviewer_model": "synthetic",
            "notes": "synth.py truth: " + json.dumps(dataclasses.asdict(truth), sort_keys=True)}
+    if tag_rev:
+        run["n_reviewers"] = K
     return run, [e for _, e in out]
 
 
@@ -643,6 +786,33 @@ def simulate_study(truth: Truth, sizes, *, seed: int, reps=2, window_min=90.0, w
         runs.append(simulate(truth, n, seed=seed * 1000 + 10 + i, window_min=window_min, warmup_min=warmup_min,
                              grace_min=grace_min, task_pool=pool, run_id=f"synth-{seed}-N{n}-w{i + 1}",
                              kind="sweep", t0=t0 + (6 + 2.5 * i) * 3600))
+    return runs
+
+
+def simulate_study_v6(family="measured", *, seed: int, cells=None, window_min=None, warmup_min=None, with_t1b=True,
+                      **overrides):
+    """PLAN-v6: T1b (one slot for 90 min, then twelve for 30 min, K = 3) and the sweep's (N, K) cells in v6_order.
+    Returns a list of (run_json, events)."""
+    from v6 import DESIGN_V6, v6_order, cells_of
+    cells = cells_of(cells or DESIGN_V6["cells"])
+    L = window_min or DESIGN_V6["window_min"]
+    W = DESIGN_V6["warmup_min"] if warmup_min is None else warmup_min
+    t0 = T0 + (seed % 100000) * 86400.0
+    runs = []
+    base = make_truth_v6(family, **overrides)
+    pool = make_task_pool(base, seed * 31 + 5)
+    if with_t1b:
+        tb = DESIGN_V6["t1b"]
+        L1, L2 = tb["one_slot_min"], tb["twelve_slot_min"]
+        sched = [(0.0, L1 + L2)] + [(L1, L1 + L2)] * 11
+        truth = make_truth_v6(family, n_reviewers=tb["K"], **overrides)
+        runs.append(simulate(truth, 12, seed=seed * 1000 + 1, window_min=L1 + L2, warmup_min=0, grace_min=10,
+                             schedule=sched, task_pool=pool, run_id=f"synth-{seed}-T1b", kind="trial", t0=t0))
+    for i, (n, k) in enumerate(v6_order(cells)):
+        truth = make_truth_v6(family, n_reviewers=k, **overrides)
+        runs.append(simulate(truth, n, seed=seed * 1000 + 10 + i, window_min=L, warmup_min=W, grace_min=10,
+                             task_pool=pool, run_id=f"synth-{seed}-N{n}K{k}-w{i + 1}", kind="sweep",
+                             t0=t0 + (6 + 1.5 * i) * 3600))
     return runs
 
 
@@ -705,8 +875,10 @@ def main():
     ap.add_argument("--v5", action="store_true",
                     help="PLAN-v5 process and design: V5_TRUTH (sessions, fast reviewer, lifetime collisions), T1 1 -> 12, "
                          "sweep sizes / reps / window from --sizes --reps-v5 --window-min (defaults: the recommended design)")
-    ap.add_argument("--family", default=None, choices=["linear", "mild", "amdahl", "usl", "carnot"],
-                    help="--v5 only: worker truth (default carnot)")
+    ap.add_argument("--v6", action="store_true",
+                    help="PLAN-v6 process (T1-calibrated, K reviewers) and design: T1b + the (N, K) cells of v6.DESIGN_V6")
+    ap.add_argument("--family", default=None, choices=["linear", "mild", "amdahl", "usl", "carnot", "measured"],
+                    help="--v5 / --v6: worker truth (default carnot for v5, measured for v6)")
     ap.add_argument("--reps-v5", nargs="*", default=None, metavar="N=R", help="--v5 only: windows per size, e.g. 1=8 12=3")
     ap.add_argument("--sessions", action="store_true",
                     help="one cloud session per task in N slots (the harness's worker model; sets per_task_sessions)")
@@ -720,7 +892,9 @@ def main():
         ov[k] = _coerce(v)
     if a.sessions:
         ov["per_task_sessions"] = True
-    if a.v5:
+    if a.v6:
+        runs = simulate_study_v6(a.family or "measured", seed=a.seed, **ov)
+    elif a.v5:
         from v5 import DESIGN_V5
         truth = make_truth_v5(a.family or "carnot", **ov)
         sizes = sorted(set(a.sizes)) if a.sizes != [1, 5] else list(DESIGN_V5["sizes"])

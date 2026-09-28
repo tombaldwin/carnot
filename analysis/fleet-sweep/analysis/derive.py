@@ -127,9 +127,10 @@ def derive_window(run, events, supply=None, supply_source=None):
     heads = {}
     open_reviews = {}
     reviews = []
-    busy_iv = []
-    busy_since = None
+    busy_iv = []              # (start, end, reviewer id); id None for the single serial reviewer
+    busy_since = {}           # reviewer id -> start of its current busy stretch (PLAN-v6: K reviewers)
     have_busy_events = False
+    reviewer_ids = set()
     wait_steps = []           # (t, +1/-1) waiting-for-review depth
     first_review_seen = set()
     hidden_pre = {}
@@ -148,7 +149,7 @@ def derive_window(run, events, supply=None, supply_source=None):
     worker_start_t = {}
     claims = []               # (t, task) of every logged claim
     exhausted_note_t = None
-    cur_review = None         # (t of first review_start, key) of the review the reviewer is on
+    cur_review = {}           # reviewer id -> (t of first review_start, key) of the review it is on
     slot_busy_iv = defaultdict(list)
     slot_busy_since = {}
     launch_t = {}             # task -> first session_launch time
@@ -231,10 +232,12 @@ def derive_window(run, events, supply=None, supply_source=None):
             wait_steps.append((t, +1))
         elif typ == "review_start":
             key = (e["task"], e["head"])
+            rid = e.get("reviewer")
+            reviewer_ids.add(rid)
             if key not in open_reviews:
                 open_reviews[key] = (t, e["queue_depth"])
-            if cur_review is None or cur_review[1] != key:
-                cur_review = (t, key)
+            if cur_review.get(rid) is None or cur_review[rid][1] != key:
+                cur_review[rid] = (t, key)
             if key not in first_review_seen and e["head"] in heads:
                 first_review_seen.add(key)
                 wait_steps.append((t, -1))
@@ -248,17 +251,20 @@ def derive_window(run, events, supply=None, supply_source=None):
                       tokens=(e.get("tokens_in") or 0) + (e.get("tokens_out") or 0))
             reviews.append(rv)
             task_row(e["task"])["reviews"].append(rv)
-            cur_review = None
+            cur_review[e.get("reviewer")] = None
         elif typ == "reviewer_busy":
             have_busy_events = True
-            if busy_since is None:
-                busy_since = t
+            rid = e.get("reviewer")
+            reviewer_ids.add(rid)
+            if busy_since.get(rid) is None:
+                busy_since[rid] = t
         elif typ == "reviewer_idle":
             have_busy_events = True
-            cur_review = None
-            if busy_since is not None:
-                busy_iv.append((busy_since, t))
-                busy_since = None
+            rid = e.get("reviewer")
+            cur_review[rid] = None
+            if busy_since.get(rid) is not None:
+                busy_iv.append((busy_since[rid], t, rid))
+                busy_since[rid] = None
         elif typ == "hidden_pre":
             hidden_pre[e["head"]] = (t, e["passed"])
         elif typ == "rebase":
@@ -284,8 +290,9 @@ def derive_window(run, events, supply=None, supply_source=None):
             mq_outcome[e["head"]] = (t, "merge")
             merge_list.append((t, e["task"]))
 
-    if busy_since is not None:
-        busy_iv.append((busy_since, end_all))
+    for rid, t0b in busy_since.items():
+        if t0b is not None:
+            busy_iv.append((t0b, end_all, rid))
     if q_since is not None:
         q_iv.append((q_since, end_all))
     for w, t0 in worker_alive.items():
@@ -293,17 +300,21 @@ def derive_window(run, events, supply=None, supply_source=None):
     for sl, t0 in slot_busy_since.items():
         slot_busy_iv[sl].append((t0, we))
     if not have_busy_events:
-        busy_iv = [(r["t_start"], r["t_end"]) for r in reviews]
-    busy_iv = [(max(0.0, a), min(end_all, b)) for a, b in busy_iv if b > 0 and a < end_all]
+        busy_iv = [(r["t_start"], r["t_end"], None) for r in reviews]
+    busy_iv = [(max(0.0, a), min(end_all, b), rid) for a, b, rid in busy_iv if b > 0 and a < end_all]
     # Grace-end correction: the review running at window_end + grace is not counted, so neither is its
-    # elapsed time. Reviews are serial, so busy time after its first review_start belongs to it alone.
-    open_at_end = cur_review is not None and cur_review[0] <= end_all
+    # elapsed time. Each reviewer reviews one change at a time, so that reviewer's busy time after the open
+    # review's first review_start belongs to it alone (PLAN-v6: per reviewer).
+    open_now = {rid: v for rid, v in cur_review.items() if v is not None and v[0] <= end_all}
+    open_at_end = bool(open_now)
     busy_clipped_s = 0.0
     if open_at_end:
-        cap = cur_review[0]
-        before = sum(b - a for a, b in busy_iv)
-        busy_iv = [(a, min(b, cap)) for a, b in busy_iv if min(b, cap) > a]
-        busy_clipped_s = before - sum(b - a for a, b in busy_iv)
+        before = sum(b - a for a, b, _ in busy_iv)
+        busy_iv = [(a, min(b, open_now[rid][0]) if rid in open_now else b, rid) for a, b, rid in busy_iv]
+        busy_iv = [(a, b, rid) for a, b, rid in busy_iv if b > a]
+        busy_clipped_s = before - sum(b - a for a, b, _ in busy_iv)
+    n_reviewers = int(run.get("n_reviewers") or max(1, len({r for r in reviewer_ids if r is not None})))
+    busy_iv = [(a, b) for a, b, _ in busy_iv]
 
     # ------------------------------------------------------------------ task supply
     t_exhausted = None
@@ -330,7 +341,7 @@ def derive_window(run, events, supply=None, supply_source=None):
         n = sum(1 for r in reviews if (h0 <= r["t_end"] < h1) or (h1 == end_all and r["t_end"] == end_all))
         bh = sum(_overlap(a, b, h0, h1) for a, b in busy_iv) / 3600
         halves.append(dict(n=n, busy_h=bh, V=n / bh if bh > 0 else math.nan, V_ci=list(rate_ci(n, bh))))
-    util = sum(_overlap(a, b, warm, we) for a, b in busy_iv) / max(we - warm, 1e-9)
+    util = sum(_overlap(a, b, warm, we) for a, b in busy_iv) / max(we - warm, 1e-9) / n_reviewers
 
     # waiting-queue depth over [warm, we]
     wait_steps.sort()
@@ -492,7 +503,7 @@ def derive_window(run, events, supply=None, supply_source=None):
         busy_hours=busy_h, V=V, V_ci=list(rate_ci(n_rev, busy_h)), V_half=halves,
         review_open_at_end=open_at_end, busy_clipped_min=busy_clipped_s / 60,
         review_durations_s=durations, review_time_cv=_cv(durations),
-        reviewer_util=util, queue_nonempty_share=nonempty / span, mean_waiting_depth=area / span,
+        reviewer_util=util, n_reviewers=n_reviewers, queue_nonempty_share=nonempty / span, mean_waiting_depth=area / span,
         mq_util=(sum(_overlap(a, b, warm, we) for a, b in q_iv) / max(we - warm, 1e-9)) if q_iv else (0.0 if not merge_list else math.nan),
         review_s_mean=(sum(durations) / len(durations)) if durations else math.nan,
         collisions_first=sum(1 for x in exposure.values() if x["collided_first"]), n_exposure=len(exposure),

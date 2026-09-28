@@ -60,6 +60,9 @@ ENUMS = {("review_end", "verdict"): {"approve", "request_changes"},
 RUN_FIELDS = {"run_id": S, "kind": S, "n_workers": I, "window_start": S, "window_end": S,
               "warmup_min": N, "grace_min": N, "task_order_seed": I, "sandbox_commit": S,
               "harness_commit": S, "worker_model": S, "reviewer_model": S, "notes": S}
+RUN_OPTIONAL = {"n_reviewers": I}   # PLAN-v6: K parallel reviewers (absent = 1, the serial reviewer)
+# PLAN-v6: with K parallel reviewers every reviewer event names its reviewer ("r1".."rK"); optional otherwise
+REVIEWER_FIELD_TYPES = ("review_start", "review_end", "review_error", "reviewer_busy", "reviewer_idle")
 KINDS = {"sweep", "pilot", "trial", "dry-run"}
 T_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}(Z|\+00:00)$")
 
@@ -91,7 +94,9 @@ def check_event(ev):
     errs = []
     if not isinstance(ev.get("t"), str) or not T_RE.match(ev["t"]):
         errs.append(f"{typ}: bad t {ev.get('t')!r}")
-    spec = FIELDS[typ]
+    spec = dict(FIELDS[typ])
+    if typ in REVIEWER_FIELD_TYPES and "reviewer" in ev:
+        spec["reviewer"] = S
     extra = set(ev) - set(spec) - {"t", "type"}
     missing = set(spec) - set(ev)
     if extra:
@@ -116,13 +121,16 @@ def check_event(ev):
 
 def check_run(run):
     errs = []
-    extra = set(run) - set(RUN_FIELDS)
+    extra = set(run) - set(RUN_FIELDS) - set(RUN_OPTIONAL)
     missing = set(RUN_FIELDS) - set(run)
     if extra:
         errs.append(f"run.json: unexpected fields {sorted(extra)}")
     if missing:
         errs.append(f"run.json: missing fields {sorted(missing)}")
     for k, s in RUN_FIELDS.items():
+        if k in run and not _ok(run[k], s):
+            errs.append(f"run.json: {k}={run[k]!r} is not {s}")
+    for k, s in RUN_OPTIONAL.items():
         if k in run and not _ok(run[k], s):
             errs.append(f"run.json: {k}={run[k]!r} is not {s}")
     if run.get("kind") not in KINDS:
@@ -137,7 +145,8 @@ def validate_events(events, run=None):
     """events: list of (line_no, dict). Returns (errors, warnings)."""
     errs, warns = [], []
     last_t = ""
-    reviewing = None
+    reviewing = {}            # reviewer id (None: the single serial reviewer) -> (task, head) under review
+    n_rev = int(run.get("n_reviewers", 1)) if run and not check_run(run) else None
     approved = set()
     green = set()
     attempts = {}
@@ -169,16 +178,23 @@ def validate_events(events, run=None):
                 errs.append(f"line {i}: attempt_no {ev['attempt_no']} for task {ev['task']}, expected {n}")
             attempts[ev["task"]] = ev["attempt_no"]
         elif typ == "review_start":
-            if reviewing is not None:
-                errs.append(f"line {i}: review_start while {reviewing} is under review (reviews are serial)")
+            rid = ev.get("reviewer")
+            if reviewing.get(rid) is not None:
+                errs.append(f"line {i}: review_start while {reviewing[rid]} is under review by "
+                            f"{rid or 'the reviewer'} (each reviewer reviews one change at a time)")
             if ev["task"] not in attempts:
                 errs.append(f"line {i}: review of task {ev['task']} that was never submitted")
-            reviewing = key
+            if any(v == key for r, v in reviewing.items() if r != rid):
+                errs.append(f"line {i}: {key} is already under review by another reviewer")
+            reviewing[rid] = key
+            if n_rev is not None and sum(v is not None for v in reviewing.values()) > n_rev:
+                errs.append(f"line {i}: more reviews open than n_reviewers = {n_rev}")
             open_review_heads.add(key)
         elif typ in ("review_end", "review_error"):
-            if reviewing != key:
-                errs.append(f"line {i}: {typ} for {key} but under review is {reviewing}")
-            reviewing = None
+            rid = ev.get("reviewer")
+            if reviewing.get(rid) != key:
+                errs.append(f"line {i}: {typ} for {key} but under review by {rid or 'the reviewer'} is {reviewing.get(rid)}")
+            reviewing[rid] = None
             open_review_heads.discard(key)
             if typ == "review_end" and ev["verdict"] == "approve":
                 approved.add(key)
@@ -212,8 +228,9 @@ def validate_events(events, run=None):
                 errs.append(f"line {i}: {typ} for task {ev['task']} that was never launched")
             if typ == "session_message" and not busy.get(ev["slot"]):
                 errs.append(f"line {i}: session_message on slot {ev['slot']} without slot_busy")
-    if reviewing is not None:
-        warns.append(f"review of {reviewing} still open at end of log (reviewer busy time is clipped)")
+    for rid, v in reviewing.items():
+        if v is not None:
+            warns.append(f"review of {v} still open at end of log (reviewer busy time is clipped)")
     if "review_end" in types and not ({"reviewer_busy", "reviewer_idle"} & types):
         warns.append("no reviewer_busy/reviewer_idle events: V will use summed review durations")
     if "submit" not in types:

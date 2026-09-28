@@ -1,5 +1,8 @@
 # Study 2 plan, version 5: what limits an agent fleet when review is automated?
 
+**Superseded by PLAN-v6** (2026-09-28): T1 showed one serial reviewer binding at N = 12, contradicting this plan's
+premise; see PLAN-v6 section 0. Kept for the record; its codings stay behind `--plan v5`.
+
 Supersedes PLAN-v4 (which assumed a reviewer at human pace). Chosen by the owner on 2026-09-28 after
 reviewer calibration showed the frozen checkout review job running at 10–30 s per change on default and
 high effort (≈ 120–200 reviews per hour) and 14–241 s at max effort (≈ 40 per hour), with 12 of 12

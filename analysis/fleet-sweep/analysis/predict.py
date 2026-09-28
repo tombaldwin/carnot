@@ -1,7 +1,20 @@
 #!/usr/bin/env python3
-"""Point predictions and the pre-registration table. Default: PLAN-v5; `--plan v4` gives the superseded PLAN-v4 table.
+"""Point predictions and the pre-registration table. Default: PLAN-v6; `--plan v5` / `--plan v4` give the superseded tables.
 
-PLAN-v5 (the default; v5.py holds the codings):
+PLAN-v6 (the default; v6.py holds the codings):
+
+    python predict.py --md prediction.md --json prediction.json        # the recommended 2 x 2 design (N x reviewers K)
+    python predict.py --lambda-pilot 14 --review-s 21 --burn 2.10 --balance 249 --session-h-per-day 24
+    python predict.py --cells 1x1=5 1x3=5 12x3=2 12x1=2                 # another design (e.g. the degrade design)
+
+  Each rival (linear, Amdahl, USL, Carnot uncapped) is turned into the paper's U = (1 - r) min(lambda X(N), cap) per
+  cell, cap = K x 3600 / review seconds reviews per hour of which (1 - b_review)(1 - b_mq) merge: which cells the
+  model says are review-bound, the reviewer utilisation, illustrative finished counts, the SCALE ratio (K = 3) and the
+  CAP ratio (K = 1 : 3 at N = 12). Defaults are T1's measurements (lambda 14 per slot-hour, review 21 s, b_review
+  0.39, merge-queue bounces 0.11, 5.8 s per change). Also printed: the budget under (a) the credit assumption and (b)
+  plan usage (session-hours per day), the abort rules (rule 1 revised) and the operating characteristics.
+
+PLAN-v5 (superseded; `--plan v5`):
 
     python predict.py --md prediction.md --json prediction.json                   # the recommended design, assumptions
     python predict.py --lambda-pilot 5.4 --completion 0.88 --burn 2.3 --balance 236 --task-supply 220
@@ -700,13 +713,109 @@ def main_v5(a):
         Path(a.json).write_text(json.dumps(out, indent=2, default=str) + "\n")
 
 
+# ---------------------------------------------------------------------- PLAN-v6
+def to_markdown_v6(rows, design, cost, cost15, degrade, budget_b, credits, a):
+    import v5
+    import v6
+    cells = design["cells"]
+    L = ["## Point predictions and design (pre-registration, PLAN-v6)\n"]
+    L.append(f"Design (PLAN-v6 section 5): cells N x K = " + ", ".join(f"{n}x{k}: {w}" for (n, k), w in sorted(cells.items())) +
+             f"; {design['window_min']:g}-min windows ({design['warmup_min']:g} min warm-up, 10 min grace); order " +
+             ", ".join(f"{n}K{k}" for n, k in v6.v6_order(cells)) + ". Before the sweep: T1b (one slot for "
+             f"{v6.DESIGN_V6['t1b']['one_slot_min']:g} min, then twelve for {v6.DESIGN_V6['t1b']['twelve_slot_min']:g} min, K = "
+             f"{v6.DESIGN_V6['t1b']['K']}) for abort rule 1. Constants alpha = {a.alpha}, beta = {a.beta}, p = {a.p}; "
+             f"over-dispersion CV {CV_OVERDISPERSION} per window.\n")
+    L.append("### Budget\n")
+    L.append("**(a) Credit assumption** (the $2.10 per session-hour of the v5 plan, against the $249 balance less the $50 floor). "
+             "UNRESOLVED: the meter did not move over T0c + T1 (about 7 session-hours); the owner decides which budget "
+             "applies.\n")
+    L.append("| | session-hours | at the given burn | at 1.5x | fits up to |\n|---|---|---|---|---|")
+    L.append(f"| T1b + sweep | {cost['total_session_hours']:.1f} | ${cost['total_usd']:.0f} at ${cost['burn']:.2f}/h | "
+             f"${cost15['total_usd']:.0f} | ${v6.fits_up_to(cells, design['window_min']):.2f}/h |")
+    L.append(f"| degrade design ({', '.join(f'{n}x{k}: {w}' for (n, k), w in sorted(degrade['cells'].items()))}) | "
+             f"{degrade['cost']['total_session_hours']:.1f} | ${degrade['cost']['total_usd']:.0f} | ${degrade['cost15']['total_usd']:.0f} | "
+             f"${v6.fits_up_to(degrade['cells'], design['window_min']):.2f}/h |")
+    if credits:
+        L.append(f"\nCredits: balance ${credits['balance']:.0f}; the full design leaves ${credits['after_full']:.0f}, the degrade "
+                 f"design ${credits['after_degrade']:.0f} (floor $50) -> **{credits['decision']}**.")
+    L.append("\n**(b) Plan usage** (if cloud sessions draw the Max plan rather than credits): worker session-hours and their "
+             "intensity, and the local reviewer's Opus calls.\n")
+    L.append("| | value |\n|---|---|")
+    for k, v in budget_b.items():
+        L.append(f"| {k} | {v} |")
+    L.append("\n### What the model predicts per cell (U = (1 - r) min(lambda X(N), cap))\n")
+    L.append("| Rival | N | K | reviews demanded /h | reviewer capacity /h | reviewer util | binds | finished / window | 95% | "
+             "uncapped | ceiling |")
+    L.append("|---|---|---|---|---|---|---|---|---|---|---|")
+    for x in rows:
+        L.append(f"| {v5.RIVAL_LABEL_V5[x['rival']]} | {x['N']} | {x['K']} | {x['reviews_demand_per_hour']:.0f} | "
+                 f"{x['reviewer_capacity_per_hour']:.0f} | {x['reviewer_util']:.2f} | {'yes' if x['binds'] else 'no'} | "
+                 f"{x['finished']:.1f} | {x['finished_95'][0]}-{x['finished_95'][1]} | {x['uncapped']:.1f} | {x['ceiling']:.1f} |")
+    hi = max(n for n, _ in cells)
+    L.append("\nSCALE (confirmatory, primary) uses the N = 1 windows and the N = %d, K = 3 windows: linear predicts a per-agent "
+             "ratio of 1, every other rival BEND. CAP (confirmatory, secondary) compares N = %d windows with K = 1 and K = 3: "
+             "the model predicts CAPPED wherever lambda X(%d) exceeds one reviewer's capacity (the rows marked 'binds' at "
+             "K = 1).\n" % (hi, hi, hi))
+    L.append("### Abort rules (PLAN-v6 section 5.3)\n")
+    for t in v6.ABORT_V6:
+        L.append(f"- {t}")
+    L.append("")
+    L += v6.oc_statement_v6()
+    return "\n".join(L)
+
+
+def main_v6(a):
+    import v6
+    D = v6.DESIGN_V6
+    cells = ({tuple(int(x) for x in k.split("x")): int(v) for k, v in (c.split("=") for c in a.cells)} if a.cells
+             else dict(D["cells"]))
+    wmin = a.window_min if a.window_min is not None else D["window_min"]
+    wu = D["warmup_min"]
+    lam = a.lambda_pilot if a.lambda_pilot is not None else 14.0
+    comp = a.completion if a.completion is not None else 0.8
+    brev = a.b_review if a.b_review is not None else 0.39
+    rs = a.review_s if a.review_s is not None else 21.0
+    rows = v6.predictions_v6(cells, wmin, wu, lam, comp, brev, 0.11, rs, a.alpha, a.beta, a.p)
+    burn = a.burn if a.burn is not None else D["burn_assumed"]
+    cost = v6.design_cost_v6(cells, wmin, burn)
+    cost15 = v6.design_cost_v6(cells, wmin, 1.5 * burn)
+    dg = D["degrade"]
+    degrade = dict(cells=v6.cells_of(dg["cells"]), cost=v6.design_cost_v6(dg["cells"], wmin, burn),
+                   cost15=v6.design_cost_v6(dg["cells"], wmin, 1.5 * burn))
+    credits = None
+    if a.burn is not None and a.balance is not None:
+        full = a.balance - burn * cost["sweep_session_hours"]
+        deg = a.balance - burn * degrade["cost"]["sweep_session_hours"]
+        dec = ("run the full design" if full >= D["balance_floor_usd"] else
+               "run the degrade design" if deg >= D["balance_floor_usd"] else "stop: report T1b")
+        credits = dict(burn=burn, balance=a.balance, after_full=full, after_degrade=deg, decision=dec)
+    budget_b = v6.plan_usage(cells, wmin, a.session_h_per_day)
+    design = dict(cells=cells, window_min=wmin, warmup_min=wu)
+    md = to_markdown_v6(rows, design, cost, cost15, degrade, budget_b, credits, a)
+    out = dict(plan="PLAN-v6", design=dict(cells={f"{n}x{k}": w for (n, k), w in cells.items()}, window_min=wmin, warmup_min=wu),
+               predictions=rows, cost=cost, cost_1_5x=cost15,
+               degrade=dict(cells={f"{n}x{k}": w for (n, k), w in degrade["cells"].items()}, cost=degrade["cost"],
+                            cost15=degrade["cost15"]),
+               budget_plan_usage=budget_b, credits=credits,
+               assumptions=dict(lambda_per_slot_hour=lam, completion=comp, b_review=brev, review_s=rs, alpha=a.alpha,
+                                beta=a.beta, p=a.p),
+               abort_rules=list(v6.ABORT_V6), operating_characteristics=v6.V6_OC)
+    print(md)
+    if a.md:
+        Path(a.md).write_text(md + "\n")
+    if a.json:
+        Path(a.json).write_text(json.dumps(out, indent=2, default=str) + "\n")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--plan", choices=["v5", "v4"], default="v5",
-                    help="v5 (default): PLAN-v5 predictions; v4: the superseded PLAN-v4 table (needs the v4 pilot inputs)")
+    ap.add_argument("--plan", choices=["v6", "v5", "v4"], default="v6",
+                    help="v6 (default): PLAN-v6 predictions; v5 / v4: the superseded tables")
+    ap.add_argument("--cells", nargs="*", default=None, metavar="NxK=W", help="v6: windows per cell, e.g. 1x1=6 1x3=6 12x3=3 12x1=2")
+    ap.add_argument("--session-h-per-day", type=float, default=None, help="v6: plan-usage allowance in session-hours per day (budget b)")
     ap.add_argument("--reps-v5", nargs="*", default=None, metavar="N=R", help="v5: windows per size, e.g. 1=8 12=3")
-    ap.add_argument("--review-s", type=float, default=20.0, help="v5: mean review seconds (calibration: 10-30 s)")
-    ap.add_argument("--mq-s", type=float, default=2.0, help="v5: merge-queue seconds per change (dry runs: about 2)")
+    ap.add_argument("--review-s", type=float, default=None, help="mean review seconds (v6 default 21, T1; v5 default 20)")
+    ap.add_argument("--mq-s", type=float, default=None, help="v5: merge-queue seconds per change (default 2)")
     ap.add_argument("--pilot", help="pilot.json from derive.py --pilot")
     for k in ("lambda-pilot", "V", "b-review", "b-hidden", "b-other", "r0", "ci-time-min", "completion"):
         ap.add_argument(f"--{k}", type=float, default=None)
@@ -715,7 +824,7 @@ def main():
     ap.add_argument("--warmup-min", type=float, default=PLAN_V4["warmup_min"])
     ap.add_argument("--alpha", type=float, default=ALPHA)
     ap.add_argument("--beta", type=float, default=BETA)
-    ap.add_argument("--p", type=float, default=P_COLLISION)
+    ap.add_argument("--p", type=float, default=None, help="collision p (v6 default 0.0075 from T1; v5 / v4 0.005)")
     ap.add_argument("--rival-rework", choices=["completion", "plan", "recovered"], default=PLAN_V4["rival_rework"])
     ap.add_argument("--sizes", nargs="+", type=int, default=None,
                     help="fleet sizes (PLAN-v5 and PLAN-v4: 1 12)")
@@ -732,6 +841,13 @@ def main():
     ap.add_argument("--md", default=None)
     ap.add_argument("--json", default=None)
     a = ap.parse_args()
+    if a.plan == "v6":
+        import v6
+        a.p = v6.P_V6 if a.p is None else a.p
+        return main_v6(a)
+    a.p = P_COLLISION if a.p is None else a.p
+    a.review_s = 20.0 if a.review_s is None else a.review_s
+    a.mq_s = 2.0 if a.mq_s is None else a.mq_s
     if a.plan == "v5":
         return main_v5(a)
     a.sizes = a.sizes or list(PLAN_V4["sizes"])

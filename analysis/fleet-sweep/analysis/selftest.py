@@ -531,7 +531,7 @@ def unit_v5(outdir=None):
         r = subprocess.run([PY, str(HERE / "validate_schema.py"), *map(str, dirs)], capture_output=True, text=True)
         out["validate_schema OK on the v5 synthetic runs"] = r.returncode == 0
         sw_dirs = [dd for dd in dirs if "-N" in dd.name]
-        r = subprocess.run([PY, str(HERE / "score.py"), *map(str, sw_dirs), "--effort-log", str(f), "--out-dir", str(tdp / "res")],
+        r = subprocess.run([PY, str(HERE / "score.py"), "--plan", "v5", *map(str, sw_dirs), "--effort-log", str(f), "--out-dir", str(tdp / "res")],
                            capture_output=True, text=True)
         ok = r.returncode == 0 and (tdp / "res" / "RESULTS-draft.md").exists()
         out["score (default plan v5, no pilot needed) writes RESULTS-draft.md + results.json"] = ok
@@ -559,7 +559,7 @@ def unit_v5(outdir=None):
                 ex.mkdir(parents=True, exist_ok=True)
                 for src in (tdp / "res" / "RESULTS-draft.md", tdp / "res" / "results.json"):
                     shutil.copy(src, ex / src.name)
-        r = subprocess.run([PY, str(HERE / "predict.py"), "--task-supply", "220", "--burn", "2.10", "--balance", "249",
+        r = subprocess.run([PY, str(HERE / "predict.py"), "--plan", "v5", "--task-supply", "220", "--burn", "2.10", "--balance", "249",
                             "--md", str(tdp / "pred.md"), "--json", str(tdp / "pred.json")], capture_output=True, text=True)
         pj = json.loads((tdp / "pred.json").read_text()) if r.returncode == 0 else {}
         pmd = r.stdout
@@ -578,6 +578,97 @@ def unit_v5(outdir=None):
 
 
 # ---------------------------------------------------------------------- one simulated study
+def unit_v6(outdir=None):
+    """PLAN-v6: K parallel reviewers in synth, validate_schema and derive (per-reviewer busy time); v6_order; the CAP
+    K-contrast on constructed windows; revised rule 1 (throttle_v6) on simulated T1b logs; the T1 calibration check;
+    CLI end to end (synth --v6 -> validate -> score, default plan v6 -> predict, default plan v6)."""
+    import v6
+    from synth import make_truth_v6, simulate_study_v6
+    out = {}
+    # K = 2 hand-built log: two reviews overlap, per-reviewer busy intervals
+    run = {"run_id": "u-v6", "kind": "sweep", "n_workers": 2, "n_reviewers": 2, "window_start": iso(T0),
+           "window_end": iso(T0 + 3600), "warmup_min": 0, "grace_min": 10, "task_order_seed": 1, "sandbox_commit": "x",
+           "harness_commit": "x", "worker_model": "x", "reviewer_model": "x", "notes": "phase=sweep-n12"}
+    SU = lambda t, task, head: _ev(t, "submit", worker="s1", task=task, branch=f"claude/task-{task}", head=head,
+                                   attempt_no=1, lines_changed=5, files=["a.py"], k=0, m=0)
+    ev = [_ev(0, "worker_start", worker="s1", session_id=None), _ev(0, "worker_start", worker="s2", session_id=None),
+          SU(10, "A", "ha"), SU(10, "B", "hb"),
+          _ev(10, "reviewer_busy", reviewer="r1"), _ev(10, "review_start", task="A", head="ha", queue_depth=1, reviewer="r1"),
+          _ev(10, "reviewer_busy", reviewer="r2"), _ev(10, "review_start", task="B", head="hb", queue_depth=0, reviewer="r2"),
+          _ev(22, "review_end", task="A", head="ha", verdict="approve", reason="ok", tokens_in=1, tokens_out=1, duration_s=720.0, reviewer="r1"),
+          _ev(22, "reviewer_idle", reviewer="r1"),
+          _ev(40, "review_end", task="B", head="hb", verdict="request_changes", reason="x", tokens_in=1, tokens_out=1, duration_s=1800.0, reviewer="r2"),
+          _ev(40, "bounce", task="B", head="hb", cause="review"), _ev(40, "reviewer_idle", reviewer="r2")]
+    errs, _ = validate_schema.validate_events(list(enumerate(ev, 1)), run)
+    out["validate_schema: two reviewers with overlapping reviews (n_reviewers = 2) OK"] = not errs and not validate_schema.check_run(run)
+    run1 = dict(run)
+    run1.pop("n_reviewers")
+    errs1, _ = validate_schema.validate_events(list(enumerate(ev, 1)), run1)
+    out["validate_schema: the same overlap refused when run.json says one reviewer"] = any("n_reviewers" in e for e in errs1)
+    bad = [e for e in ev if not (e["type"] == "review_start" and e.get("reviewer") == "r2")]
+    bad = [dict(e, reviewer="r1") if e.get("reviewer") == "r2" else e for e in ev]
+    errs2, _ = validate_schema.validate_events(list(enumerate(bad, 1)), run)
+    out["validate_schema: one reviewer with two reviews open refused"] = any("one change at a time" in e for e in errs2)
+    s = derive_window(run, ev)["summary"]
+    out["derive: per-reviewer busy time, util = (12 + 30) min / (2 x 60 min) = 0.35, V per reviewer-hour"] = (
+        abs(s["reviewer_util"] - 0.35) < 1e-6 and s["n_reviewers"] == 2 and abs(s["V"] - 2 / 0.7) < 1e-6)
+    # v6_order
+    o = v6.v6_order(v6.DESIGN_V6["cells"])
+    c = Counter(o)
+    out["v6_order: counts per cell, two N = 1 windows first, N = 12 never first or last, alternates K at N = 12"] = (
+        dict(c) == {tuple(k): v for k, v in v6.cells_of(v6.DESIGN_V6["cells"]).items()} and o[0][0] == 1 and o[1][0] == 1
+        and o[-1][0] == 1 and all(a != b for a, b in zip([k for n, k in o if n == 12], [k for n, k in o if n == 12][1:])))
+    # CAP on constructed windows
+    W = lambda n, k, fin, i: dict(run_id=f"c{i}", n_workers=n, n_reviewers=k, finished=fin, hours=50 / 60, worker_hours_full=n * 50 / 60)
+    Sc = [W(12, 3, 130, 0), W(12, 3, 140, 1), W(12, 3, 125, 2), W(12, 1, 70, 3), W(12, 1, 75, 4), W(12, 1, 72, 5)]
+    kt = v6.k_test(Sc, 12, 1, 3)
+    out["k_test: K = 1 finishing 0.55x K = 3 over 3 + 3 windows -> CAPPED (p < 0.05), ratio 0.55, CI below 1"] = (
+        kt["p"] < 0.05 and abs(kt["ratio"] - 217 / 395) < 1e-9 and kt["ratio_ci"][1] < 1)
+    Sn = [W(12, 3, 100, 0), W(12, 3, 110, 1), W(12, 1, 108, 2), W(12, 1, 104, 3)]
+    out["k_test: equal output -> not capped"] = v6.k_test(Sn, 12, 1, 3)["p"] > 0.2
+    # rule 1 on simulated T1b logs (90 min one slot, then 12 for 30 min)
+    sys.path.insert(0, str(HERE / "design-search"))
+    from oc_v6 import t1b_one
+    stop = [t1b_one(("measured/thr=2", 90, 700 + i))["dec"] for i in range(20)]
+    clear = [t1b_one(("measured", 90, 800 + i))["dec"] for i in range(20)]
+    out["throttle_v6: a 2x service slowdown at twelve slots -> STOP in >= 18 of 20 simulated T1b"] = stop.count("STOP") >= 18
+    out["throttle_v6: no slowdown -> never STOP, CLEAR in >= 15 of 20"] = "STOP" not in clear and clear.count("CLEAR") >= 15
+    # the T1 calibration check (observed T1 inside the simulated 5-95% band on every measure)
+    r = subprocess.run([PY, str(HERE / "design-search" / "calib_t1.py"), "--reps", "200", "--out",
+                        str(Path(tempfile.mkdtemp()) / "c.json")], capture_output=True, text=True)
+    rows = [ln.split() for ln in r.stdout.splitlines()[1:] if ln.strip()]
+    pcts = [float(x[-1]) for x in rows]
+    out["calib_t1: T1 lies within the simulator's 5-95% band on every measure (K = 1, 12 slots, 2 lost)"] = (
+        r.returncode == 0 and len(pcts) >= 15 and all(0.05 <= p_ <= 0.95 for p_ in pcts))
+    # CLI end to end
+    d = Path(tempfile.mkdtemp(prefix="v6-"))
+    r = subprocess.run([PY, str(HERE / "synth.py"), "--v6", "--family", "measured", "--seed", "5", "--out", str(d / "runs")],
+                       capture_output=True, text=True)
+    runs = sorted((d / "runs").iterdir())
+    ok_v = all(subprocess.run([PY, str(HERE / "validate_schema.py"), str(x)], capture_output=True).returncode == 0 for x in runs)
+    out["synth --v6: T1b + the recommended cells, every log valid"] = r.returncode == 0 and ok_v and len(runs) == 1 + sum(
+        v6.cells_of(v6.DESIGN_V6["cells"]).values())
+    sw = [str(x) for x in runs if "-T1b" not in x.name]
+    r = subprocess.run([PY, str(HERE / "score.py"), *sw, "--out-dir", str(d / "res")], capture_output=True, text=True)
+    ok = r.returncode == 0 and (d / "res" / "results.json").exists()
+    R = json.loads((d / "res" / "results.json").read_text()) if ok else {}
+    ids = [o["id"] for o in R.get("outcomes", [])]
+    out["score (default plan v6): every result graded as v6.GRADES_V6, in v6.V6_ORDER"] = ok and ids == [
+        i for i in v6.V6_ORDER if i in ids] and all(
+        (o["grade"], o["role"]) == v6.GRADES_V6[o["id"]] for o in R["outcomes"]) and {"SCALE", "CAP", "COLL"} <= set(ids)
+    cap = next((o for o in R.get("outcomes", []) if o["id"] == "CAP"), {})
+    out["score v6: CAP codes CAPPED under near-linear workers (T1's rates), K = 1 reviewer busy >= 0.8"] = (
+        cap.get("code") == "CAPPED" and R["util"]["12x1"]["reviewer_util_mean"] >= 0.8)
+    r = subprocess.run([PY, str(HERE / "predict.py"), "--json", str(d / "p.json")], capture_output=True, text=True)
+    P = json.loads((d / "p.json").read_text()) if r.returncode == 0 else {}
+    lin = {(x["N"], x["K"]): x for x in P.get("predictions", []) if x["rival"] == "linear"}
+    out["predict (default plan v6): linear binds at N = 12, K = 1 only; budget (a) and (b); abort rules"] = (
+        r.returncode == 0 and lin.get((12, 1), {}).get("binds") and not lin[(12, 3)]["binds"] and not lin[(1, 1)]["binds"]
+        and P["budget_plan_usage"] and len(P["abort_rules"]) == len(v6.ABORT_V6))
+    r5 = subprocess.run([PY, str(HERE / "predict.py"), "--plan", "v5"], capture_output=True, text=True)
+    out["predict --plan v5 still runs (PLAN-v5 kept)"] = r5.returncode == 0 and "PLAN-v5" in r5.stdout
+    return out
+
 def derive_all(runs):
     return [derive_window(r, e) for r, e in runs]
 
@@ -776,9 +867,10 @@ def main():
         se = unit_sessions()
         c = unit_cli(outdir)
         u5 = unit_v5(outdir)
-        T["unit"] = {**u, **us, **v41, **se, **c, **u5}
+        u6 = unit_v6(outdir)
+        T["unit"] = {**u, **us, **v41, **se, **c, **u5, **u6}
         md += ["## U. Unit checks", ""]
-        for k, v in {**u, **us, **v41, **se, **c, **u5}.items():
+        for k, v in {**u, **us, **v41, **se, **c, **u5, **u6}.items():
             if k in ("score stderr", "score v5 stderr"):
                 md.append(f"- score stderr: `{v}`")
                 continue

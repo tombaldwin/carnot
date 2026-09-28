@@ -1,0 +1,132 @@
+{
+ "reps": 1000,
+ "family": "measured",
+ "measures": {
+  "lam_A": {
+   "observed": 16.0,
+   "sim_median": 14.0,
+   "sim_p5": 8.0,
+   "sim_p95": 22.0,
+   "observed_percentile": 0.7235
+  },
+  "lam_B": {
+   "observed": 13.6,
+   "sim_median": 14.0,
+   "sim_p5": 7.6,
+   "sim_p95": 22.8,
+   "observed_percentile": 0.4575
+  },
+  "busy_B": {
+   "observed": 0.8843855555852255,
+   "sim_median": 0.9323947222365274,
+   "sim_p5": 0.7772240277594991,
+   "sim_p95": 0.9649062500331137,
+   "observed_percentile": 0.132
+  },
+  "busy_B_last20": {
+   "observed": 0.949991666674614,
+   "sim_median": 1.0,
+   "sim_p5": 0.8803400829235712,
+   "sim_p95": 1.0,
+   "observed_percentile": 0.085
+  },
+  "depth_35": {
+   "observed": 4,
+   "sim_median": 5.0,
+   "sim_p5": 0.0,
+   "sim_p95": 13.0,
+   "observed_percentile": 0.33899999999999997
+  },
+  "depth_40": {
+   "observed": 10,
+   "sim_median": 11.0,
+   "sim_p5": 1.0,
+   "sim_p95": 27.0,
+   "observed_percentile": 0.45899999999999996
+  },
+  "depth_45": {
+   "observed": 18,
+   "sim_median": 15.0,
+   "sim_p5": 1.0,
+   "sim_p95": 39.049999999999955,
+   "observed_percentile": 0.5820000000000001
+  },
+  "depth_50": {
+   "observed": 24,
+   "sim_median": 19.0,
+   "sim_p5": 1.0,
+   "sim_p95": 50.049999999999955,
+   "observed_percentile": 0.5964999999999999
+  },
+  "depth_55": {
+   "observed": 25,
+   "sim_median": 25.0,
+   "sim_p5": 1.0,
+   "sim_p95": 63.0,
+   "observed_percentile": 0.502
+  },
+  "depth_60": {
+   "observed": 29,
+   "sim_median": 29.0,
+   "sim_p5": 1.0,
+   "sim_p95": 75.04999999999995,
+   "observed_percentile": 0.4995
+  },
+  "depth_65": {
+   "observed": 17,
+   "sim_median": 15.0,
+   "sim_p5": 0.0,
+   "sim_p95": 61.049999999999955,
+   "observed_percentile": 0.534
+  },
+  "depth_70": {
+   "observed": 2,
+   "sim_median": 1.0,
+   "sim_p5": 0.0,
+   "sim_p95": 47.0,
+   "observed_percentile": 0.5195
+  },
+  "max_depth": {
+   "observed": 31,
+   "sim_median": 30.0,
+   "sim_p5": 5.0,
+   "sim_p95": 76.0,
+   "observed_percentile": 0.5105
+  },
+  "reviews_B": {
+   "observed": 76,
+   "sim_median": 79.0,
+   "sim_p5": 66.95,
+   "sim_p95": 84.0,
+   "observed_percentile": 0.2515
+  },
+  "submits_B": {
+   "observed": 106,
+   "sim_median": 109.0,
+   "sim_p5": 68.95,
+   "sim_p95": 158.0,
+   "observed_percentile": 0.453
+  },
+  "request_changes_share": {
+   "observed": 0.39316239316239315,
+   "sim_median": 0.4,
+   "sim_p5": 0.31997938144329896,
+   "sim_p95": 0.47561959087332806,
+   "observed_percentile": 0.445
+  },
+  "merges": {
+   "observed": 63,
+   "sim_median": 59.0,
+   "sim_p5": 39.0,
+   "sim_p95": 71.0,
+   "observed_percentile": 0.7204999999999999
+  },
+  "review_s_mean": {
+   "observed": 20.996316239316236,
+   "sim_median": 21.09613706896552,
+   "sim_p5": 20.144148171828174,
+   "sim_p95": 22.17751511620273,
+   "observed_percentile": 0.436
+  }
+ }
+}
