@@ -24,8 +24,8 @@ def test_shipped_phase_configs_match_their_phase(phase, fname):
     assert config_mod.phase_problems(cfg) == []
     assert config_mod.schedule_problems(cfg.run.start_schedule, cfg.run.n_workers) == []
     assert cfg.run.worker_model == "claude-haiku-4-5" and cfg.run.reviewer_model == "claude-opus-5-5"
-    assert cfg.repo.base_ref == "sandbox-v1" and "OWNER" in cfg.repo.remote_url      # placeholder
-    assert cfg.reviewer.job == "checkout" and cfg.reviewer.verified is False
+    assert cfg.repo.base_ref == "sandbox-v1" and cfg.repo.remote_url.endswith("tombaldwin/carnot-sandbox.git")
+    assert cfg.reviewer.job == "checkout" and cfg.reviewer.verified is True   # CLI checked 2026-09-28
     assert cfg.launcher.mode == "manual" and not cfg.launcher.verified and not cfg.launcher.followup_verified
     assert cfg.run.task_timeout_min == 25 and cfg.run.task_budget_min == 20
 

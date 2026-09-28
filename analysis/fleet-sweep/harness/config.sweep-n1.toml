@@ -26,7 +26,7 @@ end_grace_early_when_idle = false   # real windows always run the full grace per
 grace_reviews = true            # reviews of already-submitted changes continue during grace
 
 [repo]
-remote_url = "git@github.com:OWNER/carnot-sandbox.git"   # FILL IN: the private sandbox repo (placeholder)
+remote_url = "git@github.com:tombaldwin/carnot-sandbox.git"   # private sandbox repo, created 2026-09-28
 work_dir = "/Users/tom/git/carnot-sandbox-tasks/work/sandbox"    # orchestrator's own clone
 base_ref = "sandbox-v1"         # frozen tag main is reset to (check with `reset` against the remote before T1)
 branch_prefix = "claude/task-"   # each session is told to create claude/task-<id>
@@ -35,12 +35,12 @@ tasks_file_name = "TASKS.json"
 
 [tasks]
 # FILL IN: a private local path (the tasks repo's gitignored dryrun/export/), never under this repo.
-task_file = "FILL-IN/tasks.json"
-hidden_tests_dir = "FILL-IN/hidden"              # <dir>/<task id>/test_*.py
-reference_dir = "FILL-IN/reference"           # <dir>/<task id>.patch
+task_file = "/Users/tom/git/carnot-sandbox-tasks/export-v1/tasks.json"
+hidden_tests_dir = "/Users/tom/git/carnot-sandbox-tasks/export-v1/hidden"              # <dir>/<task id>/test_*.py
+reference_dir = "/Users/tom/git/carnot-sandbox-tasks/export-v1/reference"           # <dir>/<task id>.patch
 
 [tests]
-python = ""                     # FILL IN: the sandbox venv's python ("" = the harness interpreter)
+python = "/Users/tom/git/carnot-sandbox/.venv/bin/python"   # the sandbox venv
 timeout_s = 300
 post_hidden_scope = "merged"    # this task's hidden tests + those of every task merged this window
 hidden_subdir = "tests/_hidden_acceptance"   # under tests/ so the sandbox's tests/conftest.py fixtures apply
@@ -49,16 +49,16 @@ hidden_pythonpath = ["tests", "."]           # hidden tests use `from helpers im
 [reviewer]
 mode = "command"
 job = "checkout"                # frozen review job (PLAN-v4 s7): fresh checkout of the head + task + diff
-# UNVERIFIED until the CLI check (PLAN-v4 s7.3): exact `claude -p` flags. Placeholders: {model}
+# Verified 2026-09-28 (PLAN-v4 s7.3): flags checked on the paying account. Placeholders: {model}
 # {prompt_file} {workdir} {checkout} {allowed_tools} {python}. The prompt goes in on stdin.
-command = ["claude", "-p", "--model", "{model}", "--output-format", "json", "--allowedTools", "{allowed_tools}", "--no-session-persistence"]
+command = ["claude", "-p", "--model", "{model}", "--output-format", "json", "--permission-mode", "dontAsk", "--setting-sources", "project", "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence", "--tools", "Read,Grep,Glob,Bash", "--allowedTools", "{allowed_tools}"]
 prompt_on_stdin = true
 cwd = "{checkout}"
-allowed_tools = ["Read", "Grep", "Glob", "Bash({python} -m pytest:*)"]   # UNVERIFIED syntax
+allowed_tools = ["Read", "Grep", "Glob", "Bash({python} -m pytest:*)"]   # verified 2026-09-28: writes, other execs and network denied
 allowed_tools_sep = ","
 strip_paths = [".claude", "CLAUDE.md"]
-output_format = "json"          # UNVERIFIED: field names (the parser expects result + usage.*)
-verified = false
+output_format = "json"          # verified: result, usage.*, total_cost_usd
+verified = true   # CLI check 2026-09-28 (PLAN-v4 s7.3)
 prompt_template = "prompts/reviewer.md"
 timeout_s = 900
 retries = 1

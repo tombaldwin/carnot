@@ -91,6 +91,7 @@ def test_command_reviewer_failure_is_review_error(tmp_path):
 def test_real_run_refuses_unverified_templates():
     from pathlib import Path
     cfg = config_mod.load(Path(__file__).parent.parent / "config.t2.toml")
+    cfg.reviewer.verified = False   # the shipped reviewer is verified; the guard must still refuse an unverified one
     with pytest.raises(NotVerified):
         require_verified(cfg)
     cfg.reviewer.verified = True
