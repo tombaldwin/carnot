@@ -29,15 +29,15 @@ from typing import Any
 T0_FIRST_TASK = "T145"   # small (about 20 lines), one file, no textual conflict with any other task
 _SESS = dict(task_timeout_min=25, task_budget_min=20)
 PHASES = {
-    "t0": dict(kind="trial", n_workers=1, window_min=20, warmup_min=0, grace_min=10, start_schedule=[],
+    "t0": dict(kind="trial", n_workers=1, window_min=45, warmup_min=0, grace_min=10, start_schedule=[],
                first_task=T0_FIRST_TASK, probe_followup=True, **_SESS),
     "t1": dict(kind="trial", n_workers=12, window_min=60, warmup_min=10, grace_min=10,
                start_schedule=[[0, 1], [30, 12]], first_task="", probe_followup=False, **_SESS),
     "t2": dict(kind="pilot", n_workers=1, window_min=60, warmup_min=10, grace_min=10, start_schedule=[],
                first_task="", probe_followup=False, **_SESS),
-    "sweep-n1": dict(kind="sweep", n_workers=1, window_min=120, warmup_min=10, grace_min=10, start_schedule=[],
+    "sweep-n1": dict(kind="sweep", n_workers=1, window_min=90, warmup_min=10, grace_min=10, start_schedule=[],
                      first_task="", probe_followup=False, **_SESS),
-    "sweep-n12": dict(kind="sweep", n_workers=12, window_min=120, warmup_min=10, grace_min=10, start_schedule=[],
+    "sweep-n12": dict(kind="sweep", n_workers=12, window_min=90, warmup_min=10, grace_min=10, start_schedule=[],
                       first_task="", probe_followup=False, **_SESS),
 }
 WORKER_MODEL = "claude-haiku-4-5"       # PLAN-v4 section 2 (model id string: UNVERIFIED until the CLI check)

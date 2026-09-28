@@ -97,6 +97,20 @@ class Truth:
     per_task_sessions: bool = False   # True: one session per task in N slots (the harness's worker model)
     session_startup_min: float = 1.0  # sessions: launch -> branch pushed (provisioning, clone), exp. mean
     task_timeout_min: float = 25.0    # sessions: no READY this long after launch / rework message: abandoned
+    # ---- PLAN-v5 process (all defaults leave the v4 behaviour and its random streams unchanged)
+    service_dist: str = "gamma"       # gamma (mean 1/V0, CV service_cv) | uniform (service_lo_s..service_hi_s seconds)
+    service_lo_s: float = 10.0        # v5: the measured default-effort review, 10-30 s per change
+    service_hi_s: float = 30.0
+    collision_model: str = "inflight"  # inflight (v4: p per change in flight at submit) | lifetime (p per other change
+                                       # merged since this change's base) | census (a fixed pair-conflict graph)
+    census_manifest: float = 1.0      # census: chance a structurally conflicting pair conflicts when exposed
+    census_given_share: float = 0.083  # census: P(pair conflicts | pair shares a file) for the synthetic graph
+    pairs_json: str = ""              # census: optional path to a private pair census (files + textual_conflicts only)
+    integration_bg: float = 0.0       # lifetime / census: integration failures unrelated to collisions, per merge-queue pass
+    escape_N: float = 0.0             # reviewer miss probability x (1 + escape_N (N - 1) / 11): escapes rising with N
+    escape_k: float = 0.0             # reviewer miss probability x (1 + escape_k k): escapes rising with changes in flight
+    file_zipf: float = 0.8            # file popularity exponent in make_task_pool
+    files_per_task: tuple = (1, 1, 2, 2, 3)
 
     def X(self, n):
         if self.family in ("carnot", "usl"):
@@ -117,6 +131,35 @@ TRUTHS = {
 }
 
 
+# PLAN-v5 process (design-search/DESIGN-SEARCH-v5.md): one Haiku session per task in N slots (1.3-min start-up, 25-min
+# timeout), the measured fast reviewer (10-30 s per change, uniform, never load-dependent), a ~2 s serial merge queue,
+# collisions per other change merged since a change's base (its launch, or its last rework message), background
+# integration failures, 220 tasks on 28 files with the census's sharing rate (15% of pairs share a file), window CV
+# 0.3. lam1 is set so that lambda at N = 1 is about 6 first attempts per slot-hour (dry runs); defect_p / catch0 /
+# false_reject give an escape share of about 0.10 of approvals and a review-bounce share of about 0.3 at N = 1.
+V5_TRUTH = dict(per_task_sessions=True, session_startup_min=1.3, task_timeout_min=25.0, lam1=11.0, work_cv=1.0,
+                rework_min=5.0, service_dist="uniform", service_lo_s=10.0, service_hi_s=30.0, V0=180.0, reviewer_load=0.0,
+                ci_hidden_min=0.01, ci_post_min=0.0167, rebase_s=0.4, collision_model="lifetime", p=0.005, p_m=0.0,
+                conflict_share=0.8, integration_bg=0.01, defect_p=0.35, catch0=0.77, false_reject=0.05,
+                cv_window=0.3, n_tasks=220, n_files=28, file_zipf=0.85,
+                files_per_task=(1,) * 28 + (2,) * 13 + (3,) * 2 + (4,), usage_every_min=0.0, claim_race_p=0.0)
+# PLAN-v5 worker truths (rival families): drag on the per-agent rate, and p for Carnot's collision term.
+V5_FAMILIES = {
+    "linear": dict(family="linear", p=0.0),
+    "mild": dict(family="amdahl", alpha=0.03, p=0.0),       # a milder bend than any rival (sensitivity)
+    "amdahl": dict(family="amdahl", alpha=0.1, p=0.0),
+    "usl": dict(family="usl", alpha=0.1, beta=0.01, p=0.0),
+    "carnot": dict(family="carnot", alpha=0.1, beta=0.01, p=0.005),
+}
+
+
+def make_truth_v5(name="carnot", **overrides) -> Truth:
+    kw = dict(V5_TRUTH)
+    kw.update(V5_FAMILIES[name])
+    kw.update(overrides)
+    return Truth(**kw)
+
+
 def make_truth(name="carnot", **overrides) -> Truth:
     kw = dict(TRUTHS[name])
     kw.update(overrides)
@@ -129,21 +172,54 @@ class Task:
     files: list
     logit: float
     lines: int
+    conflicts: set = field(default_factory=set)   # census collision model only
 
 
 def make_task_pool(truth: Truth, seed: int):
     rng = random.Random(seed)
-    weights = [1 / (i + 1) ** 0.8 for i in range(truth.n_files)]  # a few popular files
+    weights = [1 / (i + 1) ** truth.file_zipf for i in range(truth.n_files)]  # a few popular files
     files = [f"src/sandbox/mod{i:02d}.py" for i in range(truth.n_files)]
     base = math.log(truth.defect_p / (1 - truth.defect_p))
     pool = []
+    fpt = list(truth.files_per_task)
     for i in range(truth.n_tasks):
-        nf = rng.choice([1, 1, 2, 2, 3])
+        nf = rng.choice(fpt)
         fs = set()
         while len(fs) < nf:
             fs.add(rng.choices(files, weights)[0])
         pool.append(Task(f"{i + 1:03d}", sorted(fs), base + rng.gauss(0, truth.task_sd), rng.randint(20, 150)))
+    if truth.collision_model == "census":
+        _conflict_graph(truth, pool, seed)
     return pool
+
+
+def _conflict_graph(truth: Truth, pool, seed):
+    """Pair-conflict structure for collision_model = "census". With truth.pairs_json (a private census of the real
+    task set: only its `files` and `textual_conflicts` keys are read, nothing is copied), the real graph is mapped
+    onto the pool in id order; otherwise a synthetic graph: a pair sharing a file conflicts with probability
+    census_given_share (the 220-task census: 1.2% of pairs conflict, all of them among the 15% that share a file)."""
+    for t in pool:
+        t.conflicts = set()
+    if truth.pairs_json:
+        d = json.loads(Path(truth.pairs_json).read_text())
+        ids = sorted(d["files"])
+        idx = {tid: i for i, tid in enumerate(ids)}
+        fidx = {f: j for j, f in enumerate(sorted({f for v in d["files"].values() for f in v}))}
+        for i, tid in enumerate(ids[:len(pool)]):
+            pool[i].files = sorted(f"src/sandbox/file{fidx[f]:02d}.py" for f in d["files"][tid])  # opaque names
+        for a, b in d["textual_conflicts"]:
+            ia, ib = idx.get(a), idx.get(b)
+            if ia is not None and ib is not None and ia < len(pool) and ib < len(pool):
+                pool[ia].conflicts.add(pool[ib].id)
+                pool[ib].conflicts.add(pool[ia].id)
+        return
+    rng = random.Random(seed * 7 + 3)
+    for i, a in enumerate(pool):
+        fa = set(a.files)
+        for b in pool[i + 1:]:
+            if fa & set(b.files) and rng.random() < truth.census_given_share:
+                a.conflicts.add(b.id)
+                b.conflicts.add(a.id)
 
 
 def _hex(rng, n=12):
@@ -195,6 +271,7 @@ def simulate(truth: Truth, n_workers: int, *, seed: int, window_min=90.0, warmup
         return rng.gammavariate(k, mean / k)
 
     changes = {}      # task id -> state
+    merged_log = []   # (t, task id) of every merge in this window (v5 collision models)
     ptr = [0]
     last_claimed = [None]
     reviewq = deque()
@@ -224,7 +301,7 @@ def simulate(truth: Truth, n_workers: int, *, seed: int, window_min=90.0, warmup
         if ptr[0] == len(order):  # as the harness logs it: the last unclaimed task is gone
             emit(t, "note", text=f"tasks_exhausted n={len(order)}")
         changes[task.id] = dict(task=task, owner=w, attempt=0, head=None, inflight=False, defective=False,
-                                collided=False, merged=False, depth=0)
+                                collided=False, merged=False, depth=0, base=t)
         emit(t, "claim", worker=w["id"], task=task.id, branch=f"claude/task-{task.id}")
         rate = truth.lam1 * drag(t) * mult / 3600.0
         dur = gamma_time(1 / rate, truth.work_cv)
@@ -247,8 +324,12 @@ def simulate(truth: Truth, n_workers: int, *, seed: int, window_min=90.0, warmup
         if ch["attempt"] > 1:
             d *= truth.rework_defect_factor
         ch["defective"] = rng.random() < d
-        p_none = (1 - truth.p) ** k * (1 - truth.p_m) ** m
-        ch["collided"] = rng.random() > p_none
+        if truth.collision_model == "inflight":
+            p_none = (1 - truth.p) ** k * (1 - truth.p_m) ** m
+            ch["collided"] = rng.random() > p_none
+        else:
+            ch["collided"] = False     # decided at rebase from the merges since the change's base (v5)
+            ch["k_submit"] = k
         emit(t, "submit", worker=w["id"], task=task_id, branch=f"claude/task-{task_id}", head=ch["head"],
              attempt_no=ch["attempt"], lines_changed=ch["task"].lines if ch["attempt"] == 1 else rng.randint(5, 60),
              files=list(ch["task"].files), k=k, m=m)
@@ -272,11 +353,15 @@ def simulate(truth: Truth, n_workers: int, *, seed: int, window_min=90.0, warmup
             rev["busy"] = True
         emit(t, "review_start", task=task_id, head=ch["head"], queue_depth=depth)
         rate = truth.V0 * max(truth.reviewer_min_factor, 1 + truth.reviewer_load * depth) / 3600.0
-        dur = gamma_time(1 / rate, truth.service_cv)
+        if truth.service_dist == "uniform":
+            svc = lambda: rng.uniform(truth.service_lo_s, truth.service_hi_s)
+        else:
+            svc = lambda: gamma_time(1 / rate, truth.service_cv)
+        dur = svc()
         if rng.random() < truth.review_error_p:
             t_err = t + dur * rng.random()
             at(t_err, review_error, task_id, ch["head"])
-            dur = (t_err - t) + gamma_time(1 / rate, truth.service_cv)
+            dur = (t_err - t) + svc()
         at(t + dur, review_end, task_id, ch["head"], t)
 
     def review_error(t, task_id, head):
@@ -288,6 +373,9 @@ def simulate(truth: Truth, n_workers: int, *, seed: int, window_min=90.0, warmup
         depth = ch["depth"]
         if ch["defective"]:
             catch = truth.catch0 * math.exp(-truth.escape_depth * depth)
+            if truth.escape_N or truth.escape_k:
+                miss = (1 - catch) * (1 + truth.escape_N * (W - 1) / 11.0) * (1 + truth.escape_k * ch.get("k_submit", 0))
+                catch = max(0.0, 1 - miss)
             reject = rng.random() < catch
         else:
             reject = rng.random() < truth.false_reject
@@ -334,6 +422,15 @@ def simulate(truth: Truth, n_workers: int, *, seed: int, window_min=90.0, warmup
 
     def rebase(t, task_id):
         ch = changes[task_id]
+        if truth.collision_model != "inflight":
+            base = ch.get("base", 0.0)
+            since = [tid for (tm, tid) in merged_log if tm > base and tid != task_id]
+            if truth.collision_model == "lifetime":
+                ch["collided"] = bool(since) and rng.random() > (1 - truth.p) ** len(since)
+            else:
+                nconf = sum(1 for tid in since if tid in ch["task"].conflicts)
+                ch["collided"] = nconf > 0 and rng.random() > (1 - truth.census_manifest) ** nconf
+            ch["bg_fail"] = truth.integration_bg > 0 and rng.random() < truth.integration_bg
         conflict = ch["collided"] and rng.random() < truth.conflict_share
         ch["conflict"] = conflict
         emit(t, "rebase", task=task_id, head=ch["head"], new_head=None if conflict else _hex(rng), conflict=conflict)
@@ -346,7 +443,7 @@ def simulate(truth: Truth, n_workers: int, *, seed: int, window_min=90.0, warmup
     def tests_post(t, task_id):
         ch = changes[task_id]
         vis = rng.random() >= truth.visible_fail
-        hid = not ch["collided"]
+        hid = not ch["collided"] and not ch.get("bg_fail", False)
         emit(t, "tests_post", task=task_id, head=ch["head"], visible_passed=vis, hidden_passed=hid)
         if not vis:
             bounce(t, task_id, "visible_fail")
@@ -356,6 +453,7 @@ def simulate(truth: Truth, n_workers: int, *, seed: int, window_min=90.0, warmup
             emit(t, "merge", task=task_id, head=ch["head"], main_sha=_hex(rng, 40))
             ch["inflight"] = False
             ch["merged"] = True
+            merged_log.append((t, task_id))
         mq_next(t)
 
     # ---------------------------------------------------------------- feedback
@@ -434,6 +532,7 @@ def simulate(truth: Truth, n_workers: int, *, seed: int, window_min=90.0, warmup
                 ch = changes[task_id]
                 tok = occupy(t, w, task_id)
                 emit(t, "session_message", slot=w["id"], task=task_id, session_id=ch["session"], kind="rework")
+                ch["base"] = t    # the rework prompt says to merge origin/main first
                 mean = truth.rework_min * 60
                 dur = mean if truth.rework_dist == "fixed" else gamma_time(mean, 1.0)
                 dur /= (drag(t) * mult)
@@ -447,6 +546,7 @@ def simulate(truth: Truth, n_workers: int, *, seed: int, window_min=90.0, warmup
                                     collided=False, merged=False, depth=0, session=f"session_{_hex(rng, 8)}")
             tok = occupy(t, w, task.id)
             emit(t, "session_launch", slot=w["id"], task=task.id, session_id=changes[task.id]["session"], attempt_no=1)
+            changes[task.id]["base"] = t
             if ptr[0] == len(order):
                 emit(t, "note", text=f"tasks_exhausted n={len(order)}")
             t_up = t + rng.expovariate(1 / max(truth.session_startup_min * 60, 1e-9))
@@ -502,7 +602,8 @@ def simulate_study(truth: Truth, sizes, *, seed: int, reps=2, window_min=90.0, w
                    grace_min=10.0, with_pilot=True, pilot_design="v3"):
     """T1 trial, T2 pilot, then sweep windows in ABBA order (low, high, high, low for reps=2; ABBAAB for
     reps=3). pilot_design="v4" is PLAN-v4's pilot: T1 = 1 worker for 30 min plus 11 more for the last
-    15 min (12 at once), T2 = eight separate 60-min windows of one worker.
+    15 min (12 at once), T2 = eight separate 60-min windows of one worker. pilot_design="v5" is PLAN-v5's: T1 only
+    (1 slot for 30 min, then 12 for 30 min), and `reps` may be a dict {size: windows} (order: v5_order).
     Returns a list of (run_json, events)."""
     pool = make_task_pool(truth, seed * 31 + 5)
     runs = []
@@ -516,7 +617,7 @@ def simulate_study(truth: Truth, sizes, *, seed: int, reps=2, window_min=90.0, w
                                  grace_min=grace_min, task_pool=pool, run_id=f"synth-{seed}-T2-{j + 1}", kind="pilot",
                                  t0=t0 + (3 + 1.5 * j) * 3600))
         t0 += 12 * 3600
-    elif with_pilot:
+    elif with_pilot and pilot_design == "v3":
         # T1: 1 worker alone 15 min, then 9 at once 15 min; the reviewer keeps going (long grace) so
         # every T1 PR is reviewed (PLAN-v3 section 3).
         sched = [(0.0, 30.0)] + [(15.0, 30.0)] * 8
@@ -525,15 +626,48 @@ def simulate_study(truth: Truth, sizes, *, seed: int, reps=2, window_min=90.0, w
         runs.append(simulate(truth, 2, seed=seed * 1000 + 2, window_min=60, warmup_min=warmup_min,
                              grace_min=grace_min, task_pool=pool, run_id=f"synth-{seed}-T2", kind="pilot",
                              t0=t0 + 3 * 3600))
-    lo, hi = sizes
-    order = []
-    for r in range(reps):
-        order += [lo, hi] if r % 2 == 0 else [hi, lo]
+    if with_pilot and pilot_design == "v5":
+        # PLAN-v5 T1: one slot for 30 min, then twelve for 30 min (no separate T2 pilot)
+        sched = [(0.0, 60.0)] + [(30.0, 60.0)] * 11
+        runs.append(simulate(truth, 12, seed=seed * 1000 + 1, window_min=60, warmup_min=0, grace_min=10,
+                             schedule=sched, task_pool=pool, run_id=f"synth-{seed}-T1", kind="trial", t0=t0))
+        t0 += 3 * 3600
+    if isinstance(reps, dict) or pilot_design == "v5":
+        order = v5_order(sizes, reps)
+    else:
+        lo, hi = sizes
+        order = []
+        for r in range(reps):
+            order += [lo, hi] if r % 2 == 0 else [hi, lo]
     for i, n in enumerate(order):
         runs.append(simulate(truth, n, seed=seed * 1000 + 10 + i, window_min=window_min, warmup_min=warmup_min,
                              grace_min=grace_min, task_pool=pool, run_id=f"synth-{seed}-N{n}-w{i + 1}",
                              kind="sweep", t0=t0 + (6 + 2.5 * i) * 3600))
     return runs
+
+
+def v5_order(sizes, reps):
+    """Sweep order for unequal replicates (PLAN-v5 section 5): windows of every size spread evenly through the
+    sequence, the largest size never first or last, starting and ending with the smallest. reps: dict size -> windows,
+    or an int (same count per size)."""
+    sizes = sorted(sizes)
+    if not isinstance(reps, dict):
+        reps = {n: int(reps) for n in sizes}
+    slots = []
+    for n in sizes:
+        r = reps.get(n, 0)
+        for i in range(r):
+            slots.append(((i + 0.5) / r, -n if n == sizes[0] else n, n))
+    slots.sort()
+    order = [n for _, _, n in slots]
+    lo = sizes[0]
+    if order and order[0] != lo and lo in order:
+        order.remove(lo)
+        order.insert(0, lo)
+    if order and order[-1] != lo and order.count(lo) > 1:
+        idx = max(i for i, n in enumerate(order[:-1]) if n == lo)
+        order.append(order.pop(idx))
+    return order
 
 
 def write_run(base: Path, run, events):
@@ -568,6 +702,12 @@ def main():
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--v4", action="store_true",
                     help="PLAN-v4 design: sizes 1 12, 3 windows each (ABBAAB) of 120 min, v4 pilot (T1 1->12, 8 x 60-min T2)")
+    ap.add_argument("--v5", action="store_true",
+                    help="PLAN-v5 process and design: V5_TRUTH (sessions, fast reviewer, lifetime collisions), T1 1 -> 12, "
+                         "sweep sizes / reps / window from --sizes --reps-v5 --window-min (defaults: the recommended design)")
+    ap.add_argument("--family", default=None, choices=["linear", "mild", "amdahl", "usl", "carnot"],
+                    help="--v5 only: worker truth (default carnot)")
+    ap.add_argument("--reps-v5", nargs="*", default=None, metavar="N=R", help="--v5 only: windows per size, e.g. 1=8 12=3")
     ap.add_argument("--sessions", action="store_true",
                     help="one cloud session per task in N slots (the harness's worker model; sets per_task_sessions)")
     ap.add_argument("--out", required=True)
@@ -580,9 +720,19 @@ def main():
         ov[k] = _coerce(v)
     if a.sessions:
         ov["per_task_sessions"] = True
-    truth = make_truth(a.truth, **ov)
-    runs = simulate_study(truth, a.sizes, seed=a.seed, reps=a.reps, window_min=a.window_min,
-                          with_pilot=not a.no_pilot, pilot_design="v4" if a.v4 else "v3")
+    if a.v5:
+        from v5 import DESIGN_V5
+        truth = make_truth_v5(a.family or "carnot", **ov)
+        sizes = sorted(set(a.sizes)) if a.sizes != [1, 5] else list(DESIGN_V5["sizes"])
+        reps = ({int(k): int(v) for k, v in (x.split("=") for x in a.reps_v5)} if a.reps_v5
+                else dict(DESIGN_V5["reps"]))
+        wmin = a.window_min if a.window_min != 90 else DESIGN_V5["window_min"]
+        runs = simulate_study(truth, sizes, seed=a.seed, reps=reps, window_min=wmin,
+                              with_pilot=not a.no_pilot, pilot_design="v5")
+    else:
+        truth = make_truth(a.truth, **ov)
+        runs = simulate_study(truth, a.sizes, seed=a.seed, reps=a.reps, window_min=a.window_min,
+                              with_pilot=not a.no_pilot, pilot_design="v4" if a.v4 else "v3")
     for run, ev in runs:
         d = write_run(Path(a.out), run, ev)
         print(f"{d}  kind={run['kind']} N={run['n_workers']} events={len(ev)}")

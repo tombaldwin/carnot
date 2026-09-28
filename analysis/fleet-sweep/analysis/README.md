@@ -1,6 +1,13 @@
 # Fleet sweep (study 2): pre-registered analysis
 
-Coded to **PLAN-v4** as amended by its section 6 (**v4.1**: fixed sizes N = 1 and 12, three 120-min windows
+**Default: PLAN-v5** (review automated and fast; `v5.py`, decisions 44-53). `score.py` and `predict.py` run the v5
+codings unless given `--plan v4` (or `--plan v3`). The v5 design and grades come from
+`design-search/DESIGN-SEARCH-v5.md`; the simulated operating characteristics are in `../OPERATING-CHARACTERISTICS-v5.md`
+(`v5.V5_OC`). In short: N = 1 and 12, twelve 90-min windows at N = 1 and three at N = 12, no separate pilot; SCALE
+(per-agent finished output falls with N) is the confirmatory primary test, COLL (collisions against merges since a
+change's base) confirmatory secondary, everything else descriptive.
+
+*Superseded, kept behind `--plan v4`:* coded to **PLAN-v4** as amended by its section 6 (**v4.1**: fixed sizes N = 1 and 12, three 120-min windows
 each, no pilot gate, claims graded confirmatory / conditional / descriptive in advance; the reviewer-pace test is
 the Welch test on log review durations; live-only pilot; calibration log for abort rule 4 only; supply flag at
 minute 110) and reframed by its section 7 (**v4.2**: a measurement and calibration study; O2 is the primary
@@ -23,16 +30,38 @@ cd /Users/tom/git/carnot/analysis/fleet-sweep/analysis
 | `common.py` | Model curves (USL, Amdahl, linear), timestamps, the negative-binomial likelihood (Poisson with fixed CV 0.3), logistic / conditional-logistic fitters, the model-form collision fit. |
 | `validate_schema.py` | Checks `events.jsonl` (+ `run.json`) against SCHEMA.md: fields, types, enums, timestamps, ordering, serial reviews, attempt numbering, merges only of approved + green heads; for session logs, slot busy/idle pairing, launches and messages only on busy slots, no more busy slots than `n_workers`. Exit 1 on errors. |
 | `derive.py` | Per-window quantities (PLAN-v3 section 6 accounting) and per-PR / per-approval tables, with the task-supply truncation and flag (minute 110) and the grace-end V correction; `--pilot` pools the live T1 + T2 runs (and nothing else) into the pilot parameters, including `review_time_cv` and the flag `review_cv_ok`. |
-| `predict.py` | PLAN-v4.1/v4.2 pre-registration table: point predictions for the four rivals at N = 1 and 12 (per window and per three windows), the O2 interval, design-point loads, abort rules 3-5 (rule 4 from the calibration log, `--calibration`), the task-supply check, and the operating-characteristics statement (v4.2 framing, the uncapped-truth footnote, the completion-share bias). `--v3-gate` adds the superseded PLAN-v3 gate for reference. |
-| `score.py` | PLAN-v4.2 (in this order): O2, the primary quantitative test, and P1, the manipulation check (capped vs best uncapped likelihood ratio), each also without the windows flagged for running out of tasks (O2-nf, P1-nf), the reviewer-pace test Vdur (Welch on log review durations; conditional on `review_cv_ok`), and the descriptive S3 (b_review), O3, Vratio, S1r/S2r, four-way ranking, escapes, collisions and bounce causes, each graded; writes `RESULTS-draft.md` and `results.json`. `--plan v3` gives the superseded codings. |
+| `v5.py` | **PLAN-v5 codings** (default): SCALE (one-sided NB LR, per-agent output vs N), FAMILY (four rivals with free levels), ESC / ESC-N, COLL / COLL-m / COLL-k (collision exposure j), UTIL, LAMBDA, BOUNCE, EFFORT (post-hoc effort log reader and comparison); `score_v5`, `render_md_v5`, `predictions_v5`, `DESIGN_V5`, `GRADES_V5`, `V5_ORDER`, `V5_OC`. |
+| `predict.py` | Default: the PLAN-v5 pre-registration table (each rival's ratio to N = 1, illustrative counts and reviewer / merge-queue loads, budget and degrade rule, abort rules, OC statement); no pilot input needed. `--plan v4`: the PLAN-v4.1/v4.2 pre-registration table: point predictions for the four rivals at N = 1 and 12 (per window and per three windows), the O2 interval, design-point loads, abort rules 3-5 (rule 4 from the calibration log, `--calibration`), the task-supply check, and the operating-characteristics statement (v4.2 framing, the uncapped-truth footnote, the completion-share bias). `--v3-gate` adds the superseded PLAN-v3 gate for reference. |
+| `score.py` | Default: PLAN-v5 (`v5.score_v5`; `--effort-log` for the post-hoc re-review, `--pilot` optional). `--plan v4`: PLAN-v4.2 (in this order): O2, the primary quantitative test, and P1, the manipulation check (capped vs best uncapped likelihood ratio), each also without the windows flagged for running out of tasks (O2-nf, P1-nf), the reviewer-pace test Vdur (Welch on log review durations; conditional on `review_cv_ok`), and the descriptive S3 (b_review), O3, Vratio, S1r/S2r, four-way ranking, escapes, collisions and bounce causes, each graded; writes `RESULTS-draft.md` and `results.json`. `--plan v3` gives the superseded codings. |
 | `synth.py` | Discrete-event simulation of the harness (workers, FIFO reviewer, serial merge queue, re-reviews, censoring) writing SCHEMA.md logs under a chosen truth, with the harness's `task_supply` / `tasks_exhausted` notes. `--v4` gives PLAN-v4's pilot and sweep layout; `--sessions` the current worker model (one session per task in N slots, rework to the next free slot, 25-min timeout; decision 43). The default is the long-running-worker model the operating characteristics were computed with. |
-| `selftest.py` | Unit checks plus the simulation study at the PLAN-v4 design point (every v4 coding under four truths and a load-dependent reviewer), the task-supply check, and planted escape and collision effects. Writes `selftest-output/SELFTEST.md` and `selftest.json`. |
+| `selftest.py` | Part W and unit_v5: the v5 codings on a hand-built log and constructed inputs, the v5 CLI end to end, and planted-truth recovery / false alarms at the recommended v5 design (via `design-search/dsim5.py`). Also: unit checks plus the simulation study at the PLAN-v4 design point (every v4 coding under four truths and a load-dependent reviewer), the task-supply check, and planted escape and collision effects. Writes `selftest-output/SELFTEST.md` and `selftest.json`. |
 
-## How to run each step
+## How to run each step (PLAN-v5, the default)
+
+```sh
+$PY selftest.py                                   # unit checks, v4 parts and part W (v5); --parts UW for v5 only
+$PY validate_schema.py ../runs/<run_id>           # every run directory, as soon as it is written
+# before the sweep (pre-registration): the design, rival ratios, loads, budget, abort rules, OC statement
+$PY predict.py --task-supply 220 --burn <$ per session-h from T1> --balance <credits left> --md prediction.md --json prediction.json
+#    optional illustration inputs: --lambda-pilot <per slot-h> --completion <c> (T1 or the first N = 1 windows)
+# after the sweep (15 windows; 14 in the degrade design)
+$PY derive.py ../runs/<w1> ... ../runs/<w15> --csv-dir tables/
+$PY score.py ../runs/<w1> ... ../runs/<w15> --out-dir results/ [--effort-log effort.jsonl]
+# synthetic dry run of the chain: T1 + the recommended sweep under a chosen worker truth
+$PY synth.py --v5 --family usl --set p=0.01 --seed 1 --out /tmp/synth-v5
+```
+
+Post-hoc effort log (`--effort-log`, PLAN-v5 question 5): one JSON object per line,
+`{"run_id", "task", "head", "effort": "max", "verdict": "approve|request_changes|error", "duration_s", "hidden_passed": true|false|null}`;
+`hidden_passed` is the hidden-test result of a post-hoc run on that head (needed for heads the live review rejected,
+which never reached the merge queue). Keyed by (run_id, head, effort); rows that match no live review are counted and
+reported. Descriptive only.
+
+## How to run each step (PLAN-v4, superseded; add `--plan v4` to predict.py and score.py)
 
 ```sh
 # 0. Before anything is spent: the self-test (about 1-2 min on 10 cores; --quick for about 20 s)
-$PY selftest.py                      # -> selftest-output/SELFTEST.md, selftest.json, example-synthetic/
+$PY selftest.py                      # -> selftest-output/SELFTEST.md, selftest.json, example-synthetic-v4/
 
 # 1. Every run directory, as soon as it is written (and on the dry run's logs)
 $PY validate_schema.py ../runs/<run_id>
@@ -42,7 +71,7 @@ $PY derive.py --pilot ../runs/<T1> ../runs/<T2-1> ... ../runs/<T2-8> --out pilot
 #    (refuses runs whose kind is not trial / pilot; --allow-nonlive only for a dry run of the chain)
 
 # 3. Point predictions and the pre-registration table (PLAN-v4 defaults: N = 1 and 12, 3 x 120 min, `completion`)
-$PY predict.py --pilot pilot.json --calibration calibration.jsonl --task-supply <tasks in TASKS.json> \
+$PY predict.py --plan v4 --pilot pilot.json --calibration calibration.jsonl --task-supply <tasks in TASKS.json> \
     --burn <$ per session-hour> --balance <credits left, $> --md prediction.md --json prediction.json
 #    --calibration: the calibration-review log (below), read for abort rule 4 only
 #    (by hand: --lambda-pilot --n-pilot --V --b-review --b-hidden [--b-other] --r0 --completion --ci-time-min)
@@ -51,7 +80,7 @@ $PY predict.py --pilot pilot.json --calibration calibration.jsonl --task-supply 
 # 4. After the six sweep windows (ABBAAB)
 $PY validate_schema.py ../runs/<w1> ... ../runs/<w6>
 $PY derive.py ../runs/<w1> ... ../runs/<w6> --csv-dir tables/     # per-window, per-PR, per-approval CSVs
-$PY score.py --pilot pilot.json ../runs/<w1> ... ../runs/<w6> --out-dir results/
+$PY score.py --plan v4 --pilot pilot.json ../runs/<w1> ... ../runs/<w6> --out-dir results/
 #    -> results/RESULTS-draft.md, results/results.json (defaults: --rival-rework completion,
 #       --escape-model logit_cluster_task)
 
@@ -78,7 +107,7 @@ Before T2:
    check; Vdur conditional on `review_cv_ok`; S3, O3, Vratio, S1r, S2r, RANK, ESC, COLL, BOUNCE descriptive,
    with the rules in the RESULTS table's "Detail" column.
 4. `selftest-output/SELFTEST.md` and `selftest.json`, and the synthetic example in
-   `selftest-output/example-synthetic/` (pilot, prediction table and RESULTS-draft with every result
+   `selftest-output/example-synthetic-v4/` (pilot, prediction table and RESULTS-draft with every result
    graded).
 5. The operating characteristics (`common.V4_OC`, printed by `predict.py`), recomputed for v4.1 by
    `design-search/oc_v41.py` and tabulated in `../OPERATING-CHARACTERISTICS.md` (PLAN-v4.1 section 6.8); they
@@ -161,7 +190,7 @@ solutions, false-reject rate on references, review-time CV and error count are p
 
 Decisions 1-18 were made for PLAN-v3; those marked *superseded* no longer apply to the pre-registered
 (PLAN-v4) path. Decisions 19-29 were made for PLAN-v4, 30-34 for its section 6 amendments (v4.1), 35-38 for
-its section 7 (v4.2).
+its section 7 (v4.2), 39-43 for the session-per-task worker model, 44-53 for PLAN-v5.
 
 1. **Warm-up and finished.** Finished counts only changes first submitted after the warm-up (as the
    review's simulation did); a warm-up change merged later is not counted.
@@ -365,7 +394,64 @@ its section 7 (v4.2).
     lambda under the session model directly, so the predictions use the right lambda; the OC tables assume the
     old worker model.
 
-## Self-test results (300 replicates per cell; full tables in `selftest-output/SELFTEST.md`)
+44. **Collision exposure j (PLAN-v5, derive.py).** With a 10-30 s reviewer and a ~2 s merge queue, a submitted change is
+    in flight for well under a minute unless it bounces, so the logged k is 0-3 even at N = 12 and says little about
+    collisions. A change is exposed to every merge between its branch point and its rebase. Per PR: `j` = merges of
+    other tasks after the change's base and up to its first `rebase` event; base = its `session_launch` (older logs:
+    its first `claim`), moved to the last rework `session_message` before that rebase (the rework prompt says to merge
+    origin/main); `jm` = those of the j whose task's first-submit files overlap this change's; `collided_first` = that
+    first rebase conflicted, or its `tests_post` failed hidden tests (an `integration_failure` bounce on the same head).
+    Changes that never reached a rebase have j = None and are left out of COLL. All from logged events; the schema is
+    unchanged.
+45. **derive.py additions (v5).** `mq_util` (merge queue busy share of the counted window, from queue_busy/idle),
+    `review_s_mean`, `collisions_first`, `j_mean`, and a `reviews` table (every review_end: run_id, task, head,
+    attempt_no, verdict, duration_s) for the effort comparison. Nothing existing changed.
+46. **SCALE (primary, confirmatory).** finished_w ~ NB(theta x h_w x N_w^(1 + gamma)), h_w = slot-open hours after
+    warm-up / N (window hours net of slot down-time), CV fixed at 0.3 as in v4; one-sided LR test of gamma < 0;
+    BEND iff p < 0.05. The per-agent ratio N_high : N_low with a profile 95% interval is reported beside it, and the
+    test is repeated without windows flagged for running out of tasks (SCALE-nf). CV-estimated and Welch versions are
+    reported as sensitivity (DESIGN-SEARCH-v5 section 3: the fixed-CV test has the most power and false alarm 0.02-0.04
+    at true CV <= 0.3, about 0.1 at CV 0.5).
+47. **No pilot; free levels (FAMILY).** Each rival's shape g_R(N) (linear N; Amdahl; USL; Carnot uncapped = USL x
+    (1 - p)^(N - 1), p = 0.005) with its own level fitted to all sweep windows, NB CV 0.3. Pilot-anchored levels (v4)
+    were worse at every pilot size in the design search, and no v5 test needs a pilot quantity. A pilot.json given to
+    score.py adds a pilot-anchored reading, descriptive only. Ties are reported, as in v4.
+48. **ESC and ESC-N.** Over approvals with a hidden_pre result (derive's approval rows): the rate with Wilson and
+    task-clustered (logit intercept, cluster-robust SE) 95% intervals; ESC-N = logistic on (N - 1)/(N_max - 1), one-sided
+    LR, modelled with >= 8 escapes. Integration failures are the collision channel (COLL), not escapes.
+49. **COLL.** Logistic collided_first ~ j, no window effects (at N = 1 j is 0-1, so the size contrast is information
+    and no other mechanism produces a rebase conflict), one-sided LR, modelled with >= 3 collisions, else coded
+    NOT-DETECTED; p-hat from common.collision_fit with one s; COLL-m adds jm; COLL-k is study 1's H1 on the logged k, m.
+50. **Grades (PLAN-v5 section 5, v5.GRADES_V5).** SCALE and SCALE-nf confirmatory (primary); COLL confirmatory
+    (secondary); ESC-N, ESC, FAMILY, UTIL, COLL-m, COLL-k, LAMBDA, BOUNCE, EFFORT descriptive. Order `v5.V5_ORDER`.
+    There is no conditional grade and no review-capped rival in v5.
+51. **CLI defaults switched to v5.** `score.py` and `predict.py` default to `--plan v5`; the v4 paths are unchanged
+    behind `--plan v4` (score.py then requires `--pilot`). The Python function `score.score()` keeps its v4 default
+    so the v4 design-search scripts and self-test parts reproduce; v5 callers use `v5.score_v5`.
+52. **synth.py v5 process.** New Truth fields (defaults leave v4 and its random streams unchanged): `service_dist`
+    (uniform 10-30 s), `collision_model` (`inflight` = v4; `lifetime` = p per other change merged since the base;
+    `census` = a fixed pair-conflict graph, synthetic or from a private `pairs_json`, of which only `files` and
+    `textual_conflicts` are read and nothing is written out), `integration_bg`, `escape_N` / `escape_k` (reviewer miss
+    probability rising with N or k), `file_zipf`, `files_per_task`. `V5_TRUTH` / `make_truth_v5` hold the v5 process,
+    `V5_FAMILIES` the worker truths, `v5_order` the sweep order; `synth.py --v5 [--family F] [--reps-v5 1=12 12=3]`
+    writes T1 plus the sweep. T1 in v5: one slot for 30 min, then twelve for 30 min.
+53. **Operating characteristics (v5).** `design-search/oc_v5.py` (2000 studies per cell) -> `oc_v5.json`, tabulated
+    in `../OPERATING-CHARACTERISTICS-v5.md`; `v5.V5_OC` holds those figures and predict.py / score.py print them.
+
+## Self-test results, PLAN-v5 (part W and unit_v5; `selftest-output/SELFTEST.md`)
+
+All 91 unit and end-to-end checks pass, the v4 ones (now run with `--plan v4`) and 19 new v5 ones: collision exposure
+j / jm / collided_first and merge-queue utilisation on a hand-built session log (validated), SCALE and FAMILY on
+constructed counts, ESC and COLL on constructed rows (a planted p = 0.03 is detected and its interval covers it;
+background failures are not), the effort log (reader, refusals, a comparison in which max effort catches every escape),
+and the v5 CLI end to end (synth --v5 -> validate -> score, default v5, with every grade, role and the order ->
+predict, default v5, with no pilot input). `selftest-output/example-synthetic/` holds one synthetic v5 RESULTS-draft,
+results.json and prediction.md. Part W (300 studies per cell at the recommended design) agrees with
+OPERATING-CHARACTERISTICS-v5.md within simulation error: SCALE false alarm 0.03 (0.12 at window CV 0.5), power 0.92 /
+1.00 / 1.00 under Amdahl / USL / Carnot; ESC-N 0.77 against a doubling; COLL 0.56 / 0.85 at p = 0.01 / 0.02 with
+false alarms 0.01-0.05; p-hat intervals cover 0.96-0.98.
+
+## Self-test results, PLAN-v4 (300 replicates per cell; full tables in `selftest-output/SELFTEST.md`)
 
 All unit and end-to-end checks pass (60 before the session-per-task change, plus 12 for sessions: decisions
 39-43, a hand-built session log, the validator's slot checks, `--pilot` refusing T0, and synth --sessions end to end), including the v4.2 grades, order (O2 first), roles and footnote (decisions 35-37), the grace-end V correction (a hand-built log with a
@@ -375,7 +461,7 @@ reader (JSONL and CSV, job versions, invalid rows refused) and abort rule 4 usin
 EVALUATED without a log), derive --pilot refusing a non-live run, the clogit likelihood no longer failing when
 one row dominates a stratum (decision 34), predict.py's v4 output (no REDESIGN_*, all four rivals at N = 1 and
 12, the OC statement), `--v3-gate` kept as SUPERSEDED, a grade on every result, Vdur the only conditional result
-and its grade following `review_cv_ok`, and no combined V result. `selftest-output/example-synthetic/` has one
+and its grade following `review_cv_ok`, and no combined V result. `selftest-output/example-synthetic-v4/` has one
 synthetic v4 pilot, prediction table and RESULTS-draft.
 
 Part V (the design point, 300 studies per cell) agrees with the pre-registered operating characteristics

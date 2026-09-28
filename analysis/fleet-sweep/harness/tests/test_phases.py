@@ -26,7 +26,7 @@ def test_shipped_phase_configs_match_their_phase(phase, fname):
     assert cfg.run.worker_model == "claude-haiku-4-5" and cfg.run.reviewer_model == "claude-opus-5-5"
     assert cfg.repo.base_ref == "sandbox-v1" and cfg.repo.remote_url.endswith("tombaldwin/carnot-sandbox.git")
     assert cfg.reviewer.job == "checkout" and cfg.reviewer.verified is True   # CLI checked 2026-09-28
-    assert cfg.launcher.mode == "manual" and not cfg.launcher.verified and not cfg.launcher.followup_verified
+    assert cfg.launcher.mode == "manual" and not cfg.launcher.verified and cfg.launcher.followup_verified   # T0 verified the follow-up; launch waits for the T0 repeat
     assert cfg.run.task_timeout_min == 25 and cfg.run.task_budget_min == 20
 
 
@@ -36,8 +36,8 @@ def test_phase_files_differ_only_in_run():
     for p, d in data.items():
         assert {k: v for k, v in d.items() if k != "run"} == ref, p
     shapes = {p: (d["run"]["kind"], d["run"]["n_workers"], d["run"]["window_min"]) for p, d in data.items()}
-    assert shapes == {"t0": ("trial", 1, 20), "t1": ("trial", 12, 60), "t2": ("pilot", 1, 60),
-                      "sweep-n1": ("sweep", 1, 120), "sweep-n12": ("sweep", 12, 120)}
+    assert shapes == {"t0": ("trial", 1, 45), "t1": ("trial", 12, 60), "t2": ("pilot", 1, 60),
+                      "sweep-n1": ("sweep", 1, 90), "sweep-n12": ("sweep", 12, 90)}
     assert data["t0"]["run"]["first_task"] == "T145" and data["t0"]["run"]["probe_followup"] is True
     assert all(d["run"]["first_task"] == "" and d["run"]["probe_followup"] is False for p, d in data.items() if p != "t0")
     assert not (HERE / "config.toml").exists()     # the PLAN-v3 defaults are gone
@@ -68,7 +68,7 @@ def _write(tmp_path, fname, **run):
 @pytest.mark.parametrize("fname,field,value", [
     ("config.t2.toml", "kind", "sweep"),          # a T2 window run as a sweep would never enter the pilot
     ("config.t2.toml", "n_workers", 3),
-    ("config.sweep-n12.toml", "window_min", 90),
+    ("config.sweep-n12.toml", "window_min", 120),
     ("config.sweep-n1.toml", "worker_model", "claude-sonnet-5"),
     ("config.t1.toml", "start_schedule", [[0, 12]]),
     ("config.t2.toml", "phase", "t3"),
@@ -90,7 +90,7 @@ def test_run_prints_banner_and_needs_confirmation(tmp_path, capsys, monkeypatch)
     rc = cli.main(["run", "--config", str(p), "--run-id", "x"])
     out = capsys.readouterr()
     assert rc == 2 and "not confirmed" in out.err
-    for s in ("phase sweep-n12", "kind           sweep", "N (slots)      12", "window         120 min", "timeout 25 min",
+    for s in ("phase sweep-n12", "kind           sweep", "N (slots)      12", "window         90 min", "timeout 25 min",
               "claude-haiku-4-5", "claude-opus-5-5", "sandbox-v1"):
         assert s in out.out, s
     monkeypatch.setattr(cli, "input_fn", lambda prompt: "sweep-n12")
@@ -108,7 +108,7 @@ def test_run_refuses_unverified_command_launcher(tmp_path, capsys):
     p.write_text(p.read_text().replace('mode = "manual"', 'mode = "command"'))
     with pytest.raises(SystemExit) as ei:
         cli.main(["run", "--config", str(p), "--run-id", "x", "--yes"])
-    assert "UNVERIFIED" in str(ei.value) and "followup_command" in str(ei.value)
+    assert "UNVERIFIED" in str(ei.value) and "launch_command" in str(ei.value)
 
 
 def test_start_schedule_starts_groups_at_their_minute(tmp_path):

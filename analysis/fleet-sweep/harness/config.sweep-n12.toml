@@ -9,7 +9,7 @@
 phase = "sweep-n12"
 kind = "sweep"
 n_workers = 12
-window_min = 120
+window_min = 90
 warmup_min = 10
 grace_min = 10
 start_schedule = []
@@ -20,7 +20,7 @@ probe_followup = false
 task_order_seed = 1234          # pass --seed per window to `reset`; the seed used is recorded
 worker_model = "claude-haiku-4-5"     # Haiku 4.5 (model id string UNVERIFIED)
 reviewer_model = "claude-opus-5-5"    # Opus 5.5 (model id string UNVERIFIED)
-output_dir = "../runs"          # -> analysis/fleet-sweep/runs/<run_id>/
+output_dir = "/Users/tom/git/carnot-sandbox-tasks/work/runs"   # private until the study ends (review reasons describe tasks)
 poll_interval_s = 15
 end_grace_early_when_idle = false   # real windows always run the full grace period
 grace_reviews = true            # reviews of already-submitted changes continue during grace
@@ -74,12 +74,12 @@ launch_dir = "/Users/tom/git/carnot-sandbox-tasks/work/launch"   # local clone w
 # Documented: `claude --cloud "<prompt>"` clones this directory's GitHub remote at the current branch and does
 # not return at once. UNVERIFIED (T0): the output, the session id, how to detach.
 # Placeholders: {prompt} {prompt_file} {model} {name} {run_id} {slot} {task}
-launch_command = ["claude", "--cloud", "{prompt}", "--model", "{model}", "--name", "{name}"]
-session_id_regex = "(?P<session_id>session_[A-Za-z0-9]{8,})"   # UNVERIFIED
-detach = "on_id"                # UNVERIFIED: on_id | after_s | exit
+launch_command = ["script", "-q", "/dev/null", "claude", "--cloud", "{prompt}", "--model", "{model}", "--name", "{name}"]   # T0: --cloud needs a TTY
+session_id_regex = "(?P<session_id>session_[A-Za-z0-9]{8,})"   # T0: matches "View: https://claude.ai/code/session_..."
+detach = "exit"                 # T0: the CLI exits by itself ~9 s after printing the session URL
 detach_after_s = 120
 launch_timeout_s = 600
-detach_signal = "none"          # UNVERIFIED: none | int | term (what to do with a CLI still running after detach)
+detach_signal = "none"          # T0: not needed
 launch_retries = 1
 # Documented: `claude -p "<message>" --cloud <session-id>` queues a message and exits without waiting. UNVERIFIED
 # in this harness until T0. Placeholders: {message} {message_file} {session_id} {slot} {task}
@@ -88,7 +88,7 @@ followup_stdin = false
 followup_timeout_s = 120
 stop_command = []               # none documented
 verified = false
-followup_verified = false
+followup_verified = true   # T0: claude -p "<msg>" --cloud <id> returns in ~5 s, exit 0, reaches an idle session
 worker_prompt = "prompts/worker.md"
 rework_prompt = "prompts/rework.md"
-prompt_dir = ""                 # FILL IN: a PRIVATE dir ("" = session-prompts/ beside [tasks] task_file); never this repo
+prompt_dir = "/Users/tom/git/carnot-sandbox-tasks/work/prompts"   # private (work/ is gitignored in the tasks repo)

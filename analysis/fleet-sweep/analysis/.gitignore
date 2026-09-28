@@ -1,3 +1,5 @@
 __pycache__/
 *.pyc
 selftest-output/**/runs/
+design-search/v5_stageA.json
+design-search/v5_stageB.json

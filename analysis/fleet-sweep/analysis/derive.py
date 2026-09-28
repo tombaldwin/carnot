@@ -156,6 +156,10 @@ def derive_window(run, events, supply=None, supply_source=None):
     first_claim_task = {}     # task -> first claim (branch first pushed)
     timeouts = []             # (t, task)
     rework_msgs = []          # (t, task)
+    rebases = defaultdict(list)   # task -> [(t, head, conflict)] (PLAN-v5 collision exposure)
+    merge_list = []           # (t, task) of every merge
+    q_iv = []                 # merge-queue busy intervals
+    q_since = None
 
     def task_row(task):
         if task not in tasks:
@@ -257,6 +261,15 @@ def derive_window(run, events, supply=None, supply_source=None):
                 busy_since = None
         elif typ == "hidden_pre":
             hidden_pre[e["head"]] = (t, e["passed"])
+        elif typ == "rebase":
+            rebases[e["task"]].append((t, e["head"], bool(e["conflict"])))
+        elif typ == "queue_busy":
+            if q_since is None:
+                q_since = t
+        elif typ == "queue_idle":
+            if q_since is not None:
+                q_iv.append((q_since, t))
+                q_since = None
         elif typ == "tests_post":
             tests_post[e["head"]] = (t, e["visible_passed"], e["hidden_passed"])
         elif typ == "bounce":
@@ -269,9 +282,12 @@ def derive_window(run, events, supply=None, supply_source=None):
                 row["merge_t"], row["merge_head"] = t, e["head"]
             merges[e["head"]] = t
             mq_outcome[e["head"]] = (t, "merge")
+            merge_list.append((t, e["task"]))
 
     if busy_since is not None:
         busy_iv.append((busy_since, end_all))
+    if q_since is not None:
+        q_iv.append((q_since, end_all))
     for w, t0 in worker_alive.items():
         worker_iv[w].append((t0, we))
     for sl, t0 in slot_busy_since.items():
@@ -386,6 +402,35 @@ def derive_window(run, events, supply=None, supply_source=None):
             finished=merged_green, status=status, resolved=bool(bounced or merged_green),
             merge_min=row["merge_t"] / 60 if row["merge_t"] is not None else None))
 
+    # ------------------------------------------------------------------ collision exposure (PLAN-v5, decision 44)
+    # j = merges of other tasks between this change's base and its first rebase in the merge queue. Base = its
+    # session's launch or the last rework message before that rebase (the rework prompt says to merge origin/main),
+    # for older logs the branch first seen (claim). jm = those of the j that share a file with this change.
+    # collided_first = that first rebase conflicted, or its tests_post failed hidden tests (integration failure).
+    task_files = {task: set(row["submits"][0]["files"]) for task, row in tasks.items() if row["submits"]}
+    int_fail_heads = {b["head"] for row in tasks.values() for b in row["bounces"] if b["cause"] == "integration_failure"}
+    msgs_all = defaultdict(list)
+    for t, task in rework_msgs:
+        msgs_all[task].append(t)
+    exposure = {}
+    for task, rb in rebases.items():
+        t_r, head_r, conflict = min(rb, key=lambda x: x[0])
+        cands = [launch_t.get(task), first_claim_task.get(task)]
+        base0 = next((c for c in cands if c is not None), None)
+        if base0 is None:
+            continue
+        base = max([base0] + [m for m in msgs_all.get(task, []) if m < t_r])
+        others = [tk for tm, tk in merge_list if base < tm <= t_r and tk != task]
+        fs = task_files.get(task, set())
+        exposure[task] = dict(j=len(others), jm=sum(1 for tk in others if fs & task_files.get(tk, set())),
+                              collided_first=bool(conflict or head_r in int_fail_heads),
+                              t_first_rebase_min=t_r / 60, base_min=base / 60)
+    for p in prs:
+        ex = exposure.get(p["task"])
+        p["j"] = ex["j"] if ex else None
+        p["jm"] = ex["jm"] if ex else None
+        p["collided_first"] = ex["collided_first"] if ex else None
+
     appr_rows = []
     for r in approvals:
         if r["head"] not in hidden_pre:
@@ -448,6 +493,10 @@ def derive_window(run, events, supply=None, supply_source=None):
         review_open_at_end=open_at_end, busy_clipped_min=busy_clipped_s / 60,
         review_durations_s=durations, review_time_cv=_cv(durations),
         reviewer_util=util, queue_nonempty_share=nonempty / span, mean_waiting_depth=area / span,
+        mq_util=(sum(_overlap(a, b, warm, we) for a, b in q_iv) / max(we - warm, 1e-9)) if q_iv else (0.0 if not merge_list else math.nan),
+        review_s_mean=(sum(durations) / len(durations)) if durations else math.nan,
+        collisions_first=sum(1 for x in exposure.values() if x["collided_first"]), n_exposure=len(exposure),
+        j_mean=(sum(x["j"] for x in exposure.values()) / len(exposure)) if exposure else math.nan,
         bounces={c: bounces.get(c, 0) for c in BOUNCE_CAUSES}, bounces_total=tot_b,
         b_review=bounces.get("review", 0) / n_rev if n_rev else math.nan,
         b_hidden=(bounces.get("escaped_defect", 0) + bounces.get("integration_failure", 0)) / n_ar if n_ar else math.nan,
@@ -482,7 +531,9 @@ def derive_window(run, events, supply=None, supply_source=None):
         max_restarts=max(restarts.values()) if restarts else 0,
         void_worker_restarts=(max(restarts.values()) if restarts else 0) > 2,
     )
-    return dict(summary=s, prs=prs, approvals=appr_rows)
+    review_rows = [dict(run_id=run["run_id"], n_workers=run["n_workers"], task=r["task"], head=r["head"],
+                        attempt_no=r["attempt_no"], verdict=r["verdict"], duration_s=r["duration_s"]) for r in reviews]
+    return dict(summary=s, prs=prs, approvals=appr_rows, reviews=review_rows)
 
 
 def _phase(run):

@@ -1,8 +1,21 @@
 #!/usr/bin/env python3
-"""Primary analysis of the fleet sweep, coded to PLAN-v4 section 1.
+"""Primary analysis of the fleet sweep. Default: PLAN-v5 (v5.py); `--plan v4` / `--plan v3`: the superseded codings.
 
-    python score.py --pilot pilot.json runs/<w1> ... runs/<w6> --out-dir results/
-        # writes results/results.json and results/RESULTS-draft.md
+    python score.py runs/<w1> ... runs/<w11> --out-dir results/ [--effort-log effort.jsonl] [--pilot pilot.json]
+        # PLAN-v5: writes results/results.json and results/RESULTS-draft.md
+    python score.py --plan v4 --pilot pilot.json runs/<w1> ... runs/<w6> --out-dir results/     # PLAN-v4.2
+
+PLAN-v5 (review automated and fast; no review-capped rival), graded in advance (PLAN-v5 section 5, v5.GRADES_V5):
+  SCALE [confirmatory, primary]      per-agent finished output falls with N: one-sided NB LR test (CV 0.3) of gamma < 0
+                                     in finished ~ theta x slot-hours x N^gamma; also without supply-flagged windows
+                                     (SCALE-nf).
+  COLL [confirmatory, secondary]     collisions (rebase conflict or integration failure on a change's first merge-queue
+                                     pass) rise with j, the merges of other changes since the change's base; one-sided LR.
+  ESC-N, ESC, FAMILY, UTIL, COLL-m, COLL-k, LAMBDA, BOUNCE, EFFORT [descriptive]; see v5.py.
+--pilot is optional in v5 (a pilot-anchored rival reading, descriptive); --effort-log reads the post-hoc max-effort
+re-review (format: v5.load_effort_log).
+
+PLAN-v4 (`--plan v4`), coded to PLAN-v4 section 1:
 
 Reads the sweep windows (two sizes, any order; PLAN-v4: three at N = 1 and three at N = 12) and the
 pre-registered pilot parameters (pilot.json, including the flag `review_cv_ok`). Every result carries a
@@ -1116,23 +1129,33 @@ def render_md_v4(R):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("runs", nargs="+", help="sweep window run directories")
-    ap.add_argument("--pilot", required=True, help="pilot.json (the pre-registered one)")
+    ap.add_argument("--pilot", default=None, help="pilot.json (required for --plan v4 / v3; optional, descriptive in v5)")
+    ap.add_argument("--effort-log", default=None, help="v5: post-hoc effort re-review JSONL (v5.load_effort_log)")
     ap.add_argument("--out-dir", default=".")
     ap.add_argument("--rival-rework", choices=list(READINGS), default=PLAN_V4["rival_rework"])
     ap.add_argument("--escape-model", choices=ESCAPE_MODELS, default=PLAN_V4["escape_model"])
-    ap.add_argument("--plan", choices=["v4", "v3"], default="v4",
-                    help="v3 = the superseded PLAN-v3 codings (design search only)")
+    ap.add_argument("--plan", choices=["v5", "v4", "v3"], default="v5",
+                    help="v5 (default): PLAN-v5; v4: the superseded PLAN-v4.2 codings; v3: PLAN-v3 (design search only)")
     a = ap.parse_args()
-    pilot = json.loads(Path(a.pilot).read_text())
     derived = [derive_dir(r) for r in a.runs]
     bad = [d["summary"]["run_id"] for d in derived if d["summary"]["kind"] != "sweep"]
     if bad:
         print(f"warning: non-sweep runs scored: {bad}", file=sys.stderr)
-    R = score(derived, pilot, rival_rework=a.rival_rework, escape_model=a.escape_model, plan=a.plan)
+    if a.plan == "v5":
+        import v5
+        pilot = json.loads(Path(a.pilot).read_text()) if a.pilot else None
+        effort = v5.load_effort_log(a.effort_log) if a.effort_log else None
+        R = _clean(v5.score_v5(derived, pilot=pilot, effort_rows=effort))
+        md = v5.render_md_v5(R)
+    else:
+        if not a.pilot:
+            raise SystemExit(f"--plan {a.plan} needs --pilot pilot.json")
+        pilot = json.loads(Path(a.pilot).read_text())
+        R = score(derived, pilot, rival_rework=a.rival_rework, escape_model=a.escape_model, plan=a.plan)
+        md = render_md(R)
     out = Path(a.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     (out / "results.json").write_text(json.dumps(R, indent=2, default=float) + "\n")
-    md = render_md(R)
     (out / "RESULTS-draft.md").write_text(md)
     print(md)
 

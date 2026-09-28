@@ -1,7 +1,22 @@
 #!/usr/bin/env python3
-"""Point predictions for the four rivals at PLAN-v4's fixed sizes, and the pre-registration table.
+"""Point predictions and the pre-registration table. Default: PLAN-v5; `--plan v4` gives the superseded PLAN-v4 table.
 
-    python predict.py --pilot pilot.json --md prediction.md --json prediction.json
+PLAN-v5 (the default; v5.py holds the codings):
+
+    python predict.py --md prediction.md --json prediction.json                   # the recommended design, assumptions
+    python predict.py --lambda-pilot 5.4 --completion 0.88 --burn 2.3 --balance 236 --task-supply 220
+    python predict.py --sizes 1 12 --reps-v5 1=6 12=2 --burn 3.1 --balance 236    # the degrade design
+
+  The rivals are linear, Amdahl (alpha), USL (alpha, beta) and Carnot uncapped (USL x (1 - p)^(N - 1)); none is
+  review-capped (the reviewer runs at 10-30 s per change). What SCALE and FAMILY test is each rival's ratio
+  finished(N) / finished(1) = g_R(N), which needs no pilot: every rival's level is fitted to the sweep's own windows.
+  lambda (per slot-hour) and completion (from T1, or the design assumptions 6 and 0.9) only turn the ratios into
+  illustrative counts, reviewer / merge-queue utilisation and the task-supply check. Also printed: the design's
+  session-hours and cost at the given burn, the degrade rule, the abort rules and the operating characteristics.
+
+PLAN-v4 (superseded; `--plan v4`, unchanged below):
+
+    python predict.py --plan v4 --pilot pilot.json --md prediction.md --json prediction.json
     python predict.py --pilot pilot.json --burn 2.10 --balance 240     # adds abort rule 5 (credits)
     python predict.py --lambda-pilot 7 --n-pilot 1 --V 14 --b-review 0.25 --b-hidden 0.1 --r0 0.3 \
                       --completion 0.7 --ci-time-min 0.5              # parameters by hand
@@ -572,20 +587,138 @@ def to_markdown_v4(P: Params, pred, pilot, ar4, credits=None):
     return "\n".join(L)
 
 
+# ---------------------------------------------------------------------- PLAN-v5
+def to_markdown_v5(rows, design, cost, cost15, degrade, credits, a):
+    import v5
+    L = ["## Point predictions and design (pre-registration, PLAN-v5)\n"]
+    sizes = design["sizes"]
+    reps = design["reps"]
+    L.append(f"Design (PLAN-v5 section 5): N = {', '.join(str(n) for n in sizes)}; windows " +
+             ", ".join(f"{reps.get(n, 0)} at N = {n}" for n in sizes) + f", {design['window_min']:g} min each "
+             f"({a.warmup_min:g} min warm-up, 10 min grace), order {v5_order_txt(sizes, reps)}. No T2 pilot: every rival's "
+             "level is fitted to the sweep's own windows (so its N = 1 windows anchor it); T1 checks throttling only. "
+             f"Constants alpha = {a.alpha}, beta = {a.beta}, p = {a.p}; over-dispersion CV {CV_OVERDISPERSION} per window.\n")
+    L.append("### Budget\n")
+    L.append("| | session-hours | at the given burn | at 1.5x |\n|---|---|---|---|")
+    L.append(f"| T0 + T1 + sweep | {cost['t1_session_hours'] + cost['sweep_session_hours']:.1f} (+ T0 ~$1) | ${cost['total_usd']:.0f} "
+             f"at ${cost['burn']:.2f}/h | ${cost15['total_usd']:.0f} |")
+    L.append(f"| degrade design ({', '.join(f'{v} x N = {k}' for k, v in degrade['reps'].items())}) | "
+             f"{degrade['cost']['t1_session_hours'] + degrade['cost']['sweep_session_hours']:.1f} | ${degrade['cost']['total_usd']:.0f} | "
+             f"${degrade['cost15']['total_usd']:.0f} |")
+    if credits:
+        L.append(f"\nCredits: balance ${credits['balance']:.0f}; the full sweep ({cost['sweep_session_hours']:.0f} session-h x "
+                 f"${credits['burn']:.2f}) leaves ${credits['after_full']:.0f}, the degrade sweep ${credits['after_degrade']:.0f} "
+                 f"(floor $50) -> **{credits['decision']}**.")
+    L.append("\n### What each rival predicts (finished per window relative to N = 1; no pilot needed)\n")
+    L.append("| Rival | " + " | ".join(f"N = {n}: ratio to 1 | per agent" for n in sizes) + " |")
+    L.append("|---|" + "---|---|" * len(sizes))
+    for r in v5.RIVALS_V5:
+        rr = {x["N"]: x for x in rows if x["rival"] == r}
+        L.append(f"| {v5.RIVAL_LABEL_V5[r]} | " + " | ".join(f"{rr[n]['ratio_to_1']:.2f} | {rr[n]['per_agent_ratio']:.2f}" for n in sizes) + " |")
+    L.append(f"\nSCALE (confirmatory, primary) reads BEND iff the one-sided LR test of per-agent output falling with N gives p < 0.05. "
+             "Linear predicts a per-agent ratio of 1 (LINEAR-NOT-REJECTED); every other rival predicts BEND.\n")
+    L.append(f"### Illustrative counts and loads (lambda {a.lam:.2f} per slot-hour, completion {a.comp:.2f}, b_review {a.b_review_v5:.2f}, "
+             f"review {a.review_s:.0f} s, merge queue {a.mq_s:.0f} s per change)\n")
+    L.append("| Rival | N | finished / window | 95% | windows | total | 95% | reviews /h | reviewer util | at 1.5x review time | merge-queue util | supply out at min |")
+    L.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
+    for x in rows:
+        tot = x["finished_total_95"] or [None, None]
+        L.append(f"| {v5.RIVAL_LABEL_V5[x['rival']]} | {x['N']} | {x['finished']:.1f} | {x['finished_95'][0]}-{x['finished_95'][1]} | "
+                 f"{x['windows']} | {x['finished_total']:.1f} | {tot[0]}-{tot[1]} | {x['reviews_per_hour']:.0f} | {x['reviewer_util']:.2f} | "
+                 f"{x['reviewer_util_slow']:.2f} | {x['mq_util']:.3f} | {'-' if x['supply_exhausted_min'] is None else round(x['supply_exhausted_min'])} |")
+    hi = max(sizes)
+    lin = next(x for x in rows if x["rival"] == "linear" and x["N"] == hi)
+    L.append(f"\nReviewer: a single serial call per change. Under linear workers at N = {hi} it would be busy about "
+             f"{lin['reviewer_util']:.0%} of the time ({lin['reviewer_util_slow']:.0%} if reviews take 1.5x as long): approaching "
+             "saturation, so UTIL is reported beside SCALE and a window with the reviewer busy >= 80% is flagged. The merge "
+             "queue stays below 5% busy under every rival.\n")
+    L.append("### Abort rules (PLAN-v5 section 5)\n")
+    for t in ABORT_V5:
+        L.append(f"- {t}")
+    L.append("")
+    L += v5.oc_statement_v5()
+    return "\n".join(L)
+
+
+def v5_order_txt(sizes, reps):
+    from synth import v5_order
+    return ", ".join(str(n) for n in v5_order(sizes, reps))
+
+
+ABORT_V5 = (
+    "Rule 1 (throttling, T1, unchanged from PLAN-v4 section 7.5): twelve-slot activity rate / one-slot rate < 0.8 -> stop and report T1.",
+    "Rule 2 (credits): burn = (M0 - M1) / T1 session-hours. Run the full design if the predicted balance after it is >= $50; "
+    "else the degrade design (the same without one N = 12 window) if that is; else stop and report T0/T1. Before every window "
+    "the predicted balance after the rest of the chosen design must stay >= $50; if not, drop the remaining N = 12 window(s) "
+    "first, then stop. An interrupted sequence is analysed as run (every test is defined for >= 1 window per size); an N = 12 "
+    "window is never run without at least two N = 1 windows before it.",
+    "Rule 3 (lambda floor): after the first two N = 1 sweep windows, pooled lambda < 3 first submissions per slot-hour (half the "
+    "dry runs' 6) -> stop before the first N = 12 window and report; the operating characteristics were computed down to "
+    "lambda -30%.",
+    "Rule 4 (review must not bind): reviewer utilisation >= 0.8 in an N = 12 window, or the mean review above 60 s -> the window "
+    "is flagged in UTIL and SCALE is reported with and without it (not a stop).",
+    "Rule 5 (merge queue): mean merge-queue time per change above 30 s (dry runs: about 2 s) -> stop and fix the harness before "
+    "the next window.",
+)
+
+
+def main_v5(a):
+    import v5
+    D = v5.DESIGN_V5
+    sizes = sorted(a.sizes) if a.sizes else list(D["sizes"])
+    reps = ({int(k): int(v) for k, v in (x.split("=") for x in a.reps_v5)} if a.reps_v5 else dict(D["reps"]))
+    wmin = a.window_min if a.window_min is not None else D["window_min"]
+    pilot = json.loads(Path(a.pilot).read_text()) if a.pilot else {}
+    a.lam = a.lambda_pilot if a.lambda_pilot is not None else pilot.get("lambda_pilot") or 6.0
+    a.comp = a.completion if a.completion is not None else pilot.get("completion") or 0.9
+    a.b_review_v5 = a.b_review if a.b_review is not None else pilot.get("b_review") or 0.3
+    rows = v5.predictions_v5(sizes, reps, wmin, a.warmup_min, a.lam, a.comp, a.b_review_v5, a.review_s, a.mq_s,
+                             a.alpha, a.beta, a.p, CV_OVERDISPERSION, a.task_supply)
+    burn = a.burn if a.burn is not None else D["burn_assumed"]
+    cost = v5.design_cost(sizes, reps, wmin, burn)
+    cost15 = v5.design_cost(sizes, reps, wmin, 1.5 * burn)
+    dg = D["degrade"]
+    degrade = dict(reps=dg["reps"], cost=v5.design_cost(dg["sizes"], dg["reps"], dg["window_min"], burn),
+                   cost15=v5.design_cost(dg["sizes"], dg["reps"], dg["window_min"], 1.5 * burn))
+    credits = None
+    if a.burn is not None and a.balance is not None:
+        full = a.balance - burn * cost["sweep_session_hours"]
+        deg = a.balance - burn * degrade["cost"]["sweep_session_hours"]
+        dec = ("run the full design" if full >= D["balance_floor_usd"] else
+               "run the degrade design" if deg >= D["balance_floor_usd"] else "stop: report T1")
+        credits = dict(burn=burn, balance=a.balance, after_full=full, after_degrade=deg, decision=dec)
+    design = dict(sizes=sizes, reps=reps, window_min=wmin)
+    md = to_markdown_v5(rows, design, cost, cost15, degrade, credits, a)
+    out = dict(plan="PLAN-v5", design=design, predictions=rows, cost=cost, cost_1_5x=cost15, degrade=degrade, credits=credits,
+               assumptions=dict(lambda_per_slot_hour=a.lam, completion=a.comp, b_review=a.b_review_v5, review_s=a.review_s,
+                                mq_s=a.mq_s, alpha=a.alpha, beta=a.beta, p=a.p),
+               abort_rules=list(ABORT_V5), operating_characteristics=v5.V5_OC)
+    print(md)
+    if a.md:
+        Path(a.md).write_text(md + "\n")
+    if a.json:
+        Path(a.json).write_text(json.dumps(out, indent=2, default=str) + "\n")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--plan", choices=["v5", "v4"], default="v5",
+                    help="v5 (default): PLAN-v5 predictions; v4: the superseded PLAN-v4 table (needs the v4 pilot inputs)")
+    ap.add_argument("--reps-v5", nargs="*", default=None, metavar="N=R", help="v5: windows per size, e.g. 1=8 12=3")
+    ap.add_argument("--review-s", type=float, default=20.0, help="v5: mean review seconds (calibration: 10-30 s)")
+    ap.add_argument("--mq-s", type=float, default=2.0, help="v5: merge-queue seconds per change (dry runs: about 2)")
     ap.add_argument("--pilot", help="pilot.json from derive.py --pilot")
     for k in ("lambda-pilot", "V", "b-review", "b-hidden", "b-other", "r0", "ci-time-min", "completion"):
         ap.add_argument(f"--{k}", type=float, default=None)
     ap.add_argument("--n-pilot", type=int, default=None)
-    ap.add_argument("--window-min", type=float, default=PLAN_V4["window_min"])
+    ap.add_argument("--window-min", type=float, default=None, help="window minutes (PLAN-v5: 90; PLAN-v4: 120)")
     ap.add_argument("--warmup-min", type=float, default=PLAN_V4["warmup_min"])
     ap.add_argument("--alpha", type=float, default=ALPHA)
     ap.add_argument("--beta", type=float, default=BETA)
     ap.add_argument("--p", type=float, default=P_COLLISION)
     ap.add_argument("--rival-rework", choices=["completion", "plan", "recovered"], default=PLAN_V4["rival_rework"])
-    ap.add_argument("--sizes", nargs="+", type=int, default=list(PLAN_V4["sizes"]),
-                    help="fleet sizes (PLAN-v4: 1 12)")
+    ap.add_argument("--sizes", nargs="+", type=int, default=None,
+                    help="fleet sizes (PLAN-v5 and PLAN-v4: 1 12)")
     ap.add_argument("--reps", type=int, default=PLAN_V4["reps"], help="windows per size (PLAN-v4: 3)")
     ap.add_argument("--task-supply", type=int, default=None, help="tasks per window (TASKS.json length), for the supply check")
     ap.add_argument("--calibration", default=None,
@@ -599,6 +732,10 @@ def main():
     ap.add_argument("--md", default=None)
     ap.add_argument("--json", default=None)
     a = ap.parse_args()
+    if a.plan == "v5":
+        return main_v5(a)
+    a.sizes = a.sizes or list(PLAN_V4["sizes"])
+    a.window_min = a.window_min if a.window_min is not None else PLAN_V4["window_min"]
     pilot = json.loads(Path(a.pilot).read_text()) if a.pilot else {}
     over = {"lambda_pilot": a.lambda_pilot, "V": a.V, "b_review": a.b_review, "b_hidden": a.b_hidden,
             "b_other": a.b_other, "r0": a.r0, "ci_time_min": a.ci_time_min, "n_pilot": a.n_pilot,
