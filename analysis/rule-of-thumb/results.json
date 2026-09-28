@@ -1,0 +1,498 @@
+{
+ "1": {
+  "1 per reviewer / share still read by people, max 3 per codebase": {
+   "near": 0.5495,
+   "lean": 0.9796,
+   "good": 0.5291,
+   "median_extra": -1.0,
+   "teams": 20000
+  },
+  "1 per reviewer / share still read by people, max 4 per codebase": {
+   "near": 0.754,
+   "lean": 0.93025,
+   "good": 0.6855,
+   "median_extra": 0.0,
+   "teams": 20000
+  },
+  "1 per reviewer / share still read by people, max 5 per codebase": {
+   "near": 0.8447,
+   "lean": 0.81835,
+   "good": 0.6709,
+   "median_extra": 0.0,
+   "teams": 20000
+  },
+  "1 per reviewer / share still read by people, max 6 per codebase": {
+   "near": 0.88015,
+   "lean": 0.6562,
+   "good": 0.5545,
+   "median_extra": 1.0,
+   "teams": 20000
+  },
+  "1 per reviewer / share still read by people, max 8 per codebase": {
+   "near": 0.857,
+   "lean": 0.5119,
+   "good": 0.44,
+   "median_extra": 1.0,
+   "teams": 20000
+  },
+  "1.5 per reviewer / share still read by people, max 3 per codebase": {
+   "near": 0.569,
+   "lean": 0.9467,
+   "good": 0.5157,
+   "median_extra": -1.0,
+   "teams": 20000
+  },
+  "1.5 per reviewer / share still read by people, max 4 per codebase": {
+   "near": 0.7798,
+   "lean": 0.8555,
+   "good": 0.64205,
+   "median_extra": 0.0,
+   "teams": 20000
+  },
+  "1.5 per reviewer / share still read by people, max 5 per codebase": {
+   "near": 0.86515,
+   "lean": 0.70415,
+   "good": 0.59715,
+   "median_extra": 1.0,
+   "teams": 20000
+  },
+  "1.5 per reviewer / share still read by people, max 6 per codebase": {
+   "near": 0.89255,
+   "lean": 0.49225,
+   "good": 0.43755,
+   "median_extra": 2.0,
+   "teams": 20000
+  },
+  "1.5 per reviewer / share still read by people, max 8 per codebase": {
+   "near": 0.82955,
+   "lean": 0.28565,
+   "good": 0.26665,
+   "median_extra": 3.0,
+   "teams": 20000
+  },
+  "2 per reviewer / share still read by people, max 3 per codebase": {
+   "near": 0.5702,
+   "lean": 0.9147,
+   "good": 0.4849,
+   "median_extra": -1.0,
+   "teams": 20000
+  },
+  "2 per reviewer / share still read by people, max 4 per codebase": {
+   "near": 0.77595,
+   "lean": 0.80185,
+   "good": 0.5917,
+   "median_extra": 0.0,
+   "teams": 20000
+  },
+  "2 per reviewer / share still read by people, max 5 per codebase": {
+   "near": 0.8534,
+   "lean": 0.63585,
+   "good": 0.53385,
+   "median_extra": 1.0,
+   "teams": 20000
+  },
+  "2 per reviewer / share still read by people, max 6 per codebase": {
+   "near": 0.87095,
+   "lean": 0.40855,
+   "good": 0.35995,
+   "median_extra": 2.0,
+   "teams": 20000
+  },
+  "2 per reviewer / share still read by people, max 8 per codebase": {
+   "near": 0.7823,
+   "lean": 0.1833,
+   "good": 0.17145,
+   "median_extra": 3.0,
+   "teams": 20000
+  },
+  "1 per reviewer, max 6 per codebase": {
+   "near": 0.67715,
+   "lean": 0.86915,
+   "good": 0.55105,
+   "median_extra": 0.0,
+   "teams": 20000
+  },
+  "2 per reviewer, max 6 per codebase": {
+   "near": 0.86175,
+   "lean": 0.5653,
+   "good": 0.4728,
+   "median_extra": 1.0,
+   "teams": 20000
+  },
+  "3 per reviewer, max 6 per codebase": {
+   "near": 0.8662,
+   "lean": 0.40675,
+   "good": 0.3483,
+   "median_extra": 2.0,
+   "teams": 20000
+  },
+  "always 3 per codebase": {
+   "near": 0.5705,
+   "lean": 0.87785,
+   "good": 0.44835,
+   "median_extra": -1.0,
+   "teams": 20000
+  },
+  "always 4 per codebase": {
+   "near": 0.7569,
+   "lean": 0.75025,
+   "good": 0.54065,
+   "median_extra": 0.0,
+   "teams": 20000
+  },
+  "always 5 per codebase": {
+   "near": 0.8084,
+   "lean": 0.57535,
+   "good": 0.47415,
+   "median_extra": 1.0,
+   "teams": 20000
+  },
+  "always 6 per codebase": {
+   "near": 0.8019,
+   "lean": 0.3396,
+   "good": 0.29195,
+   "median_extra": 2.0,
+   "teams": 20000
+  },
+  "always 8 per codebase": {
+   "near": 0.66715,
+   "lean": 0.1045,
+   "good": 0.09385,
+   "median_extra": 4.0,
+   "teams": 20000
+  },
+  "sizing formula (equations 1-2)": {
+   "near": 0.9872,
+   "lean": 0.62845,
+   "good": 0.61595,
+   "median_extra": 1.0,
+   "teams": 20000
+  }
+ },
+ "2": {
+  "1 per reviewer / share still read by people, max 3 per codebase": {
+   "near": 0.6135,
+   "lean": 0.90425,
+   "good": 0.52825,
+   "median_extra": 0.0,
+   "teams": 4000
+  },
+  "1 per reviewer / share still read by people, max 4 per codebase": {
+   "near": 0.71325,
+   "lean": 0.848,
+   "good": 0.57875,
+   "median_extra": 1.0,
+   "teams": 4000
+  },
+  "1 per reviewer / share still read by people, max 5 per codebase": {
+   "near": 0.76,
+   "lean": 0.79275,
+   "good": 0.575,
+   "median_extra": 1.0,
+   "teams": 4000
+  },
+  "1 per reviewer / share still read by people, max 6 per codebase": {
+   "near": 0.778,
+   "lean": 0.7415,
+   "good": 0.54425,
+   "median_extra": 1.0,
+   "teams": 4000
+  },
+  "1 per reviewer / share still read by people, max 8 per codebase": {
+   "near": 0.7795,
+   "lean": 0.6945,
+   "good": 0.5085,
+   "median_extra": 1.0,
+   "teams": 4000
+  },
+  "1.5 per reviewer / share still read by people, max 3 per codebase": {
+   "near": 0.6375,
+   "lean": 0.767,
+   "good": 0.44325,
+   "median_extra": 1.0,
+   "teams": 4000
+  },
+  "1.5 per reviewer / share still read by people, max 4 per codebase": {
+   "near": 0.7425,
+   "lean": 0.63575,
+   "good": 0.446,
+   "median_extra": 2.0,
+   "teams": 4000
+  },
+  "1.5 per reviewer / share still read by people, max 5 per codebase": {
+   "near": 0.7785,
+   "lean": 0.535,
+   "good": 0.414,
+   "median_extra": 2.0,
+   "teams": 4000
+  },
+  "1.5 per reviewer / share still read by people, max 6 per codebase": {
+   "near": 0.78825,
+   "lean": 0.43875,
+   "good": 0.347,
+   "median_extra": 3.0,
+   "teams": 4000
+  },
+  "1.5 per reviewer / share still read by people, max 8 per codebase": {
+   "near": 0.775,
+   "lean": 0.35825,
+   "good": 0.28375,
+   "median_extra": 4.0,
+   "teams": 4000
+  },
+  "2 per reviewer / share still read by people, max 3 per codebase": {
+   "near": 0.62625,
+   "lean": 0.677,
+   "good": 0.36875,
+   "median_extra": 1.0,
+   "teams": 4000
+  },
+  "2 per reviewer / share still read by people, max 4 per codebase": {
+   "near": 0.71775,
+   "lean": 0.5245,
+   "good": 0.35525,
+   "median_extra": 2.0,
+   "teams": 4000
+  },
+  "2 per reviewer / share still read by people, max 5 per codebase": {
+   "near": 0.73325,
+   "lean": 0.40275,
+   "good": 0.30625,
+   "median_extra": 3.0,
+   "teams": 4000
+  },
+  "2 per reviewer / share still read by people, max 6 per codebase": {
+   "near": 0.71725,
+   "lean": 0.28575,
+   "good": 0.2215,
+   "median_extra": 4.0,
+   "teams": 4000
+  },
+  "2 per reviewer / share still read by people, max 8 per codebase": {
+   "near": 0.67725,
+   "lean": 0.18425,
+   "good": 0.1395,
+   "median_extra": 6.0,
+   "teams": 4000
+  },
+  "1 per reviewer, max 6 per codebase": {
+   "near": 0.4285,
+   "lean": 0.97575,
+   "good": 0.40675,
+   "median_extra": -1.0,
+   "teams": 4000
+  },
+  "2 per reviewer, max 6 per codebase": {
+   "near": 0.733,
+   "lean": 0.60175,
+   "good": 0.4235,
+   "median_extra": 2.0,
+   "teams": 4000
+  },
+  "3 per reviewer, max 6 per codebase": {
+   "near": 0.7045,
+   "lean": 0.387,
+   "good": 0.28725,
+   "median_extra": 4.0,
+   "teams": 4000
+  },
+  "always 3 per codebase": {
+   "near": 0.5935,
+   "lean": 0.55025,
+   "good": 0.2755,
+   "median_extra": 2.0,
+   "teams": 4000
+  },
+  "always 4 per codebase": {
+   "near": 0.635,
+   "lean": 0.38575,
+   "good": 0.252,
+   "median_extra": 4.0,
+   "teams": 4000
+  },
+  "always 5 per codebase": {
+   "near": 0.58275,
+   "lean": 0.2585,
+   "good": 0.198,
+   "median_extra": 6.0,
+   "teams": 4000
+  },
+  "always 6 per codebase": {
+   "near": 0.5135,
+   "lean": 0.13575,
+   "good": 0.10975,
+   "median_extra": 8.0,
+   "teams": 4000
+  },
+  "always 8 per codebase": {
+   "near": 0.37975,
+   "lean": 0.0245,
+   "good": 0.019,
+   "median_extra": 12.0,
+   "teams": 4000
+  }
+ },
+ "3": {
+  "1 per reviewer / share still read by people, max 3 per codebase": {
+   "near": 0.62025,
+   "lean": 0.87875,
+   "good": 0.527,
+   "median_extra": 1.0,
+   "teams": 4000
+  },
+  "1 per reviewer / share still read by people, max 4 per codebase": {
+   "near": 0.67,
+   "lean": 0.838,
+   "good": 0.54375,
+   "median_extra": 1.0,
+   "teams": 4000
+  },
+  "1 per reviewer / share still read by people, max 5 per codebase": {
+   "near": 0.69075,
+   "lean": 0.813,
+   "good": 0.5425,
+   "median_extra": 1.0,
+   "teams": 4000
+  },
+  "1 per reviewer / share still read by people, max 6 per codebase": {
+   "near": 0.69625,
+   "lean": 0.789,
+   "good": 0.526,
+   "median_extra": 1.0,
+   "teams": 4000
+  },
+  "1 per reviewer / share still read by people, max 8 per codebase": {
+   "near": 0.6965,
+   "lean": 0.77625,
+   "good": 0.51575,
+   "median_extra": 1.0,
+   "teams": 4000
+  },
+  "1.5 per reviewer / share still read by people, max 3 per codebase": {
+   "near": 0.63325,
+   "lean": 0.658,
+   "good": 0.3925,
+   "median_extra": 2.0,
+   "teams": 4000
+  },
+  "1.5 per reviewer / share still read by people, max 4 per codebase": {
+   "near": 0.67525,
+   "lean": 0.56225,
+   "good": 0.37525,
+   "median_extra": 3.0,
+   "teams": 4000
+  },
+  "1.5 per reviewer / share still read by people, max 5 per codebase": {
+   "near": 0.68775,
+   "lean": 0.50825,
+   "good": 0.35525,
+   "median_extra": 3.0,
+   "teams": 4000
+  },
+  "1.5 per reviewer / share still read by people, max 6 per codebase": {
+   "near": 0.68525,
+   "lean": 0.4605,
+   "good": 0.319,
+   "median_extra": 4.0,
+   "teams": 4000
+  },
+  "1.5 per reviewer / share still read by people, max 8 per codebase": {
+   "near": 0.673,
+   "lean": 0.43,
+   "good": 0.29475,
+   "median_extra": 4.0,
+   "teams": 4000
+  },
+  "2 per reviewer / share still read by people, max 3 per codebase": {
+   "near": 0.6015,
+   "lean": 0.527,
+   "good": 0.295,
+   "median_extra": 3.0,
+   "teams": 4000
+  },
+  "2 per reviewer / share still read by people, max 4 per codebase": {
+   "near": 0.61125,
+   "lean": 0.404,
+   "good": 0.25725,
+   "median_extra": 5.0,
+   "teams": 4000
+  },
+  "2 per reviewer / share still read by people, max 5 per codebase": {
+   "near": 0.59725,
+   "lean": 0.33475,
+   "good": 0.2255,
+   "median_extra": 5.0,
+   "teams": 4000
+  },
+  "2 per reviewer / share still read by people, max 6 per codebase": {
+   "near": 0.5755,
+   "lean": 0.274,
+   "good": 0.178,
+   "median_extra": 6.0,
+   "teams": 4000
+  },
+  "2 per reviewer / share still read by people, max 8 per codebase": {
+   "near": 0.5465,
+   "lean": 0.23675,
+   "good": 0.14875,
+   "median_extra": 7.0,
+   "teams": 4000
+  },
+  "1 per reviewer, max 6 per codebase": {
+   "near": 0.4015,
+   "lean": 0.995,
+   "good": 0.39775,
+   "median_extra": 0.0,
+   "teams": 4000
+  },
+  "2 per reviewer, max 6 per codebase": {
+   "near": 0.606,
+   "lean": 0.689,
+   "good": 0.3995,
+   "median_extra": 2.0,
+   "teams": 4000
+  },
+  "3 per reviewer, max 6 per codebase": {
+   "near": 0.5805,
+   "lean": 0.37275,
+   "good": 0.252,
+   "median_extra": 5.0,
+   "teams": 4000
+  },
+  "always 3 per codebase": {
+   "near": 0.52175,
+   "lean": 0.32325,
+   "good": 0.174,
+   "median_extra": 5.0,
+   "teams": 4000
+  },
+  "always 4 per codebase": {
+   "near": 0.46225,
+   "lean": 0.1915,
+   "good": 0.12925,
+   "median_extra": 8.0,
+   "teams": 4000
+  },
+  "always 5 per codebase": {
+   "near": 0.36875,
+   "lean": 0.115,
+   "good": 0.09075,
+   "median_extra": 11.0,
+   "teams": 4000
+  },
+  "always 6 per codebase": {
+   "near": 0.284,
+   "lean": 0.04675,
+   "good": 0.0365,
+   "median_extra": 14.0,
+   "teams": 4000
+  },
+  "always 8 per codebase": {
+   "near": 0.17925,
+   "lean": 0.00425,
+   "good": 0.003,
+   "median_extra": 20.0,
+   "teams": 4000
+  }
+ }
+}
