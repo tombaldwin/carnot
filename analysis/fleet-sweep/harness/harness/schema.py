@@ -62,7 +62,11 @@ RUN_FIELDS: dict[str, str] = {
     "warmup_min": NUM, "grace_min": NUM, "task_order_seed": INT, "sandbox_commit": STR,
     "harness_commit": STR, "worker_model": STR, "reviewer_model": STR, "notes": STR,
 }
+RUN_OPTIONAL: dict[str, str] = {"n_reviewers": INT}   # PLAN-v6: K parallel reviewers (absent = 1)
 RUN_KINDS = {"sweep", "pilot", "trial", "dry-run"}
+# PLAN-v6: these carry ``reviewer`` ("r1".."rK"); the harness always writes it, older logs lack it.
+REVIEWER_FIELD_TYPES = ("review_start", "review_end", "review_error", "reviewer_busy", "reviewer_idle")
+REVIEWER_RE = re.compile(r"^r[1-9]\d*$")
 
 T_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
 
@@ -95,7 +99,11 @@ def check_event(ev: dict) -> list[str]:
         return [f"unknown type {typ!r}"]
     if not isinstance(ev.get("t"), str) or not T_RE.match(ev["t"]):
         errs.append(f"{typ}: bad t {ev.get('t')!r}")
-    spec = EVENT_FIELDS[typ]
+    spec = dict(EVENT_FIELDS[typ])
+    if typ in REVIEWER_FIELD_TYPES and "reviewer" in ev:
+        spec["reviewer"] = STR
+        if isinstance(ev["reviewer"], str) and not REVIEWER_RE.match(ev["reviewer"]):
+            errs.append(f"{typ}: reviewer={ev['reviewer']!r} is not r1..rK")
     extra = set(ev) - set(spec) - {"t", "type"}
     missing = set(spec) - set(ev)
     if extra:
@@ -111,9 +119,12 @@ def check_event(ev: dict) -> list[str]:
     return errs
 
 
-def validate_events(path: Path | str, semantic: bool = True) -> list[str]:
+def validate_events(path: Path | str, semantic: bool = True, n_reviewers: int | None = None) -> list[str]:
     """Validate an events.jsonl file. Structural checks always; with ``semantic``
-    also ordering and the invariants the harness is meant to keep."""
+    also ordering and the invariants the harness is meant to keep. Reviews: each reviewer (``reviewer``
+    field; none = the single serial reviewer) reviews one change at a time, no task is under review by two
+    reviewers at once, at most ``n_reviewers`` reviews are open (if given), and each reviewer's
+    reviewer_busy / reviewer_idle alternate, with every review inside its busy stretch."""
     errs: list[str] = []
     events = []
     for i, line in enumerate(Path(path).read_text().splitlines(), 1):
@@ -131,7 +142,8 @@ def validate_events(path: Path | str, semantic: bool = True) -> list[str]:
         return errs
 
     last_t = ""
-    reviewing = None  # (task, head) under review
+    reviewing: dict = {}              # reviewer id (None: the serial reviewer) -> (task, head) under review
+    rbusy: dict = {}                  # reviewer id -> busy
     approved: set[tuple[str, str]] = set()
     attempts: dict[str, int] = {}
     busy: dict[str, bool] = {}        # slot -> busy
@@ -150,15 +162,35 @@ def validate_events(path: Path | str, semantic: bool = True) -> list[str]:
             if ev["m"] > ev["k"] or ev["k"] < 0:
                 errs.append(f"line {i}: need 0 <= m <= k")
         elif typ == "review_start":
-            if reviewing is not None:
-                errs.append(f"line {i}: review_start while {reviewing} still under review (reviews must be serial)")
-            reviewing = key
+            rid = ev.get("reviewer")
+            who = rid or "the reviewer"
+            if reviewing.get(rid) is not None:
+                errs.append(f"line {i}: review_start while {reviewing[rid]} still under review by {who} "
+                            "(each reviewer reviews one change at a time)")
+            if any(v is not None and v[0] == ev["task"] for r, v in reviewing.items() if r != rid):
+                errs.append(f"line {i}: task {ev['task']} is already under review by another reviewer")
+            if not rbusy.get(rid) and (rid in rbusy or rid is not None):
+                errs.append(f"line {i}: review_start by {who} outside a reviewer_busy stretch")
+            reviewing[rid] = key
+            if n_reviewers is not None and sum(v is not None for v in reviewing.values()) > n_reviewers:
+                errs.append(f"line {i}: more reviews open than n_reviewers = {n_reviewers}")
         elif typ in ("review_end", "review_error"):
-            if reviewing != key:
-                errs.append(f"line {i}: {typ} for {key} but under review is {reviewing}")
-            reviewing = None
+            rid = ev.get("reviewer")
+            if reviewing.get(rid) != key:
+                errs.append(f"line {i}: {typ} for {key} but under review by {rid or 'the reviewer'} is "
+                            f"{reviewing.get(rid)}")
+            reviewing[rid] = None
             if typ == "review_end" and ev["verdict"] == "approve":
                 approved.add(key)
+        elif typ in ("reviewer_busy", "reviewer_idle"):
+            rid = ev.get("reviewer")
+            want = typ == "reviewer_busy"
+            if bool(rbusy.get(rid)) == want:
+                errs.append(f"line {i}: {typ} for {rid or 'the reviewer'}, which is already "
+                            f"{'busy' if want else 'idle'}")
+            if not want and reviewing.get(rid) is not None:
+                errs.append(f"line {i}: reviewer_idle for {rid or 'the reviewer'} during a review")
+            rbusy[rid] = want
         elif typ == "hidden_pre":
             if key not in approved:
                 errs.append(f"line {i}: hidden_pre on a head that was never approved")
@@ -191,7 +223,7 @@ def validate_run_json(path: Path | str) -> list[str]:
     except (OSError, json.JSONDecodeError) as e:
         return [f"run.json unreadable: {e}"]
     errs = []
-    extra = set(run) - set(RUN_FIELDS)
+    extra = set(run) - set(RUN_FIELDS) - set(RUN_OPTIONAL)
     missing = set(RUN_FIELDS) - set(run)
     if extra:
         errs.append(f"run.json: unexpected fields {sorted(extra)}")
@@ -200,6 +232,11 @@ def validate_run_json(path: Path | str) -> list[str]:
     for k, s in RUN_FIELDS.items():
         if k in run and not _type_ok(run[k], s):
             errs.append(f"run.json: {k}={run[k]!r} is not {s}")
+    for k, s in RUN_OPTIONAL.items():
+        if k in run and not _type_ok(run[k], s):
+            errs.append(f"run.json: {k}={run[k]!r} is not {s}")
+    if isinstance(run.get("n_reviewers"), int) and run["n_reviewers"] < 1:
+        errs.append("run.json: n_reviewers < 1")
     if run.get("kind") not in RUN_KINDS:
         errs.append(f"run.json: kind {run.get('kind')!r} not in {sorted(RUN_KINDS)}")
     for k in ("window_start", "window_end"):

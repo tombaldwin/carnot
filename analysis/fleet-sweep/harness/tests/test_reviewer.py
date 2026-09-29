@@ -92,9 +92,11 @@ def test_real_run_refuses_unverified_templates():
     from pathlib import Path
     cfg = config_mod.load(Path(__file__).parent.parent / "config.t2.toml")
     cfg.reviewer.verified = False   # the shipped reviewer is verified; the guard must still refuse an unverified one
+    cfg.launcher.verified = False   # likewise the launcher (routine path verified at T0c); command mode must refuse
     with pytest.raises(NotVerified):
         require_verified(cfg)
     cfg.reviewer.verified = True
+    cfg.launcher.mode = "manual"
     require_verified(cfg)          # manual launcher needs no product flags
     cfg.launcher.mode = "command"
     with pytest.raises(NotVerified):

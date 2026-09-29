@@ -1,4 +1,4 @@
-# T1 (PLAN-v4 s7.5): trial, 1 slot for 30 min, then all 12 slots for 30 min. PRs are reviewed live.
+# T1b (PLAN-v6 s5.1, abort rule 1): trial, 1 slot for 90 min, then all 12 slots for 30 min, K = 3 reviewers.
 # One config per phase; `python -m harness run` refuses a config whose kind / n_workers / window /
 # warm-up / grace / start schedule / session timeout / first task / models differ from the phase's pre-registered shape
 # (harness/config.py PHASES), prints them, and asks for confirmation (or --yes).
@@ -7,13 +7,13 @@
 # phase files (t0, t1, t2, t1b, sweep-n1-k1, sweep-n1-k3, sweep-n12-k1, sweep-n12-k3).
 
 [run]
-phase = "t1"
+phase = "t1b"
 kind = "trial"
 n_workers = 12
-window_min = 60
-warmup_min = 10
+window_min = 120
+warmup_min = 0
 grace_min = 10
-start_schedule = [[0, 1], [30, 12]]   # [minute, slots open from then]
+start_schedule = [[0, 1], [90, 12]]   # [minute, slots open from then]
 task_timeout_min = 25          # no READY this long after a launch / rework message: abandoned
 task_budget_min = 20           # stated in the session prompt
 first_task = ""
@@ -65,7 +65,7 @@ timeout_s = 900
 retries = 1
 retry_backoff_s = 60
 max_downtime_min = 10           # summed downtime of the K reviewers / K; more voids the window
-parallel = 1                    # K reviewer threads r1..rK on one FIFO queue (PLAN-v6 section 6)
+parallel = 3                    # K reviewer threads r1..rK on one FIFO queue (PLAN-v6 section 6)
 
 [launcher]
 # One cloud session per task (harness README, "Worker model"). routine: each launch re-arms the slot's Claude

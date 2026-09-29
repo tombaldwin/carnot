@@ -76,7 +76,7 @@ def test_semantic_errors(tmp_path):
     errs = validate_events(_write(tmp_path, bad))
     assert any("attempt_no" in e for e in errs)
     two = GOOD[:8] + [ev("review_start", task="002", head="q", queue_depth=0)]
-    assert any("serial" in e for e in validate_events(_write(tmp_path, two)))
+    assert any("one change at a time" in e for e in validate_events(_write(tmp_path, two)))
     back = [ev("note", text="a"), ev("note", t="2026-10-01T09:00:00.000Z", text="b")]
     assert any("backwards" in e for e in validate_events(_write(tmp_path, back)))
     unapproved = GOOD[:5] + [ev("merge", task="001", head="a", main_sha="b")]
@@ -92,3 +92,57 @@ def test_run_json(tmp_path):
     assert validate_run_json(p) == []
     p.write_text(json.dumps({**run, "kind": "other", "extra": 1}))
     assert len(validate_run_json(p)) == 2
+
+
+def _k_log(extra):
+    """GOOD's first submit, then reviewer events tagged r1 / r2 (PLAN-v6: K parallel reviewers)."""
+    return GOOD[:5] + [ev("submit", worker="s1", task="002", branch="claude/task-002", head="c", attempt_no=1,
+                          lines_changed=5, files=["y.py"], k=1, m=0)] + extra
+
+
+def test_parallel_reviewers_valid(tmp_path):
+    log = _k_log([
+        ev("reviewer_busy", reviewer="r1"), ev("review_start", task="001", head="a", queue_depth=1, reviewer="r1"),
+        ev("reviewer_busy", reviewer="r2"), ev("review_start", task="002", head="c", queue_depth=0, reviewer="r2"),
+        ev("review_end", task="002", head="c", verdict="request_changes", reason="x", tokens_in=None,
+           tokens_out=None, duration_s=3, reviewer="r2"),
+        ev("reviewer_idle", reviewer="r2"),
+        ev("review_end", task="001", head="a", verdict="approve", reason="ok", tokens_in=None, tokens_out=None,
+           duration_s=5, reviewer="r1"),
+        ev("reviewer_idle", reviewer="r1")])
+    assert validate_events(_write(tmp_path, log), n_reviewers=2) == []
+    assert any("more reviews open than n_reviewers" in e
+               for e in validate_events(_write(tmp_path, log), n_reviewers=1))
+
+
+def test_parallel_reviewer_errors(tmp_path):
+    same_task = _k_log([
+        ev("reviewer_busy", reviewer="r1"), ev("review_start", task="001", head="a", queue_depth=0, reviewer="r1"),
+        ev("reviewer_busy", reviewer="r2"), ev("review_start", task="001", head="a", queue_depth=0, reviewer="r2")])
+    assert any("already under review by another reviewer" in e for e in validate_events(_write(tmp_path, same_task)))
+    unpaired = _k_log([ev("reviewer_busy", reviewer="r1"), ev("reviewer_busy", reviewer="r1")])
+    assert any("already busy" in e for e in validate_events(_write(tmp_path, unpaired)))
+    idle_mid = _k_log([ev("reviewer_busy", reviewer="r1"),
+                       ev("review_start", task="001", head="a", queue_depth=0, reviewer="r1"),
+                       ev("reviewer_idle", reviewer="r1")])
+    assert any("during a review" in e for e in validate_events(_write(tmp_path, idle_mid)))
+    outside = _k_log([ev("review_start", task="001", head="a", queue_depth=0, reviewer="r1")])
+    assert any("outside a reviewer_busy" in e for e in validate_events(_write(tmp_path, outside)))
+    wrong = _k_log([ev("reviewer_busy", reviewer="r1"),
+                    ev("review_start", task="001", head="a", queue_depth=0, reviewer="r1"),
+                    ev("review_end", task="001", head="a", verdict="approve", reason="", tokens_in=None,
+                       tokens_out=None, duration_s=1, reviewer="r2")])
+    assert any("under review by r2" in e for e in validate_events(_write(tmp_path, wrong)))
+    assert check_event(ev("reviewer_busy", reviewer="reviewer-1"))
+    assert check_event(ev("merge", task="1", head="a", main_sha="b", reviewer="r1"))   # only reviewer events
+
+
+def test_run_json_n_reviewers(tmp_path):
+    run = {"run_id": "x", "kind": "sweep", "n_workers": 12, "window_start": T, "window_end": T,
+           "warmup_min": 5, "grace_min": 10, "task_order_seed": 1, "sandbox_commit": "a",
+           "harness_commit": "b", "worker_model": "m", "reviewer_model": "r", "notes": "", "n_reviewers": 3}
+    p = tmp_path / "run.json"
+    p.write_text(json.dumps(run))
+    assert validate_run_json(p) == []
+    p.write_text(json.dumps({**run, "n_reviewers": 0}))
+    assert validate_run_json(p)

@@ -1,46 +1,49 @@
-"""Abort rule 1 (throttling) from T1's log, without a product token source (PLAN-v4 section 7.4).
+"""Abort rule 1 (throttling), PLAN-v6 section 5.4 (revised after T1), and the old activity measure.
 
-    python -m harness throttle runs/<T1 run id> [--skip-min 5] [--json out.json]
+    python -m harness throttle runs/<T1b run id> [--exclude s2,s3 | --exclude none] [--split-min 90] [--json out.json]
 
-T1 runs one slot, then all twelve (``start_schedule = [[0, 1], [30, 12]]``). With one cloud session
-per task, a slot launches a new session for every task. The harness logs no token usage, so the
-pre-registered measure is *activity* per slot-minute:
+T1b (like T1) runs one slot, then all twelve (``start_schedule = [[0, 1], [90, 12]]``). For every task launched
+in each phase (phase A: launched before the second start_schedule minute; phase B: at or after it):
 
-* activity = session launches (``session_launch`` on that slot) + READY submissions (``submit``,
-  whose ``worker`` is the slot). Older logs without ``session_launch`` count a slot's repeated
-  ``worker_start`` events as launches instead (the long-running-worker design).
-* a slot starts at its ``worker_start`` (the slot opens); exposure = slot-minutes. Phase A (one slot): from the first slot's start + ``skip_min`` to the
-  moment a second slot starts. Phase B (all slots): from that moment (or a slot's own start +
-  ``skip_min``, whichever is later) to window_end. Time between ``worker_down`` and
-  ``worker_restart`` is excluded.
-* rate = activity / slot-minutes per phase; ratio = rate(B) / rate(A).
+* **start-up** = the task's branch first pushed (``claim``) minus the routine's ``run_once_at`` (from the task's
+  first ``launch_detail … run_once_at=…`` note), or minus its ``session_launch`` if that note is missing;
+* **coding** = its first READY (``submit`` with attempt_no 1, before window_end) minus the ``claim``.
 
-**Pre-registered rule:** throttled if ratio < 0.8, i.e. per-slot activity at 12 more than 20%
-below the single slot's. Reported beside it (not part of the rule): the median minutes from a
-task's session launch (or, in older logs, its claim) to its first READY in each phase (a slower model
-shows up as a longer time), a rough
-95% interval for the ratio (log-normal approximation, sqrt(1/a + 1/b)), and the operator's
-readings: ``meter`` events and ``note`` lines starting ``plan_usage`` or ``usage``.
+The statistic is the ratio of geometric means, many slots over one, with a Welch 90% interval on the log scale
+(two-sided 90%: each bound a one-sided 5% test); **tolerance 1.25**:
 
-If the log has ``usage`` events (a product token source, if one is found at T1), tokens per
-slot-minute replace activity as the measure, with the same 0.8 threshold; the activity figures
-are still reported.
+* **STOP** (report T1b) if the start-up interval lies wholly above 1.25;
+* **CLEAR** if it lies wholly below 1.25;
+* **INCONCLUSIVE** otherwise: proceed, with the ratio and interval reported beside SCALE.
 
-The counts in phase A are small (one slot for 25 minutes: a handful of submits), so the interval
-is wide and the rule can only catch a large drop; this is stated in the pre-registration.
+A coding interval wholly above 1.25 is a **flag, not a stop** (coding contains the coordination drag SCALE
+measures). Slots lost to operator-logged failures unrelated to the service (T1: the CLI auto-update that took
+s2 and s3) are excluded before the ratios are computed: ``--exclude s2,s3``; without ``--exclude`` the slots with
+an operator ``worker_down`` (reason starting ``operator``) are excluded and listed; ``--exclude none`` keeps all.
+The same statistic is ``analysis/v6.py`` ``throttle_v6`` (pure Python here: the harness has no numpy/scipy).
+
+Reported beside it, as before (PLAN-v4 section 7.4; not part of the rule any more): *activity* per slot-minute
+(session launches + READY submissions per slot-open minute, phase A from the first slot's start + ``skip_min`` to
+the second group's start, phase B from then, down time excluded) and its ratio, with the old 0.8 threshold's
+reading; T1 showed it cannot decide anything (it mixes service speed with rework and review waiting).
 """
 from __future__ import annotations
 
 import datetime as dt
 import json
 import math
+import re
 import statistics
 from pathlib import Path
 
 from .events import read_events
 
-THRESHOLD = 0.8
+THRESHOLD = 0.8        # the retired activity rule (PLAN-v4), still reported
 SKIP_MIN = 5.0
+TOLERANCE = 1.25       # PLAN-v6 rule 1: a service-side slowdown of 25% or more at twelve slots is throttling
+LEVEL = 0.90           # two-sided interval level
+LEAD_RE = re.compile(r"launch_detail slot=(\S+) task=(\S+) .*run_once_at=(\S+)")
+SCHED_RE = re.compile(r"start_schedule minute=([\d.]+) slots=(\S+)")
 
 
 def _t(s: str) -> dt.datetime:
@@ -51,7 +54,8 @@ def _overlap(a0, a1, b0, b1) -> float:
     return max(0.0, (min(a1, b1) - max(a0, b0)).total_seconds() / 60.0)
 
 
-def throttle_report(run_dir: Path, skip_min: float = SKIP_MIN, threshold: float = THRESHOLD) -> dict:
+def activity_report(run_dir: Path, skip_min: float = SKIP_MIN, threshold: float = THRESHOLD) -> dict:
+    """The PLAN-v4 activity measure (retired as the rule; reported beside rule 1)."""
     run_dir = Path(run_dir)
     ev = read_events(run_dir / "events.jsonl")
     rj = json.loads((run_dir / "run.json").read_text()) if (run_dir / "run.json").exists() else {}
@@ -164,16 +168,231 @@ def throttle_report(run_dir: Path, skip_min: float = SKIP_MIN, threshold: float 
                 operator_readings=readings)
 
 
-def format_report(r: dict) -> str:
+def format_activity(r: dict) -> str:
     A, B = r["phases"]["A"], r["phases"]["B"]
-    L = [f"Throttling (abort rule 1), {r['run_dir']}",
+    L = [f"Activity (the PLAN-v4 measure, reported only), {r['run_dir']}",
          f"  one slot  : {A['activity']} activity ({A['launches']} launches + {A['submits']} READY) in "
          f"{A['slot_minutes']} slot-min -> {A['activity_per_slot_min']}; launch->READY median {A['claim_to_ready_median_min']} min (n={A['claim_to_ready_n']})",
          f"  {B['slots']} slots  : {B['activity']} activity ({B['launches']} launches + {B['submits']} READY) in "
          f"{B['slot_minutes']} slot-min -> {B['activity_per_slot_min']}; launch->READY median {B['claim_to_ready_median_min']} min (n={B['claim_to_ready_n']})",
          f"  activity ratio {r['activity_ratio']} (approx. 95% {r['activity_ratio_ci95_approx']}); token ratio {r['token_ratio']}; "
          f"launch->READY ratio {r['claim_to_ready_ratio']} (reported only)",
-         f"  measure: {r['measure']}; ratio {r['ratio']} -> {r['verdict']}"]
+         f"  measure: {r['measure']}; ratio {r['ratio']} -> {r['verdict']} under the retired 0.8 rule"]
     for x in r["operator_readings"]:
         L.append(f"  reading {x['t']}: " + (f"meter ${x['credits_left_usd']} ({x['source']})" if x["type"] == "meter" else x["text"]))
+    return "\n".join(L)
+
+
+# ---------------------------------------------------------------------------------------------- rule 1 (PLAN-v6)
+def _betacf(a: float, b: float, x: float) -> float:
+    """Continued fraction of the regularized incomplete beta function (Numerical Recipes 6.4)."""
+    tiny, qab, qap, qam = 1e-300, a + b, a + 1.0, a - 1.0
+    c, d = 1.0, 1.0 - qab * x / qap
+    d = 1.0 / (d if abs(d) > tiny else tiny)
+    h = d
+    for m in range(1, 300):
+        m2 = 2 * m
+        aa = m * (b - m) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        d = 1.0 / (d if abs(d) > tiny else tiny)
+        c = 1.0 + aa / c
+        c = c if abs(c) > tiny else tiny
+        h *= d * c
+        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        d = 1.0 / (d if abs(d) > tiny else tiny)
+        c = 1.0 + aa / c
+        c = c if abs(c) > tiny else tiny
+        de = d * c
+        h *= de
+        if abs(de - 1.0) < 1e-14:
+            break
+    return h
+
+
+def _betainc(a: float, b: float, x: float) -> float:
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    lbt = math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b) + a * math.log(x) + b * math.log(1.0 - x)
+    if x < (a + 1.0) / (a + b + 2.0):
+        return math.exp(lbt) * _betacf(a, b, x) / a
+    return 1.0 - math.exp(lbt) * _betacf(b, a, 1.0 - x) / b
+
+
+def t_cdf(t: float, df: float) -> float:
+    """Student t distribution function."""
+    p = 0.5 * _betainc(df / 2.0, 0.5, df / (df + t * t))
+    return 1.0 - p if t > 0 else p
+
+
+def t_ppf(q: float, df: float) -> float:
+    """Quantile of Student t (0.5 < q < 1), by bisection on t_cdf."""
+    lo, hi = 0.0, 1.0
+    while t_cdf(hi, df) < q:
+        hi *= 2.0
+    for _ in range(200):
+        mid = (lo + hi) / 2.0
+        if t_cdf(mid, df) < q:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2.0
+
+
+def welch_log_ratio(a: list[float], b: list[float], level: float = LEVEL) -> dict:
+    """Ratio of geometric means b / a with a Welch interval on the log scale (as analysis/v6._welch_log_ratio)."""
+    la = [math.log(x) for x in a]
+    lb = [math.log(x) for x in b]
+    if len(la) < 2 or len(lb) < 2:
+        return dict(ratio=None, ci=[None, None], se_log=None, df=None, n_a=len(la), n_b=len(lb))
+    va = statistics.variance(la) / len(la)
+    vb = statistics.variance(lb) / len(lb)
+    se = math.sqrt(va + vb)
+    df = (va + vb) ** 2 / (va ** 2 / (len(la) - 1) + vb ** 2 / (len(lb) - 1)) if va + vb > 0 else 1.0
+    tq = t_ppf(0.5 + level / 2.0, df)
+    d = statistics.fmean(lb) - statistics.fmean(la)
+    return dict(ratio=math.exp(d), ci=[math.exp(d - tq * se), math.exp(d + tq * se)], se_log=se, df=df,
+                n_a=len(la), n_b=len(lb))
+
+
+def decide(startup: dict, coding: dict, tol: float = TOLERANCE) -> tuple[str, bool]:
+    """Rule 1: STOP if the start-up interval lies wholly above ``tol``, CLEAR if wholly below, else
+    INCONCLUSIVE; the coding flag is raised when the coding interval lies wholly above ``tol``."""
+    lo, hi = startup["ci"]
+    if lo is not None and lo > tol:
+        dec = "STOP"
+    elif hi is not None and hi < tol:
+        dec = "CLEAR"
+    else:
+        dec = "INCONCLUSIVE"
+    clo = coding["ci"][0]
+    return dec, bool(clo is not None and clo > tol)
+
+
+def task_legs(run: dict, events: list[dict]) -> list[dict]:
+    """Per task: slot, launch (s from window start), start-up s, coding s (as analysis/v6.task_legs)."""
+    t0 = _t(run["window_start"])
+    we = (_t(run["window_end"]) - t0).total_seconds()
+    rows: dict[str, dict] = {}
+    once: dict[str, float] = {}
+    for e in events:
+        t = (_t(e["t"]) - t0).total_seconds()
+        ty = e["type"]
+        if ty == "note":
+            m = LEAD_RE.match(e.get("text", ""))
+            if m and m.group(2) not in once:
+                try:
+                    once[m.group(2)] = (_t(m.group(3)) - t0).total_seconds()
+                except ValueError:
+                    pass
+        elif ty == "session_launch":
+            r = rows.setdefault(e["task"], {})
+            r.setdefault("launch", t)
+            r.setdefault("slot", e["slot"])
+        elif ty == "claim":
+            rows.setdefault(e["task"], {}).setdefault("claim", t)
+        elif ty == "submit" and e.get("attempt_no") == 1:
+            rows.setdefault(e["task"], {}).setdefault("ready", t)
+    out = []
+    for task, r in rows.items():
+        if "launch" not in r or "claim" not in r:
+            continue
+        up = r["claim"] - max(r["launch"], once.get(task, r["launch"]))
+        code = r["ready"] - r["claim"] if "ready" in r and r["ready"] <= we else None
+        out.append(dict(task=task, slot=r.get("slot"), launch=r["launch"], startup_s=up if up > 0 else None,
+                        coding_s=code if code is not None and code > 0 else None))
+    return out
+
+
+def operator_down_slots(events: list[dict]) -> list[str]:
+    """Slots with an operator-logged ``worker_down`` (reason starting 'operator')."""
+    return sorted({e["worker"] for e in events if e["type"] == "worker_down"
+                   and str(e.get("reason", "")).lower().startswith("operator")}, key=lambda x: int(x[1:]))
+
+
+def _split_min(run: dict, events: list[dict]) -> float | None:
+    mins = sorted({float(m.group(1)) for e in events if e["type"] == "note"
+                   for m in [SCHED_RE.match(e.get("text", ""))] if m})
+    if len(mins) > 1:
+        return mins[1]
+    starts = sorted({_t(e["t"]) for e in events if e["type"] == "worker_start"})
+    if len(starts) > 1:     # older logs without the note: the second slot group's start
+        w0 = _t(run["window_start"])
+        later = [s for s in starts if (s - starts[0]).total_seconds() > 1.0]
+        if later:
+            return round((later[0] - w0).total_seconds() / 60.0, 3)
+    return None
+
+
+def throttle_report(run_dir: Path, skip_min: float = SKIP_MIN, exclude: list[str] | None = None,
+                    split_min: float | None = None, tol: float = TOLERANCE, level: float = LEVEL) -> dict:
+    """Rule 1 (PLAN-v6) on a one-slot-then-many log, with the old activity measure under ``activity``.
+    ``exclude``: None = the slots with an operator worker_down; [] = none."""
+    run_dir = Path(run_dir)
+    ev = read_events(run_dir / "events.jsonl")
+    run = json.loads((run_dir / "run.json").read_text()) if (run_dir / "run.json").exists() else {}
+    if not run.get("window_start"):
+        notes = [e for e in ev if e["type"] == "note"]
+        run = dict(run, window_start=next(e["t"] for e in notes if e["text"] == "window_start"),
+                   window_end=next(e["t"] for e in notes if e["text"] == "window_end"))
+    if split_min is None:
+        split_min = _split_min(run, ev)
+    if split_min is None:
+        raise SystemExit(f"{run_dir}: rule 1 needs a one-slot phase and a many-slot phase (a second "
+                         "start_schedule group); none found")
+    auto = exclude is None
+    excl = operator_down_slots(ev) if auto else list(exclude)
+    legs = [x for x in task_legs(run, ev) if x["slot"] not in set(excl)]
+    A = [x for x in legs if x["launch"] < split_min * 60]
+    B = [x for x in legs if x["launch"] >= split_min * 60]
+    up = welch_log_ratio([x["startup_s"] for x in A if x["startup_s"]], [x["startup_s"] for x in B if x["startup_s"]],
+                         level)
+    code = welch_log_ratio([x["coding_s"] for x in A if x["coding_s"]], [x["coding_s"] for x in B if x["coding_s"]],
+                           level)
+    dec, flag = decide(up, code, tol)
+
+    def med(xs):
+        xs = [x for x in xs if x]
+        return round(statistics.median(xs), 1) if xs else None
+    phases = {ph: dict(tasks=len(L), startup_median_s=med([x["startup_s"] for x in L]),
+                       coding_median_s=med([x["coding_s"] for x in L])) for ph, L in (("A", A), ("B", B))}
+    try:
+        act = activity_report(run_dir, skip_min=skip_min)
+    except SystemExit as e:
+        act = dict(error=str(e))
+    rnd = lambda d: {k: (round(v, 3) if isinstance(v, float) else [round(x, 3) if x is not None else None for x in v]
+                         if k == "ci" else v) for k, v in d.items()}
+    return dict(run_dir=str(run_dir),
+                rule=(f"abort rule 1 (PLAN-v6): start-up ratio (geometric means, many slots / one), Welch "
+                      f"{level:.0%} interval on the log scale; STOP if wholly above {tol}, CLEAR if wholly below, "
+                      "else INCONCLUSIVE; coding interval wholly above it is a flag"),
+                decision=dec, coding_flag=flag, tolerance=tol, level=level, split_min=split_min,
+                excluded=excl, excluded_source=("operator worker_down" if auto else "--exclude"),
+                startup=rnd(up), coding=rnd(code), phases=phases, activity=act)
+
+
+def format_report(r: dict) -> str:
+    def iv(x):
+        lo, hi = x["ci"]
+        return "n/a" if x["ratio"] is None else f"{x['ratio']:.3f} (90% {lo:.3f}-{hi:.3f})"
+    A, B = r["phases"]["A"], r["phases"]["B"]
+    L = [f"Throttling (abort rule 1, PLAN-v6), {r['run_dir']}",
+         f"  split at minute {r['split_min']:g}; excluded slots: {','.join(r['excluded']) or 'none'} "
+         f"({r['excluded_source']})",
+         f"  one slot  : {A['tasks']} tasks; start-up median {A['startup_median_s']} s, coding median "
+         f"{A['coding_median_s']} s",
+         f"  many slots: {B['tasks']} tasks; start-up median {B['startup_median_s']} s, coding median "
+         f"{B['coding_median_s']} s",
+         f"  start-up ratio {iv(r['startup'])}  n = {r['startup']['n_a']} / {r['startup']['n_b']}",
+         f"  coding ratio   {iv(r['coding'])}  n = {r['coding']['n_a']} / {r['coding']['n_b']}"
+         + ("  FLAG: coding interval wholly above the tolerance (reported beside SCALE, not a stop)"
+            if r["coding_flag"] else ""),
+         f"  tolerance {r['tolerance']}: {r['decision']}"]
+    act = r.get("activity") or {}
+    if "phases" in act:
+        L.append(format_activity(act))
+    elif act.get("error"):
+        L.append(f"Activity (the PLAN-v4 measure): not computed ({act['error']})")
     return "\n".join(L)

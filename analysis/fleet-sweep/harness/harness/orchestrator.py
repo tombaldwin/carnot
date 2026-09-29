@@ -12,7 +12,9 @@ Threads (all share one EventLog and one local clone of the sandbox remote):
   watcher     git fetch every poll interval; logs claim (branch first pushed) and submit (a READY: commit);
               a READY frees the task's slot
   prep        runs the visible tests on each submitted head (logged as visible_pre)
-  reviewer    one review at a time, FIFO, never shows the reviewer the queue
+  reviewer-r1..rK  K reviewer threads ([reviewer] parallel, PLAN-v6 section 6) on one FIFO queue; each
+              reviews one change at a time, no task is under review by two at once, and a reviewer never
+              sees the queue
   merger      serial merge queue: hidden_pre -> rebase -> tests_post -> merge
 
 The orchestrator never pushes to a session's branch: a bounce is queued as rework and delivered as a
@@ -98,6 +100,9 @@ class Slot:
     task: str | None = None            # task whose session occupies the slot
     since: dt.datetime | None = None   # launch / message time: the session timeout runs from here
     kind: str | None = None            # launch | rework | probe
+    fail_streak: int = 0               # consecutive tasks whose launch failed on this slot
+    backoff_until: dt.datetime | None = None   # no new work before this (after a failed launch)
+    down: bool = False                 # marked down (worker_down) after too many failed launches
 
 
 @dc.dataclass
@@ -110,6 +115,7 @@ class Session:
     status: str = "starting"            # starting | working | submitted | rework_queued | probe | abandoned
     feedback: collections.deque = dc.field(default_factory=collections.deque)   # messages to deliver
     probe_sent_at: dt.datetime | None = None
+    id_pending: bool = False            # routine mode: the session id is still being looked up
 
 
 class Orchestrator:
@@ -133,7 +139,9 @@ class Orchestrator:
         self.prep_q: collections.deque[Change] = collections.deque()
         self.review_q: collections.deque[Change] = collections.deque()
         self.merge_q: collections.deque[Change] = collections.deque()
-        self.reviewing: Change | None = None
+        self.n_reviewers = max(1, int(cfg.reviewer.parallel))
+        self.reviewer_ids = [f"r{i}" for i in range(1, self.n_reviewers + 1)]
+        self.reviewing: dict[str, Change] = {}       # reviewer id -> change under review
         self.merging: Change | None = None
         self.merged_tasks: list[str] = []
         # slots and sessions
@@ -150,10 +158,13 @@ class Orchestrator:
         self.threads: list[threading.Thread] = []
         self.errors: list[str] = []
         self.void_reasons: list[str] = []
-        self.downtime_s = 0.0
-        self._down_since: dt.datetime | None = None
+        self.downtime_s = 0.0                        # summed over reviewers (closed stretches)
+        self.downtime_by: dict[str, float] = {r: 0.0 for r in self.reviewer_ids}
+        self._down_since: dict[str, dt.datetime] = {}   # reviewer id -> start of its current downtime
         self.window_start: dt.datetime | None = None
         self.window_end: dt.datetime | None = None
+        self.launch_failures: collections.deque = collections.deque()   # (time, slot) of failed launches
+        self.dispatch_paused_until: dt.datetime | None = None
 
     # ------------------------------------------------------------------ helpers
     def _task_order(self) -> list[str]:
@@ -239,7 +250,7 @@ class Orchestrator:
         if task in self.rework_q:
             self.rework_q.remove(task)
         if not any(c.task == task for c in list(self.review_q) + list(self.merge_q)) and \
-                not (self.reviewing and self.reviewing.task == task) and \
+                not any(c.task == task for c in self.reviewing.values()) and \
                 not (self.merging and self.merging.task == task):
             self.inflight.pop(task, None)
         self.log.note(f"task_abandoned task={task} session={sess.session_id} reason={why}")
@@ -294,9 +305,18 @@ class Orchestrator:
                     self._free(sl)
             if self.phase != "window" or self.launcher is None:
                 return
+            if self.dispatch_paused_until is not None:
+                if now < self.dispatch_paused_until:
+                    return
+                self.dispatch_paused_until = None
+                self.log.note("dispatch_resumed")
             for sl in sorted(self.slots.values(), key=lambda s: int(s.id[1:])):
-                if not sl.open or sl.task is not None:
+                if not sl.open or sl.task is not None or sl.down:
                     continue
+                if sl.backoff_until is not None:
+                    if now < sl.backoff_until:
+                        continue
+                    sl.backoff_until = None
                 task = self._next_rework()
                 if task is not None:
                     sess = self.sessions[task]
@@ -322,6 +342,8 @@ class Orchestrator:
                 continue
             if sess.slot is not None:      # its session is still busy elsewhere; keep it queued
                 continue
+            if sess.id_pending:            # routine mode: its session id is not known yet; keep it queued
+                continue
             self.rework_q.remove(task)
             return task
         return None
@@ -331,6 +353,7 @@ class Orchestrator:
         prompt = task_prompt(self.cfg, t)
         name = f"{self.run_id}-{slot}-{task}"
         sess = self.sessions[task]
+        last_err = ""
         for n in range(1 + max(0, self.cfg.launcher.launch_retries)):
             with self.lock:
                 if sess.status == "abandoned" or self.stop.is_set():
@@ -339,27 +362,105 @@ class Orchestrator:
             try:
                 res = self.launcher.launch(slot, t, prompt, name)
             except (LaunchError, OSError, subprocess.SubprocessError) as e:
+                last_err = str(e)
                 self.log.note(f"session_launch_failed slot={slot} task={task} attempt={sess.launches} "
                               f"error={str(e)[:300]}")
                 continue
             with self.lock:
+                self.slots[slot].fail_streak = 0
                 sess.session_id = res.session_id
                 if sess.status == "starting":
                     sess.status = "working"
                 self.log.emit("session_launch", slot=slot, task=task, session_id=res.session_id,
                               attempt_no=sess.launches)
                 self.log.note(f"launch_detail slot={slot} task={task} detached_by={res.detached_by} "
-                              f"returncode={res.returncode} session_id_seen={str(res.session_id is not None).lower()}")
+                              f"returncode={res.returncode} session_id_seen={str(res.session_id is not None).lower()}"
+                              + (f" {res.detail}" if res.detail else ""))
+                discover = (res.session_id is None and res.pending is not None
+                            and hasattr(self.launcher, "discover_session_id"))
+                if discover:
+                    sess.id_pending = True
+            if discover:
+                self._discover_session_id(slot, task, res.pending)
             return
         with self.lock:
             self._abandon(task, "launch failed")
             sl = self.slots[slot]
             if sl.task == task:
                 self._free(sl)
+            if self.phase == "window" and not self.stop.is_set():
+                self._launch_failed(sl, last_err)
+
+    def _launch_failed(self, sl: Slot, err: str) -> None:
+        """After a task's launch failed on ``sl`` (all attempts; lock held): back the slot off, mark it down
+        after max_consecutive_launch_failures in a row, and pause all dispatch if launches fail on several
+        slots at once (T1 incident, 2026-09-28: a replaced CLI binary made one slot abandon ~15 tasks in a
+        second and burn its routine's hourly budget)."""
+        rc = self.cfg.run
+        now = self.clock.now()
+        sl.fail_streak += 1
+        backoff = dt.timedelta(seconds=max(0.0, rc.launch_fail_backoff_s))
+        sl.backoff_until = now + backoff
+        err1 = " ".join(err.split())[:200] or "unknown"
+        if rc.max_consecutive_launch_failures > 0 and sl.fail_streak >= rc.max_consecutive_launch_failures \
+                and not sl.down:
+            sl.down = True
+            self.log.emit("worker_down", worker=sl.id,
+                          reason=f"launch_failures n={sl.fail_streak} last_error={err1}")
+            print(f"\n*** SLOT {sl.id} DOWN: {sl.fail_streak} consecutive launch failures; no more work is sent "
+                  f"to it this window. Last error: {err1}\n", flush=True)
+        else:
+            self.log.note(f"slot_backoff slot={sl.id} fail_streak={sl.fail_streak} "
+                          f"backoff_s={backoff.total_seconds():g}")
+        if rc.launch_fail_breaker_slots <= 0:
+            return
+        win = dt.timedelta(seconds=rc.launch_fail_breaker_window_s)
+        self.launch_failures.append((now, sl.id))
+        while self.launch_failures and now - self.launch_failures[0][0] > win:
+            self.launch_failures.popleft()
+        slots = sorted({s for _, s in self.launch_failures}, key=lambda x: int(x[1:]))
+        if len(slots) >= rc.launch_fail_breaker_slots:
+            self.dispatch_paused_until = now + backoff
+            self.launch_failures.clear()
+            self.log.note(f"dispatch_paused reason=launch_failures slots={','.join(slots)} "
+                          f"window_s={rc.launch_fail_breaker_window_s:g} pause_s={backoff.total_seconds():g} "
+                          f"last_error={err1}")
+            print(f"\n*** DISPATCH PAUSED {backoff.total_seconds():g}s: launches failed on slots "
+                  f"{','.join(slots)} within {rc.launch_fail_breaker_window_s:g}s. Last error: {err1}\n", flush=True)
+
+    def _discover_session_id(self, slot: str, task: str, pending) -> None:
+        """Routine mode: the launch returned before its run existed. Look the run's session id up (the launcher
+        polls lazily) and record it; rework for the task waits in the queue until this ends."""
+        sess = self.sessions[task]
+        t0 = self.clock.now()
+
+        def should_stop() -> bool:
+            return self.stop.is_set() or self.phase != "window" or sess.status == "abandoned"
+        sid = None
+        err = None
+        try:
+            sid = self.launcher.discover_session_id(pending, should_stop)
+        except Exception as e:  # never leave the task waiting for an id forever
+            err = str(e)
+        with self.lock:
+            sess.id_pending = False
+            if sid and sess.session_id is None:
+                sess.session_id = sid
+            took = (self.clock.now() - t0).total_seconds()
+            if sid:
+                self.log.note(f"launch_detail slot={slot} task={task} session_id_found=true session_id={sid} "
+                              f"after_s={took:.0f}")
+            else:
+                self.log.note(f"launch_detail slot={slot} task={task} session_id_found=false after_s={took:.0f}"
+                              + (f" error={err[:200]}" if err else ""))
+            self.cv.notify_all()
 
     def _do_send(self, slot: str, task: str, message: str, kind: str) -> None:
         sess = self.sessions[task]
         err = None
+        with self.lock:     # routine mode: a probe may come before the id lookup ends (rework never does)
+            while sess.session_id is None and sess.id_pending and not self.stop.is_set():
+                self.cv.wait(0.5)
         if sess.session_id is None and not getattr(self.launcher, "accepts_no_session_id", False):
             err = "no session id recorded for this task's session"
         else:
@@ -377,8 +478,11 @@ class Orchestrator:
                 if sl.task == task:
                     sl.since = self.clock.now()     # the timeout runs from the message
                 return
-            self.log.note(f"followup_failed slot={slot} task={task} kind={kind} error={err[:300]}")
+            self.log.note(f"followup_failed slot={slot} task={task} kind={kind} session={sess.session_id} "
+                          f"error={err[:300]}")
             if kind == "rework":
+                print(f"\n*** REWORK NOT DELIVERED: task {task} (session {sess.session_id}) on {slot}; task "
+                      f"abandoned. Error: {err[:200]}\n", flush=True)
                 self._abandon(task, "follow-up not delivered")
             elif sess.status == "probe":
                 sess.status = "submitted"
@@ -555,80 +659,116 @@ class Orchestrator:
     def _review_allowed(self) -> bool:
         return self.phase == "window" or (self.phase == "grace" and self.cfg.run.grace_reviews)
 
-    def _review_loop(self) -> None:
+    def _take_review(self, rid: str) -> Change | None:
+        """(Lock held.) The first queued change that is prepared and whose task is not under review by another
+        reviewer; removed from the queue and recorded as ``rid``'s. Unprepared changes are skipped, not waited on."""
+        if not self._review_allowed():
+            return None
+        busy_tasks = {c.task for c in self.reviewing.values()}
+        for i, ch in enumerate(self.review_q):
+            if ch.task in busy_tasks or not ch.prepared.is_set():
+                continue
+            del self.review_q[i]
+            self.reviewing[rid] = ch
+            return ch
+        return None
+
+    def _requeue(self, ch: Change) -> None:
+        """(Lock held.) Put a change whose review failed back at the front, unless a newer head of its task has
+        been queued meanwhile (the supersede rule of ``_submit``)."""
+        newer = next((c for c in self.review_q if c.task == ch.task), None)
+        if newer is not None:
+            self.log.note(f"task {ch.task}: head {ch.head[:12]} superseded in review queue by {newer.head[:12]}")
+            return
+        self.review_q.appendleft(ch)
+
+    def _review_loop(self, rid: str = "r1") -> None:
+        """One reviewer thread (``rid`` = r1..rK). Its reviewer_busy / reviewer_idle pair brackets each stretch
+        in which it holds a change; its downtime, retry and back-off are its own."""
         busy = False
         rc = self.cfg.reviewer
         while True:
             with self.lock:
-                while not self.stop.is_set() and not (
-                        self.review_q and self.review_q[0].prepared.is_set() and self._review_allowed()):
+                ch = None if self.stop.is_set() else self._take_review(rid)
+                if ch is None and busy:
+                    self.log.emit("reviewer_idle", reviewer=rid)
+                    busy = False
+                while ch is None and not self.stop.is_set():
                     self.cv.wait(0.2)
-                if self.stop.is_set():
+                    ch = None if self.stop.is_set() else self._take_review(rid)
+                if ch is None:
                     return
-                ch = self.review_q.popleft()
                 depth = len(self.review_q)
-                self.reviewing = ch
-            if not busy:
-                self.log.emit("reviewer_busy")
-                busy = True
+                if not busy:
+                    self.log.emit("reviewer_busy", reviewer=rid)
+                    busy = True
             packet = self._packet(ch)
+            packet.reviewer_id = rid
             result = None
             for attempt in range(1 + rc.retries):
-                self.log.emit("review_start", task=ch.task, head=ch.head, queue_depth=depth)
+                self.log.emit("review_start", task=ch.task, head=ch.head, queue_depth=depth, reviewer=rid)
                 t0 = self.clock.now()
                 try:
                     result = self.reviewer.review(packet)
                 except Exception as e:  # ReviewError or anything unexpected
                     msg = str(e) if isinstance(e, ReviewError) else f"{type(e).__name__}: {e}"
-                    self.log.emit("review_error", task=ch.task, head=ch.head, error=msg[:1000])
-                    if self._down_since is None:
-                        self._down_since = t0
+                    self.log.emit("review_error", task=ch.task, head=ch.head, error=msg[:1000], reviewer=rid)
+                    with self.lock:
+                        self._down_since.setdefault(rid, t0)
                     continue
                 dur = (self.clock.now() - t0).total_seconds()
                 self.log.emit("review_end", task=ch.task, head=ch.head, verdict=result.verdict,
                               reason=result.reason, tokens_in=result.tokens_in,
-                              tokens_out=result.tokens_out, duration_s=round(dur, 3))
-                self._end_downtime()
+                              tokens_out=result.tokens_out, duration_s=round(dur, 3), reviewer=rid)
+                self._end_downtime(rid)
                 break
-            with self.lock:
-                self.reviewing = None
             if result is None:
-                # Retried once and still failing: put it back at the front and back off.
+                # Retried and still failing: put it back at the front (another reviewer may take it) and back off.
                 with self.lock:
-                    self.review_q.appendleft(ch)
-                self.log.emit("reviewer_idle")
-                busy = False
+                    self.reviewing.pop(rid, None)
+                    self._requeue(ch)
+                    self.log.emit("reviewer_idle", reviewer=rid)
+                    busy = False
+                    self.cv.notify_all()
                 self._check_downtime()
                 if self.clock.sleep(rc.retry_backoff_s, self.stop):
                     return
                 continue
-            if result.verdict == "approve":
-                with self.lock:
-                    self.merge_q.append(ch)
-                    self.cv.notify_all()
-            else:
-                self.bounce(ch, "review", result.reason)
             with self.lock:
-                empty = not (self.review_q and self.review_q[0].prepared.is_set())
-            if empty:
-                self.log.emit("reviewer_idle")
-                busy = False
+                self.reviewing.pop(rid, None)
+                if result.verdict == "approve":
+                    self.merge_q.append(ch)        # approvals enter the merge queue in the order reviews finish
+                self.cv.notify_all()
+            if result.verdict != "approve":
+                self.bounce(ch, "review", result.reason)
 
-    def _end_downtime(self) -> None:
-        if self._down_since is not None:
-            self.downtime_s += (self.clock.now() - self._down_since).total_seconds()
-            self._down_since = None
-            self._check_downtime()
+    def _end_downtime(self, rid: str) -> None:
+        with self.lock:
+            since = self._down_since.pop(rid, None)
+            if since is None:
+                return
+            d = (self.clock.now() - since).total_seconds()
+            self.downtime_by[rid] = self.downtime_by.get(rid, 0.0) + d
+            self.downtime_s += d
+        self._check_downtime()
+
+    def reviewer_downtime_s(self) -> float:
+        """Summed reviewer downtime so far (closed stretches plus open ones), over all K reviewers."""
+        with self.lock:
+            now = self.clock.now()
+            return self.downtime_s + sum((now - t).total_seconds() for t in self._down_since.values())
 
     def _check_downtime(self) -> None:
-        total = self.downtime_s
-        if self._down_since is not None:
-            total += (self.clock.now() - self._down_since).total_seconds()
+        """VOID when the reviewers' combined capacity was down more than max_downtime_min: summed downtime / K."""
+        total = self.reviewer_downtime_s() / self.n_reviewers
         limit = self.cfg.reviewer.max_downtime_min * 60
-        if total > limit and not any("reviewer downtime" in v for v in self.void_reasons):
-            reason = f"reviewer downtime {total / 60:.1f} min > {self.cfg.reviewer.max_downtime_min} min"
-            self.void_reasons.append(reason)
-            self.log.note(f"VOID: {reason}")
+        with self.lock:
+            if total > limit and not any("reviewer downtime" in v for v in self.void_reasons):
+                reason = (f"reviewer downtime {total / 60:.1f} min > {self.cfg.reviewer.max_downtime_min} min"
+                          + (f" (summed over {self.n_reviewers} reviewers / {self.n_reviewers})"
+                             if self.n_reviewers > 1 else ""))
+                self.void_reasons.append(reason)
+                self.log.note(f"VOID: {reason}")
 
     # ------------------------------------------------------------------ merge queue
     def _merge_loop(self) -> None:
@@ -789,15 +929,16 @@ class Orchestrator:
     def idle(self) -> bool:
         with self.lock:
             return (not self.prep_q and not self.review_q and not self.merge_q
-                    and self.reviewing is None and self.merging is None)
+                    and not self.reviewing and self.merging is None)
 
     def start_threads(self, dispatch: bool = False) -> None:
-        loops = [("watcher", self._watch_loop), ("prep", self._prep_loop),
-                 ("reviewer", self._review_loop), ("merger", self._merge_loop)]
+        loops = [("watcher", self._watch_loop), ("prep", self._prep_loop), ("merger", self._merge_loop)]
         if dispatch:
             loops.append(("dispatcher", self._dispatch_loop))
         for name, fn in loops:
             self._run_thread(name, fn)
+        for rid in self.reviewer_ids:
+            self._run_thread(f"reviewer-{rid}", self._review_loop, rid)
 
     def shutdown(self) -> None:
         self.stop.set()
@@ -822,6 +963,7 @@ class Orchestrator:
         self.log.note(f"task_supply n={len(self.supply_ids)}")
         self.log.note(f"slots n={rc.n_workers} task_timeout_min={rc.task_timeout_min:g} "
                       f"task_budget_min={rc.task_budget_min:g}")
+        self.log.note(f"reviewers n={self.n_reviewers} ids={','.join(self.reviewer_ids)}")
         self.start_threads(dispatch=True)
         self._open_scheduled_slots()
 
@@ -857,14 +999,23 @@ class Orchestrator:
             self.clock.sleep(min(30.0, max(0.0, (grace_end - self.clock.now()).total_seconds())))
         self.phase = "done"
         with self.lock:
-            open_ch = self.reviewing
-        if open_ch is not None:
-            # Not counted by the analysis, and neither is its busy time (derive.py grace-end correction).
-            self.log.note(f"review_open_at_grace_end task={open_ch.task} head={open_ch.head}")
+            open_now = sorted(self.reviewing.items(), key=lambda kv: int(kv[0][1:]))
+        for rid, open_ch in open_now:
+            # Not counted by the analysis, and neither is that reviewer's busy time after it began (derive.py
+            # grace-end correction, per reviewer).
+            self.log.note(f"review_open_at_grace_end task={open_ch.task} head={open_ch.head} reviewer={rid}")
         self.log.note("grace_end")
         self.shutdown()
         self._check_claude_dir()
         self._check_downtime()
+        with self.lock:
+            now = self.clock.now()
+            for rid in self.reviewer_ids:
+                d = self.downtime_by.get(rid, 0.0)
+                if rid in self._down_since:
+                    d += (now - self._down_since[rid]).total_seconds()
+                if d > 0:
+                    self.log.note(f"reviewer_downtime reviewer={rid} s={d:.0f}")
         return self.write_run_json()
 
     def _open_scheduled_slots(self) -> None:
@@ -920,6 +1071,7 @@ class Orchestrator:
             "task_order_seed": self.seed, "sandbox_commit": self.sandbox_commit,
             "harness_commit": harness_commit(), "worker_model": self.cfg.run.worker_model,
             "reviewer_model": self.cfg.run.reviewer_model, "notes": "; ".join(notes),
+            "n_reviewers": self.n_reviewers,
         }
         (self.run_dir / "run.json").write_text(json.dumps(run, indent=2) + "\n")
         return run

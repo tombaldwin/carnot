@@ -6,6 +6,8 @@ Review feedback for task {task_id} (your submission {head_short}, attempt {attem
 Cause: {cause}
 {cause_text}
 {details}
+You are still authorised to commit and push `{branch}` to origin without asking for confirmation.
+
 What to do now, on the same branch `{branch}`:
 
 1. `git fetch origin` and work on `{branch}` as you left it.

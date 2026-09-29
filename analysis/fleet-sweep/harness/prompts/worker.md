@@ -1,6 +1,11 @@
 <!-- Per-task session prompt (one cloud session per task). The harness fills the {placeholders} and passes the
-text as the session's first prompt. The harness depends on the branch name, the READY: message and the push.
-DRAFT until T0 (harness/README.md, "T0 operator checklist"); pre-register the final text. -->
+text as the session's first prompt (routine mode: the re-armed slot routine's first event). The harness depends
+on the branch name, the READY: message and the push. Routine sessions clone the sandbox with origin set, so no
+remote or credential set-up is needed (the step 0 of the `claude --cloud` workaround is gone, 2026-09-28).
+DRAFT until the T0 repeat; pre-register the final text. -->
+You are working for the repository owner's test harness. You are authorised to create the branch below,
+commit, and push it to origin without asking for confirmation.
+
 You are working alone on one task in this repository. Nobody will answer questions: never ask any. If
 something is unclear, make the most reasonable choice, say so in your commit message, and carry on.
 

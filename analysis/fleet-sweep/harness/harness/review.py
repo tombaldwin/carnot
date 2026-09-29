@@ -15,19 +15,27 @@ run in an empty temp dir, prompts/reviewer-diff.md), kept for reproducing earlie
 
 The same `CommandReviewer` serves live windows (orchestrator) and offline calibration
 (`python -m harness calibrate`), so the calibrated V is measured on the live job.
+
+Isolation (PLAN-v6 section 6.5; K reviewers may run at once): every call gets its own temporary directory
+(``mkdtemp``, reviewer id in the prefix) holding its prompt and its checkout, so no two calls share a working
+tree, and the call runs with ``PYTEST_ADDOPTS=-p no:cacheprovider`` (and no bytecode writing), so concurrent
+pytest runs share no cache even if the reviewer types a bare ``python -m pytest``.
 """
 from __future__ import annotations
 
 import dataclasses as dc
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 from .config import Config
+from .routines import start_with_retries
 from .tasks import Task
 
 
@@ -45,6 +53,7 @@ class ReviewPacket:
     visible_passed: bool
     visible_output: str
     visible_cmd: str = "python -m pytest -q"   # how the reviewer runs the visible suite in the checkout
+    reviewer_id: str = ""                       # r1..rK (PLAN-v6: K parallel reviewers); names the temp dir only
 
     def render(self, template: str, max_diff_chars: int = 60000) -> str:
         diff = self.diff
@@ -132,12 +141,26 @@ def visible_cmd_text(cfg: Config) -> str:
     return " ".join(c.format(python=py) for c in cfg.tests.visible_cmd)
 
 
+def reviewer_env(base: dict | None = None) -> dict:
+    """Environment of one reviewer call: pytest without its cache plugin and Python without bytecode files, so
+    concurrent reviews (K > 1, or calibrate --parallel) share nothing on disk beyond their own checkout."""
+    env = dict(os.environ if base is None else base)
+    addopts = env.get("PYTEST_ADDOPTS", "")
+    if "no:cacheprovider" not in addopts:
+        env["PYTEST_ADDOPTS"] = (addopts + " -p no:cacheprovider").strip()
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    return env
+
+
 class CommandReviewer(Reviewer):
     """Runs ``cfg.reviewer.command`` (UNVERIFIED template) once per review:
     a fresh process with no memory of earlier reviews. For the checkout job it needs
     ``repo`` (a local clone that has the head) to export the checkout."""
 
-    def __init__(self, cfg: Config, repo=None):
+    def __init__(self, cfg: Config, repo=None, run_fn=subprocess.run, sleep_fn=time.sleep, start_retries: int = 3,
+                 start_retry_wait_s: float = 5):
+        self.run_fn, self.sleep = run_fn, sleep_fn
+        self.start_retries, self.start_retry_wait_s = start_retries, start_retry_wait_s
         rc = cfg.reviewer
         if rc.job not in JOBS:
             raise ValueError(f"[reviewer] job must be one of {JOBS}, not {rc.job!r}")
@@ -168,7 +191,8 @@ class CommandReviewer(Reviewer):
 
     def review(self, packet: ReviewPacket) -> ReviewResult:
         rc = self.cfg.reviewer
-        with tempfile.TemporaryDirectory(prefix="fleet-review-") as td:
+        prefix = f"fleet-review-{packet.reviewer_id}-" if packet.reviewer_id else "fleet-review-"
+        with tempfile.TemporaryDirectory(prefix=prefix) as td:
             pf = Path(td) / "prompt.md"
             checkout = ""
             if rc.job == "checkout":
@@ -180,14 +204,15 @@ class CommandReviewer(Reviewer):
                 checkout = str(co)
             pf.write_text(packet.render(self.template, rc.max_diff_chars))
             cmd, cwd = self.command_for(str(pf), td, checkout)
-            try:
+            env = reviewer_env()
+            def call():
                 with open(pf) as stdin:
-                    p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=rc.timeout_s,
-                                       stdin=stdin if rc.prompt_on_stdin else subprocess.DEVNULL)
-            except subprocess.TimeoutExpired:
-                raise ReviewError(f"reviewer timed out after {rc.timeout_s}s")
-            except OSError as e:
-                raise ReviewError(f"reviewer did not start: {e}")
+                    return self.run_fn(cmd, cwd=cwd, capture_output=True, text=True, timeout=rc.timeout_s,
+                                       stdin=stdin if rc.prompt_on_stdin else subprocess.DEVNULL, env=env)
+            # A process that cannot start (OSError: e.g. the CLI binary replaced mid-run) is retried.
+            p = start_with_retries(call, self.start_retries, self.start_retry_wait_s, self.sleep,
+                                   lambda e, n: ReviewError(f"reviewer did not start ({n} attempts): {e}"),
+                                   lambda e: ReviewError(f"reviewer timed out after {rc.timeout_s}s"))
         if p.returncode != 0:
             raise ReviewError(f"reviewer exit {p.returncode}: {(p.stderr or p.stdout).strip()[:500]}")
         text, tin, tout = p.stdout, None, None

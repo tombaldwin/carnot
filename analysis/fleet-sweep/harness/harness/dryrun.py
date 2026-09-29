@@ -96,7 +96,8 @@ def dry_run(cfg: Config, run_id: str | None = None, seed: int | None = None,
     finally:
         reviewer.stop.set()
         launcher.stop_all()
-    errs = validate_events(run_dir / "events.jsonl") + validate_run_json(run_dir / "run.json")
+    errs = (validate_events(run_dir / "events.jsonl", n_reviewers=orch.n_reviewers)
+            + validate_run_json(run_dir / "run.json"))
     errs += [f"harness thread error: {e}" for e in orch.errors]
     errs += [f"sim session {s.session_id} crashed: {s.error}" for s in launcher.sessions.values()
              if s.error and not s.error.startswith("git:")]

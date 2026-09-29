@@ -1,34 +1,35 @@
 # Fleet-sweep harness (study 2 orchestrator)
 
 This runs one window of the study in PLAN-v4.md (protocol from PLAN-v3.md; v4.2 changes in PLAN-v4
-section 7): it resets the sandbox repo, watches the workers' git branches, feeds the reviewer one change
-at a time, runs the serial merge queue, and writes `runs/<run_id>/events.jsonl` and `run.json` in the
+section 7; K parallel reviewers and the v6 phases from PLAN-v6 sections 5-6): it resets the sandbox repo, watches
+the workers' git branches, feeds K reviewers (`[reviewer] parallel`, default 1) one change each at a time from one
+FIFO queue, runs the serial merge queue, and writes `runs/<run_id>/events.jsonl` and `run.json` in the
 format SCHEMA.md sets out. Workers are **one cloud session per task** in N slots (below). It also runs the offline reviewer calibration through the live review path
-(`calibrate`) and the abort-rule-1 throttling measure on T1's log (`throttle`). It needs only the Python 3.11 standard library and git 2.40 or later. pytest is used for its
+(`calibrate`) and abort rule 1 (throttling, PLAN-v6's revised rule) on a T1 / T1b log (`throttle`). It needs only the Python 3.11 standard library and git 2.40 or later. pytest is used for its
 own tests and for the sandbox's test suites.
 
 Dry runs, and every test, use simulated sessions (`SimCloudLauncher`) and a simulated reviewer against a
 local bare repo. **Nothing here calls `claude`, an Anthropic API, GitHub, or a cloud session unless you run
-`reset`, `run`, `validate-tasks` or `calibrate` with a real config.** There is no default real config:
-those commands need `--config` with one of the five phase configs (below).
+`reset`, `run`, `routines-setup`, `validate-tasks` or `calibrate` with a real config.** There is no default real config:
+those commands need `--config` with one of the phase configs (below).
 
 ```sh
 cd analysis/fleet-sweep/harness
 python3.11 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
-.venv/bin/python -m pytest -q                      # about 1.5 min
+.venv/bin/python -m pytest -q                      # about 3 min
 .venv/bin/python -m harness dry-run --run-id dry-1 # a 90-min window in about 1 min (toy sandbox, 4 slots)
 .venv/bin/python -m harness status --config config.dryrun.toml --run-id dry-1
-.venv/bin/python -m harness throttle runs/<T1 run id>     # abort rule 1 on T1's log (no API)
+.venv/bin/python -m harness throttle runs/<T1b run id>    # abort rule 1 on a T1 / T1b log (no API)
 ```
 
 ## How it works
 
 ```
-dispatcher --claude --cloud (task prompt)--> session (1 per task, in a slot) --git push--> remote
-    ^   \--claude -p ... --cloud <id> (rework)--^                                            |
+dispatcher --re-arm slot routine (task prompt)--> session (1 per task, in a slot) --git push--> remote
+    ^   \--claude -p ... --cloud <cse id> (rework)--^                                             |
     |                                                                             git fetch |
-    +-- rework queue <-- bounce <-- merge queue <-- approve -- reviewer <-- review queue <-- watcher
-                                         |  (serial)                (one at a time, FIFO)
+    +-- rework queue <-- bounce <-- merge queue <-- approve -- reviewers <-- review queue <-- watcher
+                                         |  (serial)          r1..rK, one change each, FIFO)
                                          +--> main
 ```
 
@@ -48,7 +49,49 @@ detach from it, is **UNVERIFIED** (T0, below).
 - **Hand-out** (`dispatcher` thread). The harness hands tasks to free slots in the window's seeded order
   (`reset.json` `task_order`, the TASKS.json committed at reset; T0's `first_task` first). No claims, no
   races, no scanning of TASKS.json by workers. Queued rework goes first (below), then the next task.
-- **Launch.** From the launch clone (`[launcher] launch_dir`: a local clone whose origin is the sandbox
+- **Launch (routine mode, `[launcher] mode = "routine"`, all phase configs since 2026-09-28).** A
+  `claude --cloud` session gets an uploaded copy of the repo with no remote and cannot push (git proxy 403,
+  T0 2026-09-28). A Claude Code **routine** whose source is the sandbox's GitHub URL gets a real clone with
+  origin and can push `claude/*` branches. So each slot `sK` has one routine, `carnot-study2-<phase>-sK`,
+  created disabled by `python -m harness routines-setup --config <phase config>` (ids in a private state file,
+  default `routines-state.json` beside `[repo] work_dir`, never in this repo). Launching a task **re-arms** the
+  slot's routine: a partial update setting the rendered prompt (`prompts/worker.md`) as its first event,
+  `enabled: true` and `run_once_at` = now + `lead_s` (30 s). One-off runs are exempt from the daily routine
+  cap; each routine allows 30 fires per hour (re-arms included; the harness keeps to
+  `max_updates_per_hour`). The harness cannot call the routines API itself: each call is a local
+  `claude -p '<instruction>' --model claude-haiku-4-5 --tools RemoteTrigger ... --output-format json`
+  (`[launcher.routine] runner`, ~9 s) told to make exactly one RemoteTrigger call with the embedded JSON and
+  return the raw tool output (`harness/routines.py`). The returned trigger is checked (id, `enabled`,
+  `run_once_at`, the event uuid and prompt); a mismatch or a non-200 disarms the routine and counts as a failed
+  launch (`session_launch_failed` note, retried once, `attempt_no` as before). `session_launch` is logged when
+  the re-arm is confirmed, with session_id null. The run starts 40-75 s after `run_once_at`; the harness then
+  polls `list_runs` (from `run_once_at` + 40 s, every 20 s, only while that slot waits) for the first run created
+  after `run_once_at` and logs its id (`cse_...`) in a `launch_detail ... session_id_found=true` note. Rework for
+  a task waits in the queue until its id is known. **Start-up time (session_launch -> claim) therefore includes
+  the lead and the routine firing delay** (SCHEMA.md). At window end, and whenever `run` exits, every slot
+  routine is disabled (`routine_disabled` / `routine_disable_failed` notes; failures are printed so the operator
+  can disable them by hand).
+- **Pinned CLI and launch failures** (after the T1 incident, 2026-09-28 17:49 UTC: an auto-update replaced the
+  `claude` binary mid-window, every process start failed with `No such file or directory`, and one slot
+  abandoned ~15 tasks in a second and used up its routine's hourly budget).
+  - `run` pins the CLI before the window (`[run] pin_cli = true`, the default): it resolves `claude` on PATH
+    (through symlinks), copies it to `<[launcher] prompt_dir>/bin/claude-<version>` (private; refused inside
+    this repo; an existing copy of the same version is reused, old ones are left), checks `<copy> --version`,
+    logs `cli_pinned path=… version=… source=… reused=…`, and uses the copy in place of the bare `claude` in the
+    routine runner, `followup_command`, the reviewer `command` and `launch_command`. `pin_cli = false`: `claude`
+    from PATH, as before (a `cli_pinned disabled` note).
+  - A CLI process that cannot start (OSError, e.g. the binary missing) is retried 3 times, 5 s apart, in the
+    routine runner, the follow-up and the reviewer call. A re-arm whose runner never started gives back the
+    routine's rate-budget entry (`routine_budget_refund` note).
+  - After a task's launch fails (all attempts) its slot takes no work for `[run] launch_fail_backoff_s` (60 s;
+    `slot_backoff` note). After `max_consecutive_launch_failures` (3) failed tasks in a row the slot is marked
+    down for the rest of the window: `worker_down` (worker = slot, reason `launch_failures n=… last_error=…`),
+    a console message, no more dispatch to it. A successful launch resets the count. If launches fail on
+    `launch_fail_breaker_slots` (3) different slots within `launch_fail_breaker_window_s` (60 s), all dispatch
+    pauses for the back-off (`dispatch_paused reason=launch_failures …`, then `dispatch_resumed`).
+  - A rework follow-up that still fails is logged (`followup_failed … session=… error=…`, a console message)
+    and the task is abandoned, as before.
+- **Launch (`mode = "command"` / `"manual"`, kept for reference; its sessions cannot push).** From the launch clone (`[launcher] launch_dir`: a local clone whose origin is the sandbox
   GitHub repo, on branch `main`, synced to `origin/main` before each launch):
   `claude --cloud "<prompt>" --model claude-haiku-4-5 --name <run_id>-s<slot>-<task>`. The prompt
   (`prompts/worker.md`) holds the task text and acceptance criteria and tells the session: create
@@ -62,7 +105,8 @@ detach from it, is **UNVERIFIED** (T0, below).
 - **Rework.** When a change bounces (any cause) the harness never pushes to the session's branch. It queues
   the rework; when a slot frees, it sends the feedback (`prompts/rework.md`, cause wording as before, never a
   hidden-test name) as a follow-up message to **that task's own session**
-  (`claude -p "<message>" --cloud <session_id>`), logged as `session_message` kind `rework`. That slot is then
+  (`claude -p "<message>" --cloud <session_id>`; in routine mode the run's `cse_...` id, verified to reach
+  routine sessions 2026-09-28), logged as `session_message` kind `rework`. That slot is then
   the session's until its next READY. The session need not be on the slot it started on.
 - **Timeouts.** No READY within `task_timeout_min` (25) of the launch, or of a rework message: the session is
   abandoned (`session_timeout`, a `task_abandoned` note, the optional `stop_command`), its slot freed, and the
@@ -95,7 +139,16 @@ detach from it, is **UNVERIFIED** (T0, below).
 
 **Prep.** This thread runs the visible tests on each submitted head, for the record. It logs a `note` of the form `visible_pre task=… head=… passed=…`.
 
-**Review queue.** A FIFO with one reviewer call at a time. **The review job (PLAN-v4 section 7.3,
+**Review queue.** A FIFO served by K reviewer threads `reviewer-r1..rK` (`[reviewer] parallel = K`, default 1 =
+the serial reviewer of PLAN-v4/v5; PLAN-v6 section 6). Each thread takes the first queued change that has
+finished its visible-test prep and whose task is not under review by another thread (an unprepared change is
+skipped, not waited on; a newer head of a task under review waits for that review), so each reviewer reviews one
+change at a time and no task is in two reviews at once. `queue_depth` counts the changes waiting, excluding every
+change under review. Approvals enter the (serial) merge queue in the order reviews finish. Every reviewer event
+carries `reviewer` (r1..rK, also at K = 1) and `run.json` carries `n_reviewers`. **Isolation:** each call gets its
+own temporary directory (`mkdtemp`, prefix `fleet-review-<rid>-`) holding its prompt and its checkout, and runs
+with `PYTEST_ADDOPTS=-p no:cacheprovider` and `PYTHONDONTWRITEBYTECODE=1`, so concurrent reviews share no working
+tree and no pytest cache; all threads use the pinned CLI copy and the CLI-start retry applies per call. **The review job (PLAN-v4 section 7.3,
 frozen before T1; `[reviewer] job = "checkout"`):** each call gets a fresh temporary checkout of the
 exact submitted head as its working directory (`cwd = "{checkout}"`: an export of that commit's tree,
 no `.git`, no other refs, with `strip_paths`, i.e. `.claude/` and `CLAUDE.md`, removed so a change
@@ -112,12 +165,17 @@ and `calibrate` build the packet with the same function (`review.make_packet`).
   markdown, and a `Verdict:` prefix are tolerated. If the first line has no verdict, the first line
   that starts with one is used. Anything else is a `review_error`. Unclear output is never read as
   approval.
-- Errors: a failed call is retried once, straight away. If the retry also fails, the change goes
-  back to the front of the queue and the reviewer backs off for `retry_backoff_s`. Downtime runs
-  from a failure to the next successful review. More than `max_downtime_min` (10) in a window
-  writes a `note` starting `VOID:` and adds the same reason to `run.json` `notes`.
-- `reviewer_busy`/`reviewer_idle` mark stretches of back-to-back reviews, so V is reviews divided
-  by busy hours.
+- Errors: a failed call is retried once, straight away, by the same reviewer. If the retry also fails, the
+  change goes back to the front of the queue (dropped instead if a newer head of its task is already queued),
+  where any reviewer may take it, and the failing reviewer backs off for `retry_backoff_s`. Downtime is per
+  reviewer: from its failure to its next successful review. The window is VOID when the reviewers' combined
+  capacity was down more than `max_downtime_min` (10), i.e. summed downtime / K: a `note` starting `VOID:` and
+  the same reason in `run.json` `notes`. At grace end each reviewer with downtime gets a
+  `reviewer_downtime reviewer=… s=…` note.
+- Each reviewer's `reviewer_busy`/`reviewer_idle` mark its stretches of back-to-back reviews, so V is reviews
+  divided by busy hours (per reviewer: `derive.py`). All K reviewers continue through grace; a review still open
+  at grace end is noted per reviewer (`review_open_at_grace_end task=… head=… reviewer=…`) and the analysis clips
+  that reviewer's busy time only.
 
 **Merge queue** (serial) for each approved head:
 1. `hidden_pre`: that task's hidden tests on the exact approved head. A failure bounces
@@ -172,14 +230,15 @@ since those tests are public; for `review`, the reviewer's reason.
 | `harness/tasks.py` | task catalogue, seeded order, test execution in temp checkouts |
 | `harness/review.py` | review packet (`make_packet`), verdict parser, command reviewer: checkout job, cwd, allow-list, stdin (UNVERIFIED template) |
 | `harness/calibrate.py` | `calibrate`: reference solutions and mechanical mutants through the same `CommandReviewer`; writes the calibration-review log |
-| `harness/throttle.py` | `throttle`: abort rule 1 from T1's log (session launches + READY per slot-minute, one slot vs twelve) |
+| `harness/throttle.py` | `throttle`: abort rule 1 (PLAN-v6): start-up and coding ratios, one slot vs twelve, Welch 90% interval, tolerance 1.25; the old activity measure reported beside it |
 | `harness/orchestrator.py` | slots and sessions (dispatcher, timeouts, rework queue), watcher, prep, review queue, merge queue, bounces, window control, run.json |
-| `harness/launchers.py` | per-task prompt and rework message rendering; manual and command (UNVERIFIED) session launchers (launch, follow-up); the verified guards; the private prompt dir |
+| `harness/launchers.py` | per-task prompt and rework message rendering; routine, manual and command session launchers (launch, follow-up, session id lookup, disabling routines); the verified guards; the private prompt dir; the routine state file |
+| `harness/routines.py` | RemoteTrigger calls through a `claude -p` runner: instruction, output parsing, `rearm` / `create` / `get` / `list_runs` / `disable` with validation |
 | `harness/sim.py` | SimSession (one per task), SimCloudLauncher, SimReviewer, oracle |
 | `harness/toygen.py` | toy sandbox + 10 toy task templates with hidden tests and reference patches |
 | `harness/validate.py` | task validation: hidden fails on base, hidden and visible pass with reference |
 | `harness/dryrun.py`, `harness/report.py`, `harness/cli.py` | dry-run wiring, event counts, CLI |
-| `config.t0.toml`, `config.t1.toml`, `config.t2.toml`, `config.sweep-n1.toml`, `config.sweep-n12.toml` | one real config per phase (PLAN-v4 section 7.4, plus T0); they differ only in `[run]`; placeholders + UNVERIFIED templates |
+| `config.t0.toml`, `config.t1.toml`, `config.t2.toml`, `config.t1b.toml`, `config.sweep-n{1,12}-k{1,3}.toml` | one real config per phase (PLAN-v4 section 7.4, T0, PLAN-v6 section 5.1); they differ only in `[run]` and `[reviewer] parallel` |
 | `config.dryrun.toml` | dry-run config |
 | `prompts/reviewer.md` | the frozen review job's prompt (checkout job) |
 | `prompts/reviewer-diff.md` | SUPERSEDED diff-only review prompt (`job = "diff"`) |
@@ -187,7 +246,9 @@ since those tests are public; for `review`, the reviewer's reason.
 | `prompts/rework.md` | follow-up message after a bounce (template; draft until T0) |
 | `tests/` | pytest suite |
 
-CLI: `python -m harness {reset,run,calibrate,throttle,dry-run,status,log,validate-tasks,validate-log,make-toy} --config FILE`.
+CLI: `python -m harness {reset,run,routines-setup,calibrate,throttle,dry-run,status,log,validate-tasks,validate-log,make-toy} --config FILE`.
+`routines-setup` creates (or looks up and checks) the phase's N slot routines, disabled, and writes their ids to
+the private state file; `--dry-run` prints the plan without any call.
 `log` appends operator events (`meter`, `note`, `worker_down`, `worker_restart`; worker = slot id) to a
 run's log and checks them against the schema.
 
@@ -253,14 +314,18 @@ real seconds even when the clock is accelerated, so they measure the merge-queue
 ## UNVERIFIED settings (fill in after the product checks: PLAN-v4 section 7.3 and T0)
 
 `python -m harness run` refuses to start while any template it needs has `verified = false` (reviewer:
-`[reviewer] verified`; launcher in `mode = "command"`: `[launcher] verified` and `followup_verified`).
-T0 runs with `mode = "manual"`, which needs neither: the operator runs each printed command.
+`[reviewer] verified`; launcher in `mode = "command"`: `[launcher] verified` and `followup_verified`; in
+`mode = "routine"`: `followup_verified`, and `verified` in every phase except t0, whose job is to check it; it
+also needs a routine id for every slot, from `routines-setup`).
 
 | Setting | Default | What to check |
 |---|---|---|
 | `[reviewer] command`, `allowed_tools` | `claude -p --model {model} --output-format json --allowedTools {allowed_tools} --no-session-persistence`, prompt on stdin, cwd the checkout; allow-list `Read,Grep,Glob,Bash({python} -m pytest:*)` | the Opus 5.5 model id; billed to the plan, not the credits; the allow-list syntax and that nothing outside it runs (no edits, web, MCP servers, user-level settings or hooks); no session persistence; exit code on a rate limit |
 | `[reviewer] output_format` | `json` | the JSON field names (the parser expects `result` and `usage.input_tokens`/`output_tokens`) |
 | `[run] worker_model`, `reviewer_model` | `claude-haiku-4-5`, `claude-opus-5-5` | the exact model id strings; Haiku 4.5 available for cloud sessions (`--cloud --model`) on the paying account, and the model the session actually ran (T0) |
+| `[launcher] verified` (routine mode) | false | the whole routine path under the harness (T0 repeat): the re-arm through the runner and its validation, that Haiku reliably passes the JSON verbatim and echoes the raw output (a long prompt, ~10 KB of output), the firing delay, the session id lookup via `list_runs`, the branch pushed, the follow-up to a `cse_` id, disabling at window end |
+| `[launcher.routine] runner` | the verified `claude -p ... --tools RemoteTrigger ... --output-format json` | verified 2026-09-28 by hand (~9 s). `--output-format stream-json --verbose` would let the parser read the real tool result instead of the model's copy (the parser already prefers one if present); unchecked |
+| routine create (`routines-setup`) | `enabled: false`, `run_once_at` now + 1 h, `mcp_connections: []`, then `clear_mcp_connections: true` | that a routine can be created disabled (never fires), and the `get` / `list` input shapes (`{"action": "get", "trigger_id": ...}`, `{"action": "list"}`); `update`, `create` and `list_runs` shapes are verified |
 | `[launcher] launch_command` | `claude --cloud {prompt} --model {model} --name {name}`, cwd the launch clone | that it works non-interactively from a script; that a long multi-line prompt as one argument is accepted; which branch/commit the session starts from (T0) |
 | `[launcher] session_id_regex` | `(?P<session_id>session_[A-Za-z0-9]{8,})` | whether the launch prints a session id or URL at all, where, and its exact form (T0) |
 | `[launcher] detach`, `detach_after_s`, `detach_signal` | `on_id`, 120 s, `none` | when the command can be left, and whether leaving it (or sending SIGINT/SIGTERM to it) stops the cloud session (T0) |
@@ -271,21 +336,31 @@ T0 runs with `mode = "manual"`, which needs neither: the operator runs each prin
 | `prompts/worker.md`, `prompts/rework.md` | draft | the final wording after T0, to be pre-registered |
 | undocumented limits | - | idle timeout of a cloud session (a session waiting for rework may expire), concurrent-session limit (12 needed at T1), shared rate limits (throttling, abort rule 1) |
 
-## Phase configs (PLAN-v4 section 7.4)
+## Phase configs (PLAN-v4 section 7.4; PLAN-v6 sections 5.1 and 6.1)
 
-| File | phase | kind | N (slots) | window | start schedule |
-|---|---|---|---|---|---|
-| `config.t0.toml` | t0 | trial | 1 | 20 min (warm-up 0) | all at 0; `first_task = "T145"`, `probe_followup = true` |
-| `config.t1.toml` | t1 | trial | 12 | 60 min | `[[0, 1], [30, 12]]`: s1 at minute 0, s2-s12 at minute 30 |
-| `config.t2.toml` | t2 | pilot | 1 | 60 min | all at 0 |
-| `config.sweep-n1.toml` | sweep-n1 | sweep | 1 | 120 min | all at 0 |
-| `config.sweep-n12.toml` | sweep-n12 | sweep | 12 | 120 min | all at 0 |
+| File | phase | kind | N (slots) | window (warm-up) | K reviewers | start schedule |
+|---|---|---|---|---|---|---|
+| `config.t0.toml` | t0 | trial | 1 | 45 min (0) | 1 | all at 0; `first_task = "T145"`, `probe_followup = true` |
+| `config.t1.toml` | t1 | trial | 12 | 60 min (10) | 1 | `[[0, 1], [30, 12]]`: s1 at minute 0, s2-s12 at minute 30 |
+| `config.t2.toml` | t2 | pilot | 1 | 60 min (10) | 1 | all at 0 (PLAN-v4/v5; v6 has no pilot) |
+| `config.t1b.toml` | t1b | trial | 12 | 120 min (0) | 3 | `[[0, 1], [90, 12]]`: s1 alone for 90 min, then s1-s12 for 30 min |
+| `config.sweep-n1-k1.toml` | sweep-n1-k1 | sweep | 1 | 45 min (5) | 1 | all at 0 |
+| `config.sweep-n1-k3.toml` | sweep-n1-k3 | sweep | 1 | 45 min (5) | 3 | all at 0 |
+| `config.sweep-n12-k1.toml` | sweep-n12-k1 | sweep | 12 | 45 min (5) | 1 | all at 0 |
+| `config.sweep-n12-k3.toml` | sweep-n12-k3 | sweep | 12 | 45 min (5) | 3 | all at 0 |
 
-All five: grace 10, session timeout 25 min, time budget 20 min, Haiku 4.5 sessions, Opus 5.5 reviewer,
-`base_ref = "sandbox-v1"`, the remote URL a placeholder, the checkout review job, `launcher.mode = "manual"`;
-warm-up 10 except T0 (0). They differ only in `[run]` (a test checks this). `run` refuses a config whose
-kind, N, window, warm-up, grace, start schedule, session timeout / budget, first task, probe, models or review
-job differ from its named phase (`config.PHASES`), prints them, and starts only when the operator types the
+The PLAN-v4/v5 sweep configs (`config.sweep-n1.toml`, `config.sweep-n12.toml`: 90 min, one reviewer) are
+retired; the sweep's cell order is `v6.v6_order` (PLAN-v6 section 5.1). `run` refuses a config whose
+`[reviewer] parallel` differs from its phase's K, and any sweep config with K other than 1 or 3. The K variants
+of one fleet size share their slot routines (`config.routine_group`: `sweep-n12-k1` and `sweep-n12-k3` both use
+`carnot-study2-sweep-n12-s<k>`), so `routines-setup` is needed once per N, not per cell.
+
+All of them: grace 10, session timeout 25 min, time budget 20 min, Haiku 4.5 sessions, Opus 5.5 reviewer,
+`base_ref = "sandbox-v1"`, the checkout review job, `launcher.mode = "routine"` (`verified = false` until the
+T0 repeat; `[launcher.routine]` environment `env_01REHbnKNqfeaJdQr9VjHaX5`, source the sandbox's GitHub URL);
+warm-up as in the table. They differ only in `[run]` and `[reviewer] parallel` (a test checks this). `run`
+refuses a config whose kind, N, window, warm-up, grace, start schedule, session timeout / budget, first task,
+probe, models, review job or K differ from its named phase (`config.PHASES`), prints them, and starts only when the operator types the
 phase name (or passes `--yes`). With a `start_schedule`, later slots open from a thread at their minute, so
 the window's own timing is never held up by the operator. T0 is a product check, not part of the pilot:
 `derive.py --pilot` refuses a run whose `run.json` notes say `phase=t0`.
@@ -309,100 +384,111 @@ python -m harness calibrate --config config.t2.toml --tasks @ids.txt --variants 
 - One row per review is appended to the calibration-review log (analysis/README.md), which
   `predict.py --calibration` reads for abort rule 4; rows already in the file are skipped, so a run can be
   resumed. Reasons go only to `--detail-out` (private), never to the public log.
-- `duration_s` covers the reviewer call(s) including an immediate retry. `--parallel k` is for calibration
-  only: V from calibration uses call durations and verdicts, never queueing. Parallel calls that each run
-  pytest can slow one another; use 1 if in doubt.
+- `duration_s` covers the reviewer call(s) including an immediate retry. V from calibration uses call
+  durations and verdicts, never queueing. Every row records `parallel`; the summary gives `mean_duration_s`.
+- **Contention check (PLAN-v6 section 6.10, free):** the same reference and mutant items at `--parallel 1` and
+  `--parallel 3`, under two job labels (`--job v6-par1`, `--job v6-par3`; the mutants are reused from
+  `--mutant-dir`), then compare the two jobs' mean `duration_s`. The v6 simulation assumed no contention
+  (20% per extra reviewer is harmless to SCALE but raises rule 4's flag rate).
 - Refuses to run while `[reviewer] verified = false`.
 
-## Throttling on T1 (PLAN-v4 section 7.5; abort rule 1)
+## Throttling on T1b (PLAN-v6 section 5.4; abort rule 1, revised)
 
-`python -m harness throttle runs/<T1> [--json out.json]` compares per-slot activity (`session_launch` +
-READY submissions on the slot, per slot-minute; every task is a launch with one session per task) in T1's
-one-slot phase with its twelve-slot phase; throttled if the ratio is below 0.8. It also reports the median
-launch-to-first-READY minutes per phase (JSON keys `claim_to_ready_*`, kept for compatibility), an approximate interval, and the operator's `meter` and `plan_usage` readings; `usage` events, if a
-token source is ever logged, replace activity. The one-slot phase is short, so only gross throttling is
-detectable (PLAN-v4 section 7.5).
+`python -m harness throttle runs/<T1b> [--exclude s2,s3 | --exclude none] [--split-min 90] [--json out.json]`.
+For every task launched in the one-slot phase (before the second `start_schedule` minute) and in the
+twelve-slot phase: **start-up** = branch first pushed (`claim`) minus the routine's `run_once_at` (from the task's
+`launch_detail` note; its `session_launch` if missing), and **coding** = first READY minus `claim`. The statistic
+is the ratio of geometric means (twelve slots over one) with a Welch 90% interval on the log scale; tolerance
+1.25. **STOP** if the start-up interval lies wholly above 1.25, **CLEAR** if wholly below, else **INCONCLUSIVE**
+(proceed; report the ratio beside SCALE). A coding interval wholly above 1.25 is a flag, not a stop. Slots lost to
+operator-logged failures unrelated to the service are excluded first: `--exclude s2,s3`, or by default every slot
+with an operator `worker_down` (reason starting `operator`); `--exclude none` keeps all. Pure Python (the same
+statistic as `analysis/v6.py` `throttle_v6`). On T1 (`runs/T1-2026-09-28`, s2 and s3 excluded) it reads start-up
+1.13 (90% 0.98-1.31), coding 1.16 (0.87-1.54): INCONCLUSIVE.
+
+Reported beside it (no longer the rule): the PLAN-v4 activity measure (session launches + READY per slot-minute,
+one-slot phase against twelve-slot phase, the old 0.8 threshold's reading, an approximate interval, the median
+launch-to-first-READY minutes, `usage` tokens if ever logged) and the operator's `meter` and `plan_usage`
+readings.
 
 ## T0 operator checklist (1 slot, 20 min, task T145)
 
-T0 settles every UNVERIFIED launcher item before T1. Run it with `launcher.mode = "manual"` (the shipped
-default): the harness prints each command, the operator runs it in a second terminal from the launch
-clone, and records what happened. Nothing in T0 enters the pilot.
+T0 settles the routine launch path before T1 (the first T0, 2026-09-28, settled the follow-up and showed that
+`claude --cloud` sessions cannot push). It runs with `launcher.mode = "routine"` and `verified = false`, which
+`run` accepts for phase t0 only. Nothing in T0 enters the pilot.
 
-Before: fill in `[repo]`, `[tasks]`, `[tests]`, `[launcher] launch_dir` and `prompt_dir` (private) in
-`config.t0.toml` as in the other phase files; the reviewer must be verified (PLAN-v4 section 7.3) or the run
-is refused. Read the credit meter and the plan-usage page (M0).
+Before: fill in `[repo]`, `[tasks]`, `[tests]` and `[launcher] prompt_dir` (private) in `config.t0.toml` as in
+the other phase files; the reviewer must be verified (PLAN-v4 section 7.3). Read the credit meter and the
+plan-usage page (M0).
 
-1. `python -m harness reset --config config.t0.toml --run-id <T0> --seed <s>`: check `task_order[0]` is
+1. `python -m harness routines-setup --config config.t0.toml --dry-run`, then without `--dry-run`: creates
+   `carnot-study2-t0-s1`, disabled, and prints the state file. Check at claude.ai/code/routines that it exists
+   and is off (nothing fires until `run` re-arms it).
+2. `python -m harness reset --config config.t0.toml --run-id <T0> --seed <s>`: check `task_order[0]` is
    `T145` and `branches_deleted`.
-2. `python -m harness run --config config.t0.toml --run-id <T0>`; type `t0`. The harness prints
-   `cd <launch clone> && claude --cloud "$(cat <prompt file>)" --model claude-haiku-4-5 --name <T0>-s1-T145`.
-3. Run it, with a stopwatch, and record (as `python -m harness log --config config.t0.toml --run-id <T0>
-   --type note --field text="t0 <item>=<value>"`, one note per item):
-   - **launch_output**: what the command prints, in order (save the terminal text in the private prompt dir);
-   - **launch_returns_s**: whether and when it returns by itself; whether it waits for input;
-   - **session_id**: whether a session id or URL is printed, its exact form, and a regex that matches it
-     (paste the id at the harness's prompt);
-   - **detach**: what Ctrl-C (and closing the terminal) does once the id is shown: does the session keep
-     running in the web UI? (decides `detach` / `detach_signal`);
-   - **provisioning_s**: time from the command to the session running, and to the branch appearing on GitHub
-     (the harness logs `claim` when it sees the branch);
-   - **start_ref**: which branch / commit the session cloned (should be `main` at the TASKS commit);
-   - **branch**: the branch the session pushed (`claude/task-T145`, or another name: the watcher notes
-     `pushed on branch ... not claude/task-T145`); whether any other push was refused;
-   - **model**: the model the session actually ran (the session's UI / transcript / `/status`); Haiku 4.5?
-   - **questions**: whether the session asked anything or stopped early;
-   - **ready**: the time of the `READY: T145` push and that the harness logged `submit` within one poll.
-4. After the first READY the harness prints the probe follow-up command (`claude -p "$(cat <msg file>)"
-   --cloud <session id>`). Run it and record **followup_returns_s**, **followup_exit_code**, and whether the
-   message appears in the session (web UI); the harness notes `probe_ack ... delay_s=` when the `PROBE: T145`
-   commit arrives (or `probe_timeout` after 10 min). Record whether the follow-up worked on a session that had
-   already stopped after READY (**followup_to_idle_session**).
-5. If the change bounces, the harness prints a rework command the same way: run it, and record that the
-   session merged `origin/main` if needed and pushed a new `READY:`.
-6. With the slot free the harness launches the next task; let it run to the window end. At `WINDOW END`,
-   stop / archive every session and record how (**stop_method**) and whether a session left idle for the
-   whole window was still reachable (**idle_timeout**, if observed).
-7. After: `validate-log`, `status`; meter and plan-usage readings (M1); the per-session cost if visible.
-   Then fill in `[launcher] session_id_regex`, `detach`, `detach_after_s`, `detach_signal`,
-   `followup_command` / `followup_stdin`, `accept_other_claude_branches`, and set `verified` and
-   `followup_verified` to true in all five phase files, or keep `mode = "manual"` for T1 if the launch cannot
-   be scripted. Settle the prompts' final wording and pre-register it.
+3. `python -m harness run --config config.t0.toml --run-id <T0>`; type `t0`. The harness re-arms s1's routine
+   with T145's prompt and `run_once_at` 30 s ahead. Record (one `python -m harness log --config config.t0.toml
+   --run-id <T0> --type note --field text="t0 <item>=<value>"` per item):
+   - **rearm_s**: how long the re-arm took (the raw runner outputs are in the private prompt dir,
+     `routine-*-rearm.log`), and whether Haiku passed the JSON verbatim (a failure is a `session_launch_failed`
+     note naming the mismatch);
+   - **fire_delay_s**: `run_once_at` (first `launch_detail` note) to the run's `created_at` (routine page);
+   - **session_id**: the `launch_detail ... session_id_found=true session_id=cse_...` note, and that it is the
+     run shown on the routine page;
+   - **start_ref / branch**: the session cloned `main` at the TASKS commit and pushed `claude/task-T145` (the
+     harness logs `claim`); no push was refused;
+   - **model**: the model the session ran (Haiku 4.5?); **questions**: whether it asked anything or stopped;
+   - **ready**: the `READY: T145` push and the harness's `submit` within one poll.
+4. After the first READY the harness sends the probe follow-up to the `cse_` id; it notes `probe_ack ...
+   delay_s=` when the `PROBE: T145` commit arrives (or `probe_timeout` after 10 min).
+5. If the change bounces, check the rework message arrives and the session pushes a new `READY:`.
+6. With the slot free the harness re-arms the routine for the next task; let it run to the window end. At
+   `WINDOW END` the harness disables the routine (`routine_disabled` note; anything listed under
+   `ROUTINES NOT DISABLED` must be disabled by hand). Stop / archive the open sessions by hand.
+7. After: `validate-log`, `status`; meter and plan-usage readings (M1); the per-session cost if visible. Then
+   set `[launcher] verified = true` in all five phase files, settle the prompts' final wording and
+   pre-register it. Before T1: `routines-setup` with `config.t1.toml` (and later each sweep config).
 
 ## Operator checklist for a real window
 
 Before T1:
-1. Set `[repo]`, `[tasks]`, `[tests]` and `[launcher] launch_dir` / `prompt_dir` in all five phase configs
-   (the same values). Run `python -m harness validate-tasks --config config.sweep-n12.toml` against the GitHub
+1. Set `[repo]`, `[tasks]`, `[tests]` and `[launcher] launch_dir` / `prompt_dir` in all phase configs
+   (the same values). Run `python -m harness validate-tasks --config config.sweep-n12-k3.toml` against the GitHub
    remote; 220/220.
 2. The CLI check (PLAN-v4 section 7.3): fill in the UNVERIFIED reviewer template and set
    `verified = true`, or the harness refuses.
-3. T0 (above): settles the launcher; `mode = "command"` only once `verified` and `followup_verified` are true.
+3. T0 (above): settles the routine launcher (`verified = true` afterwards). Then `routines-setup` once per
+   phase config (the routines are per phase: `carnot-study2-<phase>-s<k>`; the sweep's K variants of one N
+   share them, so once for `sweep-n1-*` and once for `sweep-n12-*`).
 4. Calibrate the frozen review job (`calibrate`, above) against the design λ (target V 13.6-16 per busy hour).
 5. Commit the harness and push it with the pre-registration. `run.json` records `harness_commit`,
    with `-dirty` if the harness has uncommitted changes.
 
 T1 (`config.t1.toml`): `reset`, then `run ... --meter-start <M0>`; slot s1 opens at minute 0 and s2-s12 at
-minute 30 (in manual mode, run each printed launch). Log `plan_usage` notes before, at minutes 25, 35 and 55,
+minute 30. Log `plan_usage` notes before, at minutes 25, 35 and 55,
 and after (`python -m harness log --config config.t1.toml --run-id <T1> --type note --field text="plan_usage pct=37 src=..."`).
 After: meter M1, then `python -m harness throttle runs/<T1>`.
 
-For each T2 window (`config.t2.toml`) and sweep window (`config.sweep-n1.toml` / `config.sweep-n12.toml`,
-order 1, 12, 12, 1, 1, 12, or 1, 12, 12, 1 under the degrade design, PLAN-v4 section 7.2):
+T1b (`config.t1b.toml`, K = 3): as T1, with s1 alone for 90 min and s2-s12 from minute 90 to 120; then
+`python -m harness throttle runs/<T1b>` (with `--exclude` for any slot lost to an operator-logged failure).
+
+For each sweep window (`config.sweep-n{1,12}-k{1,3}.toml`, in the order of PLAN-v6 section 5.1, `v6.v6_order`;
+T2 windows under PLAN-v4/v5 used `config.t2.toml`):
 1. Choose `run_id` (e.g. `2026-10-02-N12-r1`) and a seed; the config fixes N.
 2. **Meter before:** read the credits meter.
 3. `python -m harness reset --config <phase config> --run-id <id> --seed <seed>`. Check that the
    printed `sandbox_commit` is the frozen tag and `branches_deleted` looks right.
 4. `python -m harness run --config <phase config> --run-id <id> --meter-start <credits>`. Check the
    printed phase, kind, N, window, session timeout and models, and type the phase name to start. The harness
-   launches one session per task and sends rework as follow-ups (manual mode: run each printed command and
-   paste the session id). Keep the terminal open; it logs every event.
+   launches one session per task (re-arming the slot routines) and sends rework as follow-ups. Keep the terminal open; it logs every event.
 5. During the window:
-   - A slot whose sessions keep failing to launch for more than 10 minutes: log `worker_down` / `worker_restart`
-     for it, e.g. `python -m harness log --config <phase config> --run-id <id> --type worker_down --field worker=s3 --field reason="..."`.
+   - The harness marks a slot down itself after 3 failed launches in a row (`worker_down`, printed as
+     `SLOT sK DOWN`); it stays down for the window. Otherwise, a slot whose sessions keep failing to launch for
+     more than 10 minutes: log `worker_down` / `worker_restart` for it, e.g. `python -m harness log --config <phase config> --run-id <id> --type worker_down --field worker=s3 --field reason="..."`.
      Session timeouts are handled by the harness and are not restarts.
    - More than 2 restarts of a slot voids the window. Record that as a `note` starting `VOID:`.
-6. At the "WINDOW END" prompt, stop every open session. The harness hands out no more work and
+6. At "WINDOW END" the harness disables the slot routines (disable any it lists as failed by hand); stop
+   every open session. The harness hands out no more work and
    finishes reviews and merges through the grace period.
 7. **Meter after:** `python -m harness log --config <phase config> --run-id <id> --type meter --field credits_left_usd=<x> --field source=operator`.
 8. `python -m harness validate-log runs/<id>`, then `python -m harness status --config <phase config> --run-id <id>`.
@@ -426,9 +512,10 @@ These are listed in the build reports and should be pre-registered or overruled:
    the earlier tasks, an integration failure could only come from this task's own tests.
 8. **Grace**: reviews continue during grace, so changes submitted before the end can still finish.
    Submissions after the window end are not queued; they appear as `note` lines only.
-9. **Reviewer failures**: an immediate retry. After two failures the change is re-queued at the
-   front with a backoff. Downtime runs from the first failure to the next success.
-10. **run.json**: only the SCHEMA.md keys. The reset TASKS commit and any VOID reasons go into
+9. **Reviewer failures**: an immediate retry by the same reviewer. After two failures the change is re-queued
+   at the front (for any reviewer) and that reviewer backs off. Downtime, per reviewer, runs from its first
+   failure to its next success; VOID uses the summed downtime / K.
+10. **run.json**: only the SCHEMA.md keys (with `n_reviewers` since PLAN-v6). The reset TASKS commit and any VOID reasons go into
     `notes`.
 11. **Superseded submissions**: a newer `READY:` for a task whose older head is still waiting for
     review replaces it in place, with a `note`. (With one session per task this happens only if a session

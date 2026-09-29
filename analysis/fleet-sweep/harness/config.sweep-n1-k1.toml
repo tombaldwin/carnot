@@ -1,16 +1,17 @@
-# Sweep, N = 1 (PLAN-v4 s2): 120-min window, ABBAAB order.
+# Sweep cell N = 1, K = 1 (PLAN-v6 s5.1): 45-min window (5 min warm-up, 10 min grace), 1 parallel reviewer; order v6.v6_order.
 # One config per phase; `python -m harness run` refuses a config whose kind / n_workers / window /
 # warm-up / grace / start schedule / session timeout / first task / models differ from the phase's pre-registered shape
 # (harness/config.py PHASES), prints them, and asks for confirmation (or --yes).
 # Everything marked UNVERIFIED must be checked before a real run; `run` refuses to start while a
-# template it needs still has verified = false. Only [run] differs between the five phase files.
+# template it needs still has verified = false. Only [run] and [reviewer] parallel differ between the
+# phase files (t0, t1, t2, t1b, sweep-n1-k1, sweep-n1-k3, sweep-n12-k1, sweep-n12-k3).
 
 [run]
-phase = "sweep-n1"
+phase = "sweep-n1-k1"
 kind = "sweep"
 n_workers = 1
-window_min = 90
-warmup_min = 10
+window_min = 45
+warmup_min = 5
 grace_min = 10
 start_schedule = []
 task_timeout_min = 25          # no READY this long after a launch / rework message: abandoned
@@ -63,13 +64,16 @@ prompt_template = "prompts/reviewer.md"
 timeout_s = 900
 retries = 1
 retry_backoff_s = 60
-max_downtime_min = 10
+max_downtime_min = 10           # summed downtime of the K reviewers / K; more voids the window
+parallel = 1                    # K reviewer threads r1..rK on one FIFO queue (PLAN-v6 section 6)
 
 [launcher]
-# One cloud session per task (harness README, "Worker model"). manual: the harness prints each launch /
-# follow-up command and the operator runs it and pastes the session id (T0, and until verified);
-# command: the templates below. `run` refuses mode = "command" while verified / followup_verified are false.
-mode = "manual"
+# One cloud session per task (harness README, "Worker model"). routine: each launch re-arms the slot's Claude
+# Code routine ([launcher.routine]; sessions get a real clone with origin and can push). command: the
+# `claude --cloud` templates below (its sessions cannot push: T0, 2026-09-28). manual: the operator runs
+# each printed command. `run` refuses mode = "routine" while verified = false except in phase t0, and
+# mode = "command" while verified / followup_verified are false.
+mode = "routine"
 launch_dir = "/Users/tom/git/carnot-sandbox-tasks/work/launch"   # local clone whose origin is [repo] remote_url; sessions launch from its main
 # Documented: `claude --cloud "<prompt>"` clones this directory's GitHub remote at the current branch and does
 # not return at once. UNVERIFIED (T0): the output, the session id, how to detach.
@@ -87,8 +91,27 @@ followup_command = ["claude", "-p", "{message}", "--cloud", "{session_id}"]
 followup_stdin = false
 followup_timeout_s = 120
 stop_command = []               # none documented
-verified = false
-followup_verified = true   # T0: claude -p "<msg>" --cloud <id> returns in ~5 s, exit 0, reaches an idle session
+verified = true            # routine launch path: verified by the T0 repeat T0c-2026-09-28
+followup_verified = true   # T0: claude -p "<msg>" --cloud <id> returns in ~5 s, exit 0, reaches an idle session; verified to reach routine sessions (cse_ id) 2026-09-28
 worker_prompt = "prompts/worker.md"
 rework_prompt = "prompts/rework.md"
 prompt_dir = "/Users/tom/git/carnot-sandbox-tasks/work/prompts"   # private (work/ is gitignored in the tasks repo)
+
+[launcher.routine]
+# One routine per slot, named carnot-study2-<phase>-s<k>, created disabled by
+# `python -m harness routines-setup --config <this file>`, which writes their ids to the private state file
+# (default: work/routines-state.json beside [repo] work_dir). Each launch re-arms the slot's routine with the
+# task prompt and run_once_at = now + lead_s; runs start 40-75 s after run_once_at. The run's session id
+# (cse_...) is found by polling list_runs. Every slot routine is disabled at window end.
+environment_id = "env_01REHbnKNqfeaJdQr9VjHaX5"
+model = "claude-haiku-4-5"
+source_url = "https://github.com/tombaldwin/carnot-sandbox"
+allowed_tools = ["Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+lead_s = 30
+# One RemoteTrigger call per run of this command (verified 2026-09-28, ~9 s). {instruction} holds the exact tool input.
+runner = ["claude", "-p", "{instruction}", "--model", "claude-haiku-4-5", "--permission-mode", "dontAsk", "--tools", "RemoteTrigger", "--allowedTools", "RemoteTrigger", "--strict-mcp-config", "--no-session-persistence", "--output-format", "stream-json", "--verbose"]
+runner_timeout_s = 180
+first_poll_delay_s = 40         # session id lookup: from run_once_at + 40 s, every 20 s, while a slot waits for it
+poll_s = 20
+session_id_timeout_s = 600
+max_updates_per_hour = 30       # product limit: 30 fires/hour per routine, re-arms included

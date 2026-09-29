@@ -146,9 +146,15 @@ def test_calibrate_reference_and_mutants(toy):
                    job="v2-checkout", parallel=3, echo=lambda *_: None)
     rows = [json.loads(l) for l in out.read_text().splitlines()]
     assert s2["reviews"] == 2 and len(rows) == 8 and len({r["review_id"] for r in rows}) == 8
+    assert [r["parallel"] for r in rows] == [1] * 6 + [3] * 2 and s2["parallel"] == 3 and s2["mean_duration_s"] > 0
+    # PLAN-v6 contention check: the same items again at --parallel 3 under another job label (mutants reused)
+    s3 = calibrate(cfg, repo, ids, ["reference", "mutant"], out, job="v6-par3", parallel=3, echo=lambda *_: None)
+    rows = [json.loads(l) for l in out.read_text().splitlines()]
+    assert s3["reviews"] == 6 and sum(r["job"] == "v6-par3" for r in rows) == 6
+    rows = rows[:8]
     if ANALYSIS_PY.exists():   # predict.py reads it for abort rule 4
         code = (f"import sys; sys.path.insert(0, {str(PREDICT.parent)!r}); from predict import load_calibration; "
-                f"c = load_calibration({str(out)!r}); print(c['reviews'], c['by_source']['reference'], c['by_source']['broken'])")
+                f"c = load_calibration({str(out)!r}, 'v2-checkout'); print(c['reviews'], c['by_source']['reference'], c['by_source']['broken'])")
         p = subprocess.run([str(ANALYSIS_PY), "-c", code], capture_output=True, text=True)
         assert p.returncode == 0, p.stderr
         assert p.stdout.split() == ["8", "4", "4"]

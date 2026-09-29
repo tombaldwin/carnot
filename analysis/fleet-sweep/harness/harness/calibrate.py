@@ -26,11 +26,13 @@ they contain task code, so the command refuses a directory inside the public rep
 
 Durations. ``duration_s`` is the wall-clock time of the reviewer call(s) for that item, from
 hand-over to parsed verdict, including an immediate retry (as the log format asks); export of the
-checkout is inside the call, as it is live. ``--parallel k`` runs k reviews at once. It is allowed
-for calibration only, because calibration uses only each call's duration and verdict (V = verdicts /
-summed call time), never queueing; it is never available in a live window, where the reviewer is
-serial by design. Parallel calls can be slower if they compete for CPU (each may run pytest);
-use --parallel 1 if in doubt.
+checkout is inside the call, as it is live. ``--parallel k`` runs k reviews at once; calibration uses only
+each call's duration and verdict (V = verdicts / summed call time), never queueing. Each row records
+``parallel``. Parallel calls can be slower if they compete for CPU (each may run pytest): PLAN-v6 section 6.10's
+contention check runs the same reference and mutant items with ``--parallel 1`` and ``--parallel 3`` under two
+job labels (e.g. ``--job v6-par1`` / ``--job v6-par3``; mutants are reused from ``--mutant-dir``) and compares
+the mean ``duration_s`` (the summary's ``mean_duration_s``). Live windows run K reviewers too since PLAN-v6
+(``[reviewer] parallel``).
 """
 from __future__ import annotations
 
@@ -304,7 +306,8 @@ def calibrate(cfg: Config, repo: Repo, task_ids: list[str], variants: list[str],
                    verdict=res.verdict if res else "error", source=SOURCE[it.variant], task=it.task,
                    expected=EXPECTED[it.variant], job=job, reviewer_model=cfg.run.reviewer_model,
                    t=iso(dt.datetime.now(dt.timezone.utc)), review_job=rc.job, mutation=it.mutation,
-                   tokens_in=res.tokens_in if res else None, tokens_out=res.tokens_out if res else None)
+                   tokens_in=res.tokens_in if res else None, tokens_out=res.tokens_out if res else None,
+                   parallel=parallel)
         with lock:
             with open(out, "a") as f:
                 f.write(json.dumps(row) + "\n")
@@ -328,7 +331,8 @@ def calibrate(cfg: Config, repo: Repo, task_ids: list[str], variants: list[str],
     n = [r for r in rows if r["verdict"] != "error"]
     busy = sum(r["duration_s"] for r in rows)
     summary = dict(out=str(out), job=job, reviews=len(n), errors=len(rows) - len(n), skipped=skipped,
-                   busy_hours=busy / 3600, V=(len(n) / (busy / 3600)) if busy > 0 else None,
+                   busy_hours=busy / 3600, V=(len(n) / (busy / 3600)) if busy > 0 else None, parallel=parallel,
+                   mean_duration_s=(busy / len(rows)) if rows else None,
                    catch_rate_mutant=_rate(rows, "mutant", "request_changes"),
                    false_reject_reference=_rate(rows, "reference", "request_changes"))
     return summary

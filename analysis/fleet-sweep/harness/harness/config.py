@@ -4,10 +4,11 @@ Anything marked UNVERIFIED depends on product facts not yet checked on the payin
 (cloud session launch syntax, `claude -p` flags; PLAN-v4 section 7). A real `run` refuses to
 start while a template it needs has ``verified = false``.
 
-Real windows use one config per study phase (PLAN-v4 section 7): config.t0.toml, config.t1.toml,
-config.t2.toml, config.sweep-n1.toml, config.sweep-n12.toml. ``[run] phase`` names the phase, and
-``PHASES`` below is the pre-registered shape of each; `run` refuses a config whose kind / N (slots) /
-window / warm-up / grace / start schedule / session timeout / first task do not match its phase.
+Real windows use one config per study phase (PLAN-v4 section 7; PLAN-v6 section 6): config.t0.toml,
+config.t1.toml, config.t2.toml, config.t1b.toml and the four sweep cells config.sweep-n{1,12}-k{1,3}.toml.
+``[run] phase`` names the phase, and ``PHASES`` below is the pre-registered shape of each; `run` refuses a
+config whose kind / N (slots) / window / warm-up / grace / start schedule / session timeout / first task /
+parallel reviewers (``[reviewer] parallel``) do not match its phase.
 
 Worker model (harness README "Worker model: one cloud session per task"): ``n_workers`` is the number
 of **slots**. Each slot runs one cloud session at a time; a session works on exactly one task (and its
@@ -16,6 +17,7 @@ rework) and is launched by the harness with the task in its prompt.
 from __future__ import annotations
 
 import dataclasses as dc
+import re
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -35,11 +37,16 @@ PHASES = {
                start_schedule=[[0, 1], [30, 12]], first_task="", probe_followup=False, **_SESS),
     "t2": dict(kind="pilot", n_workers=1, window_min=60, warmup_min=10, grace_min=10, start_schedule=[],
                first_task="", probe_followup=False, **_SESS),
-    "sweep-n1": dict(kind="sweep", n_workers=1, window_min=90, warmup_min=10, grace_min=10, start_schedule=[],
-                     first_task="", probe_followup=False, **_SESS),
-    "sweep-n12": dict(kind="sweep", n_workers=12, window_min=90, warmup_min=10, grace_min=10, start_schedule=[],
-                      first_task="", probe_followup=False, **_SESS),
+    # PLAN-v6: T1b (abort rule 1: one slot for 90 min, then twelve for 30 min, three reviewers) and the sweep's
+    # four cells, fleet size N in {1, 12} x parallel reviewers K in {1, 3}, 45-min windows. The PLAN-v4/v5
+    # sweep phases (sweep-n1 / sweep-n12, 90 min, one reviewer) are retired.
+    "t1b": dict(kind="trial", n_workers=12, window_min=120, warmup_min=0, grace_min=10,
+                start_schedule=[[0, 1], [90, 12]], first_task="", probe_followup=False, reviewers=3, **_SESS),
+    **{f"sweep-n{n}-k{k}": dict(kind="sweep", n_workers=n, window_min=45, warmup_min=5, grace_min=10,
+                                start_schedule=[], first_task="", probe_followup=False, reviewers=k, **_SESS)
+       for n in (1, 12) for k in (1, 3)},
 }
+SWEEP_REVIEWERS = (1, 3)                # PLAN-v6 section 6.1: `run` refuses a sweep config with another K
 WORKER_MODEL = "claude-haiku-4-5"       # PLAN-v4 section 2 (model id string: UNVERIFIED until the CLI check)
 REVIEWER_MODEL = "claude-opus-5-5"
 
@@ -47,7 +54,7 @@ REVIEWER_MODEL = "claude-opus-5-5"
 @dc.dataclass
 class RunCfg:
     kind: str = "sweep"                 # sweep | pilot | trial | dry-run
-    phase: str = ""                     # t0 | t1 | t2 | sweep-n1 | sweep-n12 (required for a real `run`)
+    phase: str = ""                     # t0 | t1 | t2 | t1b | sweep-n<N>-k<K> (required for a real `run`)
     n_workers: int = 1                  # slots: cloud sessions running at once (one task per session)
     window_min: float = 120
     warmup_min: float = 10
@@ -66,6 +73,19 @@ class RunCfg:
     end_grace_early_when_idle: bool = True
     grace_reviews: bool = True          # keep reviewing already-submitted changes during grace
     notes: str = ""
+    # Pin the `claude` CLI for the run (T1 incident, 2026-09-28: an auto-update replaced the binary mid-window
+    # and every call failed to start): `run` copies the resolved executable into the private area
+    # (<prompt_dir base>/bin/claude-<version>) and uses that copy for the routine runner, the follow-up,
+    # reviewer and launch commands. false = the bare `claude` on PATH, as before.
+    pin_cli: bool = True
+    # A slot whose launch failed (all attempts) takes no work for this long (virtual seconds); after
+    # max_consecutive_launch_failures failed tasks in a row it is marked down (worker_down) for the window.
+    launch_fail_backoff_s: float = 60
+    max_consecutive_launch_failures: int = 3
+    # Global breaker: failed launches on this many different slots within launch_fail_breaker_window_s pause
+    # all dispatch for launch_fail_backoff_s (a `dispatch_paused` note). 0 = off.
+    launch_fail_breaker_slots: int = 3
+    launch_fail_breaker_window_s: float = 60
 
 
 @dc.dataclass
@@ -78,6 +98,7 @@ class RepoCfg:
     # its branch itself; UNVERIFIED, T0 checks). reset deletes every claude/* branch.
     accept_other_claude_branches: bool = True
     tasks_file_name: str = "TASKS.json" # written to main at reset
+    harness_file_name: str = "HARNESS.md"   # routine mode: the working rules, written to main at reset
     git_user_name: str = "fleet-harness"
     git_user_email: str = "harness@localhost"
 
@@ -133,8 +154,47 @@ class ReviewerCfg:
     timeout_s: float = 900              # real seconds per review call
     retries: int = 1                    # a crashed review is retried once
     retry_backoff_s: float = 60         # virtual seconds after a failed retry before trying that change again
-    max_downtime_min: float = 10        # more than this voids the window
+    max_downtime_min: float = 10        # more than this (summed reviewer downtime / parallel) voids the window
+    # PLAN-v6 section 6: K reviewer threads (r1..rK) on the one FIFO review queue; 1 = the serial reviewer.
+    parallel: int = 1
     max_diff_chars: int = 60000
+
+
+@dc.dataclass
+class RoutineCfg:
+    """``[launcher.routine]``: launch each task by re-arming its slot's Claude Code routine (harness/routines.py).
+
+    Verified 2026-09-28: a routine whose source is the sandbox's GitHub URL gets a real clone with origin and
+    can push ``claude/*`` branches (a ``claude --cloud`` session cannot); the update body shape below; the
+    ``claude -p ... --tools RemoteTrigger`` runner; ``claude -p "<msg>" --cloud <cse_id>`` reaches a routine
+    session. UNVERIFIED until T0: the whole launch path under the harness (``[launcher] verified``).
+    """
+    environment_id: str = ""            # cloud environment the routine's sessions run in (env_...)
+    model: str = ""                     # session model; "" = [run] worker_model
+    source_url: str = ""                # https URL of the sandbox GitHub repo (the session's clone, with origin)
+    allowed_tools: list = dc.field(default_factory=lambda: ["Bash", "Read", "Write", "Edit", "Glob", "Grep"])
+    name_prefix: str = "carnot-study2"  # routine names: <prefix>-<phase>-s<k>
+    lead_s: float = 30                  # run_once_at = now + lead_s at each re-arm (must be in the future)
+    # The local `claude -p` call that performs one RemoteTrigger tool call. {instruction} = the rendered
+    # instruction (holds the exact tool input as JSON). Verified form, 2026-09-28.
+    runner: list = dc.field(default_factory=lambda: [
+        "claude", "-p", "{instruction}", "--model", "claude-haiku-4-5", "--permission-mode", "dontAsk",
+        "--tools", "RemoteTrigger", "--allowedTools", "RemoteTrigger", "--strict-mcp-config",
+        "--no-session-persistence", "--output-format", "json"])
+    runner_timeout_s: float = 180
+    # slot -> trigger id (trig_...). Normally empty here: `harness routines-setup` writes the ids to the
+    # private state file below and `run` reads them from it. Entries here override the state file.
+    slot_routines: dict = dc.field(default_factory=dict)
+    # Private state file; "" = routines-state.json beside [repo] work_dir (not inside it: reset cleans it).
+    state_file: str = ""
+    # Session id discovery after a re-arm: list_runs is polled (one claude -p call each) only while a slot
+    # waits for its new run's id, from run_once_at + first_poll_delay_s, every poll_s, for at most
+    # session_id_timeout_s after run_once_at. A run counts if created at/after run_once_at - created_skew_s.
+    first_poll_delay_s: float = 40
+    poll_s: float = 20
+    session_id_timeout_s: float = 600
+    created_skew_s: float = 5
+    max_updates_per_hour: int = 30      # per routine; re-arms and disables count (product limit: 30 fires/hour)
 
 
 @dc.dataclass
@@ -148,7 +208,7 @@ class LauncherCfg:
     UNVERIFIED (T0 settles them): whether and where the launch prints a session id or URL, and how to
     detach from it; hence `session_id_regex`, `detach` and `detach_signal` are settings.
     """
-    mode: str = "manual"                # manual | command | sim
+    mode: str = "manual"                # manual | command | routine | sim
     # A local clone whose origin is [repo] remote_url (the sandbox GitHub repo). Sessions are launched from
     # here, on branch main, synced to origin/main before each launch. Created if missing.
     launch_dir: str = "work/launch"
@@ -179,9 +239,14 @@ class LauncherCfg:
     followup_verified: bool = False     # followup_command checked at T0
     worker_prompt: str = "prompts/worker.md"   # per-task session prompt (template)
     rework_prompt: str = "prompts/rework.md"   # follow-up message after a bounce (template)
+    # mode = "routine": the short per-task prompt stored on the routine, and the rules written to main as
+    # [repo] harness_file_name by reset (a model copies the routine prompt at every re-arm: keep it short)
+    routine_prompt: str = "prompts/routine-worker.md"
+    harness_doc: str = "prompts/harness.md"
     # Rendered prompts, follow-up messages and raw launch output hold task text: a PRIVATE directory, never
     # inside the public repo. "" = session-prompts/ beside [tasks] task_file.
     prompt_dir: str = ""
+    routine: RoutineCfg = dc.field(default_factory=RoutineCfg)   # mode = "routine" only
 
 
 @dc.dataclass
@@ -238,6 +303,8 @@ def _build(cls, data: dict[str, Any], where: str):
     unknown = set(data) - names
     if unknown:
         raise ValueError(f"unknown config keys in [{where}]: {sorted(unknown)}")
+    if cls is LauncherCfg and isinstance(data.get("routine"), dict):
+        data = {**data, "routine": _build(RoutineCfg, data["routine"], "launcher.routine")}
     return cls(**data)
 
 
@@ -269,6 +336,11 @@ def phase_problems(cfg: Config) -> list[str]:
     want = PHASES[rc.phase]
     probs = []
     for k, v in want.items():
+        if k == "reviewers":
+            if cfg.reviewer.parallel != v:
+                probs.append(f"[reviewer] parallel = {cfg.reviewer.parallel!r}, but phase {rc.phase!r} is "
+                             f"pre-registered with {v!r} reviewers")
+            continue
         have = getattr(rc, k)
         if k == "start_schedule":
             have = [list(map(float, x)) for x in have]
@@ -278,8 +350,22 @@ def phase_problems(cfg: Config) -> list[str]:
             v = float(v)
         if have != v:
             probs.append(f"[run] {k} = {getattr(rc, k)!r}, but phase {rc.phase!r} is pre-registered with {want[k]!r}")
+    if rc.kind == "sweep" and cfg.reviewer.parallel not in SWEEP_REVIEWERS:
+        probs.append(f"[reviewer] parallel = {cfg.reviewer.parallel!r}: a sweep window runs K = 1 or 3 reviewers")
+    if not (isinstance(cfg.reviewer.parallel, int) and cfg.reviewer.parallel >= 1):
+        probs.append(f"[reviewer] parallel = {cfg.reviewer.parallel!r}: must be an integer >= 1")
     if cfg.launcher.mode == "command" and cfg.launcher.detach not in ("on_id", "after_s", "exit"):
         probs.append(f"[launcher] detach = {cfg.launcher.detach!r}: one of on_id, after_s, exit")
+    if cfg.launcher.mode == "routine":
+        rt = cfg.launcher.routine
+        if rt.model and rt.model != rc.worker_model:
+            probs.append(f"[launcher.routine] model = {rt.model!r}, but [run] worker_model = {rc.worker_model!r}")
+        if repo_slug(rt.source_url) != repo_slug(cfg.repo.remote_url):
+            probs.append(f"[launcher.routine] source_url = {rt.source_url!r} is not [repo] remote_url "
+                         f"{cfg.repo.remote_url!r}")
+        if rt.lead_s < 15:
+            probs.append(f"[launcher.routine] lead_s = {rt.lead_s:g}: run_once_at must still be in the future "
+                         "when the re-arm lands (a runner call takes about 9 s); use 15 or more")
     for k, v in (("worker_model", WORKER_MODEL), ("reviewer_model", REVIEWER_MODEL)):
         if getattr(rc, k) != v:
             probs.append(f"[run] {k} = {getattr(rc, k)!r}, but PLAN-v4 uses {v!r}")
@@ -287,6 +373,23 @@ def phase_problems(cfg: Config) -> list[str]:
         probs.append(f"[reviewer] job = {cfg.reviewer.job!r}: the pre-registered review job is 'checkout' "
                      "(the diff job is superseded)")
     return probs
+
+
+def routine_group(phase: str) -> str:
+    """The phase name the slot routines are named after: the sweep's K variants of one fleet size share
+    them (sweep-n12-k1 and sweep-n12-k3 both use carnot-study2-sweep-n12-s<k>); windows never overlap."""
+    m = re.fullmatch(r"(sweep-n\d+)-k\d+", phase or "")
+    return m.group(1) if m else phase
+
+
+def repo_slug(url: str) -> str:
+    """owner/repo of a GitHub URL in https or scp form ("" if none)."""
+    u = url.strip().rstrip("/")
+    u = u[:-4] if u.endswith(".git") else u
+    for pfx in ("git@github.com:", "ssh://git@github.com/", "https://github.com/", "http://github.com/"):
+        if u.startswith(pfx):
+            return u[len(pfx):].lower()
+    return ""
 
 
 def schedule_problems(schedule: list, n_workers: int) -> list[str]:

@@ -58,6 +58,10 @@ def reset(cfg: Config, run_id: str, seed: int, run_dir: Path) -> dict:
     repo.run("clean", "-q", "-fdx")
     (repo.path / cfg.repo.tasks_file_name).write_text(content)
     repo.run("add", cfg.repo.tasks_file_name)
+    if cfg.launcher.mode == "routine":
+        from .launchers import harness_doc
+        (repo.path / cfg.repo.harness_file_name).write_text(harness_doc(cfg))
+        repo.run("add", cfg.repo.harness_file_name)
     repo.run("commit", "-q", "-m", f"harness: task order for {run_id} (seed {seed})")
     tasks_commit = repo.sha("HEAD")
     repo.run("push", "-q", "--force", "origin", "HEAD:refs/heads/main")

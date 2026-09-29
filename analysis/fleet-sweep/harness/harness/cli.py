@@ -1,7 +1,8 @@
-"""python -m harness {reset,run,calibrate,throttle,dry-run,status,log,validate-tasks,validate-log,make-toy} --config FILE
+"""python -m harness {reset,run,routines-setup,calibrate,throttle,dry-run,status,log,validate-tasks,validate-log,make-toy} --config FILE
 
-Real phases use config.t0.toml, config.t1.toml, config.t2.toml, config.sweep-n1.toml or
-config.sweep-n12.toml (PLAN-v4 section 7); there is no default real config, so --config is required."""
+Real phases use config.t0.toml, config.t1.toml, config.t2.toml, config.t1b.toml or one of the sweep cells
+config.sweep-n{1,12}-k{1,3}.toml (PLAN-v4 section 7, PLAN-v6 sections 5-6); there is no default real config, so
+--config is required."""
 from __future__ import annotations
 
 import argparse
@@ -36,6 +37,11 @@ def input_fn(prompt: str) -> str:   # patched in tests
     return input(prompt)
 
 
+def pin_cli_fn(cfg) -> dict:         # patched in tests
+    from .launchers import pin_cli
+    return pin_cli(cfg)
+
+
 def run_banner(cfg, run_id: str) -> str:
     rc = cfg.run
     sched = rc.start_schedule or [[0, rc.n_workers]]
@@ -46,15 +52,19 @@ def run_banner(cfg, run_id: str) -> str:
         f"  window         {rc.window_min:g} min (warm-up {rc.warmup_min:g}, grace {rc.grace_min:g})",
         f"  sessions       one per task; timeout {rc.task_timeout_min:g} min, budget {rc.task_budget_min:g} min"
         + (f"; first task {rc.first_task}" if rc.first_task else "") + ("; probe follow-up" if rc.probe_followup else ""),
-        f"  launcher       {cfg.launcher.mode}   launch clone {cfg.path(cfg.launcher.launch_dir)}",
+        (f"  launcher       routine   lead {cfg.launcher.routine.lead_s:g} s, env {cfg.launcher.routine.environment_id}, "
+         f"source {cfg.launcher.routine.source_url}" + ("" if cfg.launcher.verified else "   (UNVERIFIED: T0 checks it)")
+         if cfg.launcher.mode == "routine" else
+         f"  launcher       {cfg.launcher.mode}   launch clone {cfg.path(cfg.launcher.launch_dir)}"),
         f"  worker model   {rc.worker_model}",
         f"  reviewer model {rc.reviewer_model}   review job {cfg.reviewer.job}",
+        f"  reviewers      K = {cfg.reviewer.parallel} in parallel (r1..r{cfg.reviewer.parallel}), one FIFO queue",
         f"  base_ref       {cfg.repo.base_ref}   remote {cfg.repo.remote_url}",
     ])
 
 
 def cmd_run(args) -> int:
-    from .launchers import CommandLauncher, ManualLauncher, require_verified
+    from .launchers import CommandLauncher, ManualLauncher, RoutineLauncher, require_verified
     from .orchestrator import Orchestrator
     from .reset import work_repo
     from .review import CommandReviewer
@@ -82,20 +92,101 @@ def cmd_run(args) -> int:
         print(f"{run_dir}/events.jsonl already exists; a window is never re-run into the same id", file=sys.stderr)
         return 2
     rj = json.loads(reset_file.read_text())
+    pinned = None
+    if cfg.run.pin_cli:
+        # Before the window: an auto-update of the installed CLI mid-window broke every process start (T1).
+        pinned = pin_cli_fn(cfg)
+        print(f"claude CLI pinned: {pinned['path']} (version {pinned['version']}, from {pinned['source']})")
     clock = Clock(1.0)
     log = EventLog(run_dir / "events.jsonl", clock, echo=True)
+    if pinned is not None:
+        log.note(f"cli_pinned path={pinned['path']} version={pinned['version']} source={pinned['source']} "
+                 f"reused={str(pinned['reused']).lower()}")
+    else:
+        log.note("cli_pinned disabled ([run] pin_cli = false): commands use `claude` from PATH")
     if args.meter_start is not None:
         log.emit("meter", credits_left_usd=args.meter_start, source="operator, before window")
     repo = work_repo(cfg)
     reviewer = CommandReviewer(cfg, repo)
-    launcher = (CommandLauncher(cfg, log, args.run_id) if cfg.launcher.mode == "command"
-                else ManualLauncher(cfg, log, args.run_id, input_fn=input_fn))
+    if cfg.launcher.mode == "command":
+        launcher = CommandLauncher(cfg, log, args.run_id)
+    elif cfg.launcher.mode == "routine":
+        launcher = RoutineLauncher(cfg, log, args.run_id)
+    else:
+        launcher = ManualLauncher(cfg, log, args.run_id, input_fn=input_fn)
     orch = Orchestrator(cfg, args.run_id, run_dir, clock, log, repo, load_tasks(cfg), reviewer,
                         sandbox_commit=rj["sandbox_commit"], seed=rj["seed"], launcher=launcher)
-    run = orch.run_window(launcher)
+    try:
+        run = orch.run_window(launcher)
+    finally:
+        # Routine mode: an armed slot routine fires (and spends credits) even if the harness has died.
+        if hasattr(launcher, "disable_all") and not launcher.disabled_all:
+            launcher.disable_all()
     print(json.dumps(run, indent=2))
     print(format_summary(summarize(read_events(run_dir / "events.jsonl"))))
     print("Now read the credit meter and record it with: python -m harness log --type meter ...")
+    return 0
+
+
+def routines_setup(cfg, client, dry_run: bool = False, out=print) -> dict[str, str]:
+    """Create (or look up) this phase's N slot routines, disabled, and record their ids in the private state
+    file. Existing ones (state file, or [launcher.routine] slot_routines, or by name on the first list page)
+    are checked with a get and disabled if found enabled. Returns slot -> trigger id."""
+    import datetime as dt
+    from . import routines as rt
+    from .launchers import routine_state_path
+    r = cfg.launcher.routine
+    path = routine_state_path(cfg)
+    state = rt.load_state(path)
+    listed = None
+    ids: dict[str, str] = {}
+    for k in range(1, cfg.run.n_workers + 1):
+        slot, name = f"s{k}", rt.routine_name(r.name_prefix, config_mod.routine_group(cfg.run.phase), k)
+        tid = r.slot_routines.get(slot) or (state["routines"].get(name) or {}).get("trigger_id")
+        if tid is None and not dry_run:
+            if listed is None:
+                listed = client.list_triggers()
+            tid = next((t.get("id") for t in listed if t.get("name") == name), None)
+        if dry_run:
+            out(f"{slot} {name}: {'exists ' + tid if tid else 'would create'}")
+            if tid:
+                ids[slot] = tid
+            continue
+        trig = None
+        if tid:
+            try:
+                trig = client.get(tid)
+            except rt.RoutineError as e:
+                out(f"{slot} {name}: {tid} not usable ({str(e)[:120]}); creating a new one")
+                tid = None
+        if trig is not None:
+            if trig.get("enabled"):
+                client.disable(tid)
+            out(f"{slot} {name}: exists {tid}")
+        else:
+            trig = client.create(name)
+            tid = trig["id"]
+            out(f"{slot} {name}: created {tid} (disabled)")
+        ids[slot] = tid
+        state["routines"][name] = {"trigger_id": tid, "slot": slot, "phase": cfg.run.phase,
+                                   "recorded_at": rt.rfc3339(dt.datetime.now(dt.timezone.utc))}
+        rt.save_state(path, state)
+    out(f"state file: {path}")
+    return ids
+
+
+def cmd_routines_setup(args) -> int:
+    from .launchers import private_prompt_dir, routine_client
+    cfg = _cfg(args)
+    if cfg.launcher.mode != "routine":
+        print(f"[launcher] mode is {cfg.launcher.mode!r}; routines-setup is for mode = \"routine\"", file=sys.stderr)
+        return 2
+    missing = [k for k in ("environment_id", "source_url") if not getattr(cfg.launcher.routine, k)]
+    if missing:
+        print(f"[launcher.routine] {', '.join(missing)} empty", file=sys.stderr)
+        return 2
+    client = routine_client(cfg, private_prompt_dir(cfg, "routines-setup"))
+    routines_setup(cfg, client, dry_run=args.dry_run)
     return 0
 
 
@@ -183,7 +274,13 @@ def cmd_validate_tasks(args) -> int:
 
 def cmd_validate_log(args) -> int:
     d = Path(args.run_dir)
-    errs = validate_events(d / "events.jsonl") + validate_run_json(d / "run.json")
+    k = None
+    try:
+        k = json.loads((d / "run.json").read_text()).get("n_reviewers")
+    except (OSError, json.JSONDecodeError, AttributeError):
+        pass
+    errs = (validate_events(d / "events.jsonl", n_reviewers=k if isinstance(k, int) else None)
+            + validate_run_json(d / "run.json"))
     print("\n".join(errs) if errs else "ok")
     return 1 if errs else 0
 
@@ -214,7 +311,11 @@ def cmd_calibrate(args) -> int:
 
 def cmd_throttle(args) -> int:
     from .throttle import format_report, throttle_report
-    r = throttle_report(Path(args.run_dir), skip_min=args.skip_min)
+    exclude = None
+    if args.exclude is not None:
+        exclude = [] if args.exclude.strip().lower() in ("", "none") else \
+            [x.strip() for x in args.exclude.split(",") if x.strip()]
+    r = throttle_report(Path(args.run_dir), skip_min=args.skip_min, exclude=exclude, split_min=args.split_min)
     print(format_report(r))
     if args.json:
         Path(args.json).write_text(json.dumps(r, indent=2) + "\n")
@@ -237,7 +338,8 @@ def main(argv=None) -> int:
             p.add_argument("--config", default=str(HERE / cfg_default))
         else:
             p.add_argument("--config", required=True,
-                           help="a phase config: config.t0.toml, config.t1.toml, config.t2.toml, config.sweep-n1.toml, config.sweep-n12.toml")
+                           help="a phase config: config.t0.toml, config.t1.toml, config.t2.toml, config.t1b.toml, "
+                                "config.sweep-n{1,12}-k{1,3}.toml")
         p.set_defaults(fn=fn)
         return p
 
@@ -248,6 +350,8 @@ def main(argv=None) -> int:
     p.add_argument("--run-id", required=True)
     p.add_argument("--meter-start", type=float, help="credit meter reading ($) just before the window")
     p.add_argument("--yes", action="store_true", help="skip the confirmation prompt (the banner is still printed)")
+    p = add("routines-setup", cmd_routines_setup)
+    p.add_argument("--dry-run", action="store_true", help="print what would be created; no routine calls")
     p = add("calibrate", cmd_calibrate)
     p.add_argument("--tasks", required=True, help="comma-separated ids, @file (one id per line) or 'all'")
     p.add_argument("--variants", default="reference,mutant", help="reference, mutant, or both (comma-separated)")
@@ -260,9 +364,13 @@ def main(argv=None) -> int:
     p.add_argument("--seed", type=int, default=1, help="mutant choice seed")
     p.add_argument("--detail-out", help="private JSONL with each review's reason and head (never in the public repo)")
     p.add_argument("--allow-unverified", action="store_true", help=argparse.SUPPRESS)
-    p = sub.add_parser("throttle", help="abort rule 1 from T1's log (activity per slot-minute, 1 vs 12)")
+    p = sub.add_parser("throttle", help="abort rule 1 (PLAN-v6) from a T1/T1b log: start-up and coding, 1 slot vs 12")
     p.add_argument("run_dir")
-    p.add_argument("--skip-min", type=float, default=5.0)
+    p.add_argument("--exclude", help="slots lost to operator-logged failures unrelated to the service, e.g. s2,s3; "
+                                     "'none' keeps every slot; default: slots with an operator worker_down")
+    p.add_argument("--split-min", type=float, help="minute the many-slot phase starts (default: the second "
+                                                   "start_schedule group)")
+    p.add_argument("--skip-min", type=float, default=5.0, help="activity measure only (reported beside the rule)")
     p.add_argument("--json")
     p.set_defaults(fn=cmd_throttle)
     p = add("dry-run", cmd_dry_run, "config.dryrun.toml")
