@@ -5,6 +5,8 @@ import datetime as dt
 import tomllib
 from pathlib import Path
 
+import re
+
 import pytest
 
 from harness import cli
@@ -27,7 +29,10 @@ def test_shipped_phase_configs_match_their_phase(phase, fname):
     assert cfg.repo.base_ref == "sandbox-v1" and cfg.repo.remote_url.endswith("tombaldwin/carnot-sandbox.git")
     assert cfg.reviewer.job == "checkout" and cfg.reviewer.verified is True   # CLI checked 2026-09-28
     # routine launcher (2026-09-28: `claude --cloud` sessions cannot push); launch unverified until the T0 repeat
-    assert cfg.launcher.mode == "routine" and cfg.launcher.verified and cfg.launcher.followup_verified   # T0c
+    assert cfg.launcher.mode == "command" and cfg.launcher.verified and cfg.launcher.followup_verified
+    lc = cfg.launcher.launch_command            # the #81776 workaround: clone from GitHub, never a bundle
+    assert "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1" in lc and lc[lc.index("--ref") + 1] == "main"
+    assert lc.index("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1") < lc.index("claude") < lc.index("--cloud")
     r = cfg.launcher.routine
     assert r.environment_id.startswith("env_") and r.model == cfg.run.worker_model and r.lead_s == 30
     assert config_mod.repo_slug(r.source_url) == "tombaldwin/carnot-sandbox"
@@ -67,7 +72,7 @@ def test_runcfg_defaults_are_plan_v4():
 def _write(tmp_path, fname, **run):
     """The shipped phase config with [run] fields replaced, the reviewer marked verified and the launcher
     manual (these tests are about the phase checks, not the launcher)."""
-    text = (HERE / fname).read_text().replace('\nmode = "routine"', '\nmode = "manual"', 1)
+    text = re.sub(r'(\[launcher\][\s\S]*?\n)mode = "\w+"', r'\1mode = "manual"', (HERE / fname).read_text(), count=1)
     for k, v in run.items():
         for ln in text.splitlines():
             if ln.startswith(f"{k} ="):
@@ -124,7 +129,7 @@ def test_real_commands_need_an_explicit_config():
 def test_run_refuses_unverified_command_launcher(tmp_path, capsys):
     p = _write(tmp_path, "config.t1.toml")
     p.write_text(p.read_text().replace('mode = "manual"', 'mode = "command"')
-                 .replace("verified = true            # routine launch path", "verified = false            # routine launch path"))
+                 .replace("verified = true            # command path", "verified = false            # command path"))
     with pytest.raises(SystemExit) as ei:
         cli.main(["run", "--config", str(p), "--run-id", "x", "--yes"])
     assert "UNVERIFIED" in str(ei.value) and "launch_command" in str(ei.value)

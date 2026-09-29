@@ -72,7 +72,8 @@ Derived by the analysis, never logged: finished (merged by window end + grace, a
 green), censored (submitted, not finished, not bounced at end), V, b_review, b_hidden, b, λ (first
 submissions per slot-open hour), start-up time (session_launch -> claim), slot busy share, timeouts.
 
-Start-up time under the routine launcher (all real phases from 2026-09-28) runs from the confirmed re-arm, so
+Start-up time under the command launcher (all phase configs from 2026-09-29) runs from `session_launch`, logged when
+the CLI has printed the session id, to the branch's first push. Under the routine launcher (2026-09-28) it ran from the confirmed re-arm, so
 it includes the re-arm lead (`[launcher.routine] lead_s`, 30 s, less the ~9 s the re-arm call itself takes),
 the routine firing delay (runs start 40-75 s after `run_once_at`, observed 2026-09-28), provisioning and the
 clone. The `run_once_at` in the first `launch_detail` note lets the analysis split off the lead. Runs launched

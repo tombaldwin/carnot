@@ -68,17 +68,19 @@ max_downtime_min = 10           # summed downtime of the K reviewers / K; more v
 parallel = 1                    # K reviewer threads r1..rK on one FIFO queue (PLAN-v6 section 6)
 
 [launcher]
-# One cloud session per task (harness README, "Worker model"). routine: each launch re-arms the slot's Claude
-# Code routine ([launcher.routine]; sessions get a real clone with origin and can push). command: the
-# `claude --cloud` templates below (its sessions cannot push: T0, 2026-09-28). manual: the operator runs
-# each printed command. `run` refuses mode = "routine" while verified = false except in phase t0, and
-# mode = "command" while verified / followup_verified are false.
-mode = "routine"
+# One cloud session per task (harness README, "Worker model"). command: the `claude --cloud` template below,
+# with the workaround for anthropics/claude-code#81776 (CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 and --ref):
+# the session clones the sandbox from GitHub and can push, and it draws cloud-session credits (verified
+# 2026-09-29, CLI 2.1.284). routine: each launch re-arms a slot routine ([launcher.routine]); it works too but
+# bills plan usage, so it is kept in the code and not used. manual: the operator runs each printed command.
+# `run` refuses mode = "command" while verified / followup_verified are false.
+mode = "command"
 launch_dir = "/Users/tom/git/carnot-sandbox-tasks/work/launch"   # local clone whose origin is [repo] remote_url; sessions launch from its main
-# Documented: `claude --cloud "<prompt>"` clones this directory's GitHub remote at the current branch and does
-# not return at once. UNVERIFIED (T0): the output, the session id, how to detach.
+# Without the env var, `claude --cloud` uploads a local bundle with no remote (the session cannot push), and
+# `--ref main` alone refuses because the GitHub App preflight returns null for this repo. With both, the CLI
+# logs "Git source: github.com/tombaldwin/carnot-sandbox, revision: main" and the session clones it.
 # Placeholders: {prompt} {prompt_file} {model} {name} {run_id} {slot} {task}
-launch_command = ["script", "-q", "/dev/null", "claude", "--cloud", "{prompt}", "--model", "{model}", "--name", "{name}"]   # T0: --cloud needs a TTY
+launch_command = ["script", "-q", "/dev/null", "env", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1", "claude", "--ref", "main", "--cloud", "{prompt}", "--model", "{model}", "--name", "{name}"]   # --cloud needs a TTY
 session_id_regex = "(?P<session_id>session_[A-Za-z0-9]{8,})"   # T0: matches "View: https://claude.ai/code/session_..."
 detach = "exit"                 # T0: the CLI exits by itself ~9 s after printing the session URL
 detach_after_s = 120
@@ -91,7 +93,7 @@ followup_command = ["claude", "-p", "{message}", "--cloud", "{session_id}"]
 followup_stdin = false
 followup_timeout_s = 120
 stop_command = []               # none documented
-verified = true            # routine launch path: verified by the T0 repeat T0c-2026-09-28
+verified = true            # command path with the #81776 workaround: clone and push verified 2026-09-29 (probe session, CLI 2.1.284)
 followup_verified = true   # T0: claude -p "<msg>" --cloud <id> returns in ~5 s, exit 0, reaches an idle session; verified to reach routine sessions (cse_ id) 2026-09-28
 worker_prompt = "prompts/worker.md"
 rework_prompt = "prompts/rework.md"

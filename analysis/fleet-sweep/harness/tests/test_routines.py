@@ -11,6 +11,8 @@ import time
 import uuid
 from pathlib import Path
 
+import re
+
 import pytest
 
 from conftest import ScriptedReviewer, count
@@ -131,6 +133,7 @@ def _client(api, tmp_path=None):
 
 def _routine_cfg(tmp_path, fname="config.t0.toml", **routine):
     cfg = config_mod.load(HERE / fname)
+    cfg.launcher.mode = "routine"                        # the shipped configs launch with claude --cloud now
     cfg.repo.work_dir = str(tmp_path / "work" / "sandbox")
     cfg.launcher.prompt_dir = str(tmp_path / "prompts")
     for k, v in routine.items():
@@ -432,6 +435,7 @@ def test_run_with_routine_config_reaches_confirmation(tmp_path, capsys, monkeypa
     text = (HERE / "config.t0.toml").read_text()
     text = text.replace('work_dir = "/Users/tom/git/carnot-sandbox-tasks/work/sandbox"',
                         f'work_dir = "{tmp_path}/work/sandbox"')
+    text = re.sub(r'(\[launcher\][\s\S]*?\n)mode = "\w+"', r'\1mode = "routine"', text, count=1)
     p = tmp_path / "config.t0.toml"
     p.write_text(text)
     cfg = config_mod.load(p)
@@ -552,7 +556,7 @@ def test_routine_mode_prompt_is_short_and_reset_doc_renders():
     from harness.launchers import task_prompt, harness_doc
     from pathlib import Path
     cfg = load(Path(__file__).resolve().parents[1] / "config.t0.toml")
-    assert cfg.launcher.mode == "routine"
+    cfg.launcher.mode = "routine"                  # the shipped configs use command mode now
 
     class T:
         id, title, text, acceptance = "T145", "a title", "long task text " * 200, ["crit"]

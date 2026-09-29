@@ -25,7 +25,7 @@ python3.11 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 ## How it works
 
 ```
-dispatcher --re-arm slot routine (task prompt)--> session (1 per task, in a slot) --git push--> remote
+dispatcher --claude --cloud (task prompt)--> session (1 per task, in a slot) --git push--> remote
     ^   \--claude -p ... --cloud <cse id> (rework)--^                                             |
     |                                                                             git fetch |
     +-- rework queue <-- bounce <-- merge queue <-- approve -- reviewers <-- review queue <-- watcher
@@ -49,7 +49,16 @@ detach from it, is **UNVERIFIED** (T0, below).
 - **Hand-out** (`dispatcher` thread). The harness hands tasks to free slots in the window's seeded order
   (`reset.json` `task_order`, the TASKS.json committed at reset; T0's `first_task` first). No claims, no
   races, no scanning of TASKS.json by workers. Queued rework goes first (below), then the next task.
-- **Launch (routine mode, `[launcher] mode = "routine"`, all phase configs since 2026-09-28).** A
+- **Launch (command mode, `[launcher] mode = "command"`, all phase configs from 2026-09-29).** Each task is
+  launched as `script -q /dev/null env CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 claude --ref main --cloud
+  "<prompt>" --model <m> --name <n>` from `launch_dir`. Plain `claude --cloud` uploads a local bundle with no remote,
+  so the session cannot push (anthropics/claude-code#81776); `--ref main` alone refuses, because the GitHub App
+  preflight returns null for this repo; with both, the session clones the sandbox from GitHub and can push
+  (verified 2026-09-29, CLI 2.1.284). The session id comes from the CLI's `View: …/session_…` line, and follow-ups
+  use `claude -p "<msg>" --cloud <session_id>` as in T0. These sessions draw cloud-session credits; confirm with
+  both meters at the next T0.
+- **Launch (routine mode, `[launcher] mode = "routine"`, used 2026-09-28 only; kept in the code).** Routine runs
+  bill plan usage, not cloud-session credits, which is why the configs moved to command mode. A
   `claude --cloud` session gets an uploaded copy of the repo with no remote and cannot push (git proxy 403,
   T0 2026-09-28). A Claude Code **routine** whose source is the sandbox's GitHub URL gets a real clone with
   origin and can push `claude/*` branches. So each slot `sK` has one routine, `carnot-study2-<phase>-sK`,
