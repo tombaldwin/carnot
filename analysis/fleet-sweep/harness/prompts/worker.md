@@ -1,4 +1,5 @@
-<!-- Per-task session prompt (one cloud session per task). The harness fills the {placeholders} and passes the
+<!-- A session's first prompt: its first task (one session per task, or per slot with later tasks sent as
+prompts/next-task.md follow-ups). The harness fills the {placeholders} and passes the
 text as the session's first prompt (routine mode: the re-armed slot routine's first event). The harness depends
 on the branch name, the READY: message and the push. Routine sessions clone the sandbox with origin set, so no
 remote or credential set-up is needed (the step 0 of the `claude --cloud` workaround is gone, 2026-09-28).
@@ -36,5 +37,7 @@ a `READY: {task_id}` message rather than nothing.
 
 Never push to `main` or to any other branch, never force-push, and never edit `TASKS.json`.
 
-If you later receive a message about this task, it is review feedback: follow it on the same branch, finish
-with a new commit whose message starts with `READY: {task_id}`, push, and stop.
+You may later receive messages from the harness. Each says what it is: review feedback on a task you did (follow
+it on that task's own branch, finish with a new commit whose message starts with `READY: <that task's id>`,
+push, and stop), or a new task (start it from a fresh `origin/main` on the new branch it names). Follow each
+message on its own.

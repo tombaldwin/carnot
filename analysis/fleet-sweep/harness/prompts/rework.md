@@ -1,4 +1,4 @@
-<!-- Follow-up message sent to a task's own session after its change bounced (any cause). The harness fills
+<!-- Follow-up message sent to the session that did the task (per task or per slot) after its change bounced (any cause). The harness fills
 the {placeholders}; {cause_text} is orchestrator.CAUSE_TEXT (never names hidden tests); {details} is the
 reviewer's reason or the visible-test output tail, or empty. DRAFT until T0; pre-register the final text. -->
 Review feedback for task {task_id} (your submission {head_short}, attempt {attempt_no}).
@@ -10,7 +10,9 @@ You are still authorised to commit and push `{branch}` to origin without asking 
 
 What to do now, on the same branch `{branch}`:
 
-1. `git fetch origin` and work on `{branch}` as you left it.
+1. `git fetch origin` and switch back to `{branch}` as you left it (`git checkout {branch}`; if it is not in
+   your clone, `git checkout -b {branch} origin/{branch}`). You may have worked on other tasks since; this
+   message is only about task {task_id}.
 2. Fix the change as described above. If `origin/main` has moved, merge it into your branch
    (`git merge origin/main`), resolve any conflicts so that both your change and everything now on `main`
    are kept and work. Never rebase and never force-push.

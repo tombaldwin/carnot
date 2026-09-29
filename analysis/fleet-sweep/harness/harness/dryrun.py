@@ -61,7 +61,7 @@ HARNESS_DIR = Path(__file__).resolve().parent.parent
 def _harness_prompts(cfg: Config) -> None:
     """A dry-run config kept outside the harness (the tasks repo's dryrun/) uses the harness's own prompt
     templates unless it names others that exist."""
-    for attr in ("worker_prompt", "rework_prompt"):
+    for attr in ("worker_prompt", "rework_prompt", "next_task_prompt"):
         if not cfg.path(getattr(cfg.launcher, attr)).exists():
             setattr(cfg.launcher, attr, str(HARNESS_DIR / getattr(cfg.launcher, attr)))
 

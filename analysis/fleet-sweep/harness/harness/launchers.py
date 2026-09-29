@@ -113,6 +113,15 @@ def task_prompt(cfg: Config, task: Task) -> str:
         branch=branch_for(cfg, task.id), budget_min=f"{cfg.run.task_budget_min:g}", visible_cmd=VISIBLE_CMD_TEXT)
 
 
+def next_task_message(cfg: Config, task: Task) -> str:
+    """One session per slot: the follow-up message handing the slot's session its next task
+    (``[launcher] next_task_prompt``; the same placeholders as the worker prompt)."""
+    crit = "\n".join(f"- {c}" for c in task.acceptance) or "- (none given)"
+    return _template(cfg, cfg.launcher.next_task_prompt).format(
+        task_id=task.id, title=task.title, text=task.text.strip(), acceptance=crit,
+        branch=branch_for(cfg, task.id), budget_min=f"{cfg.run.task_budget_min:g}", visible_cmd=VISIBLE_CMD_TEXT)
+
+
 def harness_doc(cfg: Config) -> str:
     """HARNESS.md for routine mode (reset writes it to main)."""
     return _template(cfg, cfg.launcher.harness_doc).format(

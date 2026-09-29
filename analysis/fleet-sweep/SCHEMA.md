@@ -5,9 +5,12 @@ only this file plus `runs/<run_id>/run.json`. Times are UTC ISO 8601 with millis
 
 ## run.json
 
-`n_workers` is the number of **slots** (worker model: one cloud session per task, harness README "Worker
-model"); `notes` carries `phase=<t0|t1|t2|t1b|sweep-n1-k1|sweep-n1-k3|sweep-n12-k1|sweep-n12-k3>` (PLAN-v4/v5 logs:
-`sweep-n1|sweep-n12`) and `worker_model_design=session-per-task`.
+`n_workers` is the number of **slots** (harness README "Worker model"); `notes` carries
+`phase=<t0|t1|t2|t1b|sweep-n1-k1|sweep-n1-k3|sweep-n12-k1|sweep-n12-k3>` (PLAN-v4/v5 logs: `sweep-n1|sweep-n12`),
+`worker_model_design=session-per-slot` (from 2026-09-29; `session-per-task` for T0-T1 and `[launcher] session_per =
+"task"`) and `session_per=<slot|task> sessions_launched=<n> tasks_handed_out=<n> tasks_per_session_mean=<x>
+tasks_per_session=<n,n,…>` (one count per session launched), so cost per task can be read from the credit meter
+(each session costs about $0.50 to provision, T0d 2026-09-29).
 
 ```json
 {"run_id": "2026-10-02-N12-r1", "kind": "sweep|pilot|trial|dry-run", "n_workers": 12,
@@ -34,9 +37,9 @@ time).
 | `worker_start` | worker, session_id | slot `worker` (s1..sN) opens (at window start, or at its `start_schedule` minute). session_id is null: sessions are per task. Kept for compatibility: worker-hours are slot-open hours |
 | `worker_down` / `worker_restart` | worker, reason | slot down / back; down time is excluded from worker-hours. Operator entries, or `worker_down` from the harness itself with reason `launch_failures n=<N> last_error=<text>` after N consecutive failed launches on the slot (it stays down for the window) |
 | `slot_busy` / `slot_idle` | slot | a session starts / stops occupying the slot (launch or rework message / READY, timeout, window end) |
-| `session_launch` | slot, task, session_id, attempt_no | the task's session was launched on this slot (session_id null if none was seen). attempt_no = launch attempt for this task in this window (2+ only after a launch command failed outright); a task is never re-launched after its session ran. Routine launcher (`[launcher] mode = "routine"`): logged when the slot routine's re-arm is confirmed, **before the run exists**, so session_id is always null; the id (`cse_...`) arrives later in a `launch_detail … session_id_found=true session_id=…` note |
-| `session_message` | slot, task, session_id, kind (`rework`/`probe`) | a follow-up message delivered to the task's own session: `rework` after a bounce, when a slot freed (the slot is then that session's until its next READY); `probe` = T0's delivery check |
-| `session_timeout` | slot, task, session_id | no READY within `task_timeout_min` (25) of the launch or of the last rework message: the task is abandoned, never re-launched in the window, and its slot freed |
+| `session_launch` | slot, task, session_id, attempt_no | a session was launched on this slot with this task (session_id null if none was seen): one per session. One session per task: every task. One session per slot (`[launcher] session_per = "slot"`): the slot's first task, and the first task after the slot's previous session was retired; later tasks are `session_message kind=task`. attempt_no = launch attempt for this task in this window (2+ only after a launch command failed outright); a task is never re-launched after its session ran. Routine launcher (`[launcher] mode = "routine"`): logged when the slot routine's re-arm is confirmed, **before the run exists**, so session_id is always null; the id (`cse_...`) arrives later in a `launch_detail … session_id_found=true session_id=…` note |
+| `session_message` | slot, task, session_id, kind (`rework`/`probe`/`task`) | a follow-up message delivered to a session: `task` = one session per slot, the slot's session handed its next task (the task's hand-out, as `session_launch` is for a launched one; the slot is busy from then until its READY); `rework` after a bounce, to the session that did the task, when a slot freed (one session per slot: when that session is idle, i.e. its own slot is free, or it is retired and not busy; the slot is then that session's until its next READY); `probe` = T0's delivery check |
+| `session_timeout` | slot, task, session_id | no READY within `task_timeout_min` (25) of the task's hand-out (launch or `kind=task` message) or of the last rework message: the task is abandoned, never handed out again in the window, and its slot freed. One session per slot: the session is retired (it still gets rework for its earlier tasks) and the slot's next task goes to a fresh session |
 | `claim` | worker, task, branch | the task's branch first seen on the remote (its session's first push); worker = the slot. Branch `claude/task-<id>`, or another `claude/*` branch whose `READY: <id>` commit names the task |
 | `claim_race` | worker, task | RETIRED: no claims with one session per task; never logged by the current harness, accepted for older logs |
 | `submit` | worker, task, branch, head, attempt_no, lines_changed, files, k, m | a `READY: <id>` push; worker = the slot the session held. attempt_no = 1 for the first submission of the task, 2+ for re-submissions. k = changes in flight at this moment (submitted, not finished or censored), m = those sharing a file with this change. k, m are logged on every submit but analysed on attempt_no = 1 |
@@ -60,7 +63,11 @@ Harness `note` lines for sessions (not events): `slots n=… task_timeout_min=�
 `session_id_found=true|false session_id=<cse_…> after_s=<s>` when the lookup ends),
 `session_launch_failed …` (routine mode: the re-arm failed or was not confirmed), `routine_disabled …` /
 `routine_disable_failed …` (window end), `routine_rate_wait …`, `routine_budget_refund trigger=… reason=not_started`,
-`routine_list_runs_failed …`, `followup_failed …`, `reviewers n=<K> ids=r1,…` (at window start),
+`routine_list_runs_failed …`, `followup_failed …`, `session_retired slot=… session=… tasks=<n> reason=<tasks_per_session|timeout|followup_failed|launch_failed|no_session_id> reachable=<true|false>`
+(one session per slot: the session gets no new tasks; an unreachable one gets no rework either, and its tasks'
+bounces abandon them), `task_requeued task=… reason=followup_failed` (a `kind=task` hand-out could not be
+delivered: the task goes back to the front of the list for a fresh session), `session_summary …` (at grace end:
+the same text as in `run.json` notes), `reviewers n=<K> ids=r1,…` (at window start),
 `review_open_at_grace_end task=… head=… reviewer=…` (one per reviewer still reviewing at grace end; the analysis
 clips that reviewer's busy time only), `reviewer_downtime reviewer=… s=…` (at grace end, reviewers with downtime; the
 window is VOID when the summed downtime / K exceeds `[reviewer] max_downtime_min`), `cli_pinned path=… version=… source=… reused=…` (or
@@ -70,10 +77,19 @@ window is VOID when the summed downtime / K exceeds `[reviewer] max_downtime_min
 
 Derived by the analysis, never logged: finished (merged by window end + grace, and hidden tests
 green), censored (submitted, not finished, not bounced at end), V, b_review, b_hidden, b, λ (first
-submissions per slot-open hour), start-up time (session_launch -> claim), slot busy share, timeouts.
+submissions per slot-open hour), start-up time (the task's hand-out, `session_launch` or `session_message
+kind=task`, -> claim), slot busy share, timeouts.
+
+**Design caveat (one session per slot):** a slot's tasks share one session's context (up to `tasks_per_session`,
+8), so a later task can be helped or hindered by what the session saw on earlier ones. This applies to N = 1 and
+N = 12 alike (every slot's session carries up to 8 tasks), so it does not bias the N contrast, but per-task
+quantities (start-up, coding time, escapes) are not comparable with the one-session-per-task logs of T0-T1. A
+follow-up task's start-up has no provisioning or clone in it (the session already has the repository); `derive.py`
+reports launch and follow-up start-ups apart.
 
 Start-up time under the command launcher (all phase configs from 2026-09-29) runs from `session_launch`, logged when
-the CLI has printed the session id, to the branch's first push. Under the routine launcher (2026-09-28) it ran from the confirmed re-arm, so
+the CLI has printed the session id, to the branch's first push; for a task handed to a running session, from its
+`session_message kind=task` (logged when the follow-up command has returned) to the branch's first push. Under the routine launcher (2026-09-28) it ran from the confirmed re-arm, so
 it includes the re-arm lead (`[launcher.routine] lead_s`, 30 s, less the ~9 s the re-arm call itself takes),
 the routine firing delay (runs start 40-75 s after `run_once_at`, observed 2026-09-28), provisioning and the
 clone. The `run_once_at` in the first `launch_detail` note lets the analysis split off the lead. Runs launched

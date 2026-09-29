@@ -50,7 +50,9 @@ def run_banner(cfg, run_id: str) -> str:
         f"  kind           {rc.kind}",
         f"  N (slots)      {rc.n_workers}   start schedule (minute, slots) {sched}",
         f"  window         {rc.window_min:g} min (warm-up {rc.warmup_min:g}, grace {rc.grace_min:g})",
-        f"  sessions       one per task; timeout {rc.task_timeout_min:g} min, budget {rc.task_budget_min:g} min"
+        (f"  sessions       one per slot (up to {cfg.launcher.tasks_per_session} tasks each, later ones by follow-up)"
+         if cfg.launcher.session_per == "slot" else "  sessions       one per task")
+        + f"; timeout {rc.task_timeout_min:g} min, budget {rc.task_budget_min:g} min"
         + (f"; first task {rc.first_task}" if rc.first_task else "") + ("; probe follow-up" if rc.probe_followup else ""),
         (f"  launcher       routine   lead {cfg.launcher.routine.lead_s:g} s, env {cfg.launcher.routine.environment_id}, "
          f"source {cfg.launcher.routine.source_url}" + ("" if cfg.launcher.verified else "   (UNVERIFIED: T0 checks it)")

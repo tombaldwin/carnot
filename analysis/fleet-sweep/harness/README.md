@@ -33,7 +33,38 @@ dispatcher --claude --cloud (task prompt)--> session (1 per task, in a slot) --g
                                          +--> main
 ```
 
-## Worker model: one cloud session per task
+## Worker model: one cloud session per slot (or per task)
+
+**One session per slot (`[launcher] session_per = "slot"`, every phase config from 2026-09-29).** T0d
+(2026-09-29) showed that each cloud session costs about $0.50 of cloud credits to provision and clone, however
+little it does, while an idle session costs nothing and one session doing 8 tasks in a row cost under $1. So:
+
+- When a slot opens (window start or its `start_schedule` minute), its session is **launched with the slot's
+  first task** (the launch command below, `prompts/worker.md`): `session_launch`, one per session.
+- When that task's READY frees the slot, the slot's **next task goes to the same session** as a follow-up
+  message (`claude -p "<msg>" --cloud <session_id>`, the follow-up path; `prompts/next-task.md`: the full task
+  text and acceptance criteria, the new branch `claude/task-<id>` from a fresh `origin/main`, the same working
+  rules, and that it is a new, independent task), logged as `session_message kind=task` (slot, task,
+  session_id). The slot is busy from that message to the task's READY, and the session timeout runs from it.
+- **Rework** goes to the session that did the task, as before. The message waits (queued in the harness for
+  that session) until the session is idle: its own slot free, or, for a retired session, not busy on any slot.
+- A slot's session is **retired** and a fresh one launched for the slot's next task after `tasks_per_session`
+  tasks (8), or at once after a `session_timeout` or a failed follow-up delivery (`session_retired … reason=…`
+  note). A retired session gets no new tasks but still gets rework for its own tasks while reachable; after a
+  failed follow-up it is unreachable, and a bounce of one of its tasks abandons that task. A `kind=task`
+  hand-out that cannot be delivered puts the task back at the front of the list (`task_requeued` note) for the
+  fresh session.
+- Claims and submits are attributed exactly as before (branch `claude/task-<id>` plus the `READY:` commit).
+  Start-up of a follow-up task runs from its `session_message kind=task` to its first push (no provisioning).
+- `run.json` notes (and a `session_summary` note at grace end) record `sessions_launched`, `tasks_handed_out`
+  and the tasks per session, so cost per task can be read from the credit meter.
+- **Design caveat:** tasks in one session share its context (up to 8 tasks), so an earlier task can help or
+  hinder a later one. This affects N = 1 and N = 12 alike (every slot carries up to 8 tasks per session), so it
+  does not bias the N contrast, but per-task measures are not comparable with the one-session-per-task T0-T1.
+- `session_per = "task"` (the code default, T0-T1) keeps one session per task: every task is launched, and
+  everything below applies per task.
+
+The rest of this section describes the parts common to both, written for one session per task.
 
 Product facts this rests on (Claude Code 2.1.283 docs): `claude --cloud "<prompt>"` creates a cloud session
 that clones the current directory's GitHub remote at the current branch and does not return at once; it
@@ -117,9 +148,10 @@ detach from it, is **UNVERIFIED** (T0, below).
   (`claude -p "<message>" --cloud <session_id>`; in routine mode the run's `cse_...` id, verified to reach
   routine sessions 2026-09-28), logged as `session_message` kind `rework`. That slot is then
   the session's until its next READY. The session need not be on the slot it started on.
-- **Timeouts.** No READY within `task_timeout_min` (25) of the launch, or of a rework message: the session is
-  abandoned (`session_timeout`, a `task_abandoned` note, the optional `stop_command`), its slot freed, and the
-  task is never re-launched in the window. A later READY from it is noted and ignored.
+- **Timeouts.** No READY within `task_timeout_min` (25) of the launch (or `kind=task` message), or of a rework
+  message: the task is abandoned (`session_timeout`, a `task_abandoned` note; one session per task: the optional
+  `stop_command`; one session per slot: the session is retired instead), its slot freed, and the task is never
+  handed out again in the window. A later READY for it is noted and ignored.
 - **Window end.** Busy slots are freed (`session_open_at_window_end` notes), queued rework is not sent
   (`rework_not_sent_at_window_end`), and the operator (or `stop_command`) stops the open sessions. Reviews and
   merges carry on through grace as before.
@@ -251,7 +283,8 @@ since those tests are public; for `review`, the reviewer's reason.
 | `config.dryrun.toml` | dry-run config |
 | `prompts/reviewer.md` | the frozen review job's prompt (checkout job) |
 | `prompts/reviewer-diff.md` | SUPERSEDED diff-only review prompt (`job = "diff"`) |
-| `prompts/worker.md` | per-task session prompt (template; draft until T0, then pre-registered) |
+| `prompts/worker.md` | a session's first prompt: its first task (template; draft until T0, then pre-registered) |
+| `prompts/next-task.md` | one session per slot: the follow-up handing the session its next task (template; draft) |
 | `prompts/rework.md` | follow-up message after a bounce (template; draft until T0) |
 | `tests/` | pytest suite |
 
@@ -342,7 +375,7 @@ also needs a routine id for every slot, from `routines-setup`).
 | `[launcher] stop_command` | empty | whether any command stops or archives a session; until then the operator stops sessions by hand |
 | `[repo] accept_other_claude_branches` | `true` | whether sessions use `claude/task-<id>` as told, or a name of their own (T0) |
 | `[repo] remote_url`, `[tasks] *`, `[launcher] launch_dir`, `prompt_dir` | placeholders | the private sandbox repo, the local task, hidden-test and reference paths, the launch clone, the private prompt dir |
-| `prompts/worker.md`, `prompts/rework.md` | draft | the final wording after T0, to be pre-registered |
+| `prompts/worker.md`, `prompts/next-task.md`, `prompts/rework.md` | draft | the final wording after the slot-session T0, to be pre-registered |
 | undocumented limits | - | idle timeout of a cloud session (a session waiting for rework may expire), concurrent-session limit (12 needed at T1), shared rate limits (throttling, abort rule 1) |
 
 ## Phase configs (PLAN-v4 section 7.4; PLAN-v6 sections 5.1 and 6.1)

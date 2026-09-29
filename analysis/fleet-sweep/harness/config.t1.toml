@@ -68,7 +68,7 @@ max_downtime_min = 10           # summed downtime of the K reviewers / K; more v
 parallel = 1                    # K reviewer threads r1..rK on one FIFO queue (PLAN-v6 section 6)
 
 [launcher]
-# One cloud session per task (harness README, "Worker model"). command: the `claude --cloud` template below,
+# Sessions (harness README, "Worker model"): one per slot, below. command: the `claude --cloud` template below,
 # with the workaround for anthropics/claude-code#81776 (CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 and --ref):
 # the session clones the sandbox from GitHub and can push, and it draws cloud-session credits (verified
 # 2026-09-29, CLI 2.1.284). routine: each launch re-arms a slot routine ([launcher.routine]); it works too but
@@ -97,6 +97,14 @@ verified = true            # command path with the #81776 workaround: clone and 
 followup_verified = true   # T0: claude -p "<msg>" --cloud <id> returns in ~5 s, exit 0, reaches an idle session; verified to reach routine sessions (cse_ id) 2026-09-28
 worker_prompt = "prompts/worker.md"
 rework_prompt = "prompts/rework.md"
+# One session per slot (2026-09-29, T0d: each session costs about $0.50 to provision however little it does;
+# one session doing 8 tasks cost under $1). The slot's session is launched with its first task; later tasks
+# reach it as follow-up messages (next_task_prompt, logged session_message kind=task); rework goes to the
+# session that did the task. A fresh session after tasks_per_session tasks, a timeout or a failed follow-up.
+# "task" = one session per task (T0-T1).
+session_per = "slot"
+tasks_per_session = 8
+next_task_prompt = "prompts/next-task.md"
 prompt_dir = "/Users/tom/git/carnot-sandbox-tasks/work/prompts"   # private (work/ is gitignored in the tasks repo)
 
 [launcher.routine]

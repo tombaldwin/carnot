@@ -82,14 +82,14 @@ class FakeLauncher:
 
 class Env:
     def __init__(self, tmp: Path, reviewer=None, n_tasks=10, scale=600.0, reviewer_cfg=None, sim_cfg=None,
-                 run_cfg=None, launcher=None, n_slots=4):
+                 run_cfg=None, launcher=None, n_slots=4, launcher_cfg=None):
         base = config_mod.from_dict({
             "run": {"kind": "dry-run", "n_workers": n_slots, "output_dir": str(tmp / "runs"),
                     "poll_interval_s": 5, "window_min": 90, "warmup_min": 10, "grace_min": 10,
                     "worker_model": "sim-worker", "reviewer_model": "sim-reviewer", **(run_cfg or {})},
             "tests": {"timeout_s": 60},
             "reviewer": {"mode": "sim", "retry_backoff_s": 5, **(reviewer_cfg or {})},
-            "launcher": {"mode": "sim"},
+            "launcher": {"mode": "sim", **(launcher_cfg or {})},
             "sim": {"time_scale": scale, "n_toy_tasks": n_tasks, **(sim_cfg or {})},
         }, HARNESS_DIR)
         self.cfg = prepare_toy_config(base, tmp / "sandbox")

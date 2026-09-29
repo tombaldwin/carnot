@@ -1,7 +1,9 @@
 """Simulated sessions and reviewer for dry runs. No model is ever called.
 
-One SimSession per task, as the real worker model has one cloud session per task (harness README,
-"Worker model"). SimCloudLauncher starts them for the orchestrator's slots, against a local bare repo:
+One SimSession per task. SimCloudLauncher starts them for the orchestrator's slots, against a local bare repo.
+With ``[launcher] session_per = "slot"`` a simulated cloud session holds several SimSessions: its launch starts
+the first task's, and a ``task`` follow-up starts the next task's in the same session (start-up
+``followup_startup_mean_s``: no provisioning); rework goes to the SimSession of the task it names.
 
   launch    after a start-up delay (exp., mean startup_mean_s: provisioning and clone), push the branch
             claude/task-<id> at origin/main (the prompt's step 1), then work (exp. with rate
@@ -62,7 +64,7 @@ class SimSession:
     slot's lock, so a session that timed out cannot interleave with the slot's next session."""
 
     def __init__(self, task_id: str, session_id: str, cfg: Config, clock: Clock, oracle: Oracle,
-                 rng: random.Random, stop: threading.Event | None = None):
+                 rng: random.Random, stop: threading.Event | None = None, startup_mean_s: float | None = None):
         self.task, self.session_id = task_id, session_id
         self.cfg, self.sim = cfg, cfg.sim
         self.clock, self.oracle, self.rng = clock, oracle, rng
@@ -77,6 +79,7 @@ class SimSession:
         self.unappliable: list[dict] = []
         self.given_up = False
         self.error: str | None = None
+        self.startup_mean_s = self.sim.startup_mean_s if startup_mean_s is None else startup_mean_s
 
     def bind(self, repo: Repo, slot_lock: threading.Lock) -> "SimSession":
         self.repo, self.slot_lock = repo, slot_lock
@@ -124,7 +127,7 @@ class SimSession:
         self._guard(self._first)
 
     def _first(self):
-        if self._sleep(self.rng.expovariate(1.0 / max(self.sim.startup_mean_s, 1e-9))):
+        if self._sleep(self.rng.expovariate(1.0 / max(self.startup_mean_s, 1e-9))):
             return
         stall = self.rng.random() < self.sim.p_stall
         with self.slot_lock:
@@ -357,8 +360,9 @@ class SimCloudLauncher:
         self.cfg, self.clock, self.log, self.oracle = cfg, clock, log, oracle
         self.clones_dir, self.run_id, self.seed = clones_dir, run_id, seed
         self.stop_ev = threading.Event()
-        self.sessions: dict[str, SimSession] = {}
-        self.by_id: dict[str, SimSession] = {}
+        self.sessions: dict[str, SimSession] = {}          # task -> its SimSession
+        self.by_id: dict[str, SimSession] = {}             # cloud session id -> its first task's SimSession
+        self.groups: dict[str, dict[str, SimSession]] = {} # cloud session id -> task -> SimSession
         self.threads: list[threading.Thread] = []
         self._repos: dict[str, tuple[Repo, threading.Lock]] = {}
         self._lock = threading.Lock()
@@ -380,13 +384,14 @@ class SimCloudLauncher:
     def launch(self, slot: str, task, prompt: str, name: str) -> LaunchResult:
         if f"READY: {task.id}" not in prompt or f"{self.cfg.repo.branch_prefix}{task.id}" not in prompt:
             raise LaunchError("prompt lacks the READY: message or the branch name")
-        sid = f"sim-{self.run_id}-{slot}-{task.id}"
+        sid = f"sim-{self.run_id}-{slot}-{task.id}"   # unique: a task is launched at most once per session
         repo, lk = self.slot_repo(slot)
         s = SimSession(task.id, sid, self.cfg, self.clock, self.oracle, random.Random(f"{self.seed}-{task.id}"),
                        threading.Event()).bind(repo, lk)
         with self._lock:
             self.sessions[task.id] = s
             self.by_id[sid] = s
+            self.groups[sid] = {task.id: s}
             self.launches.append((slot, task.id, name))
         if self.stop_ev.is_set():
             s.halt.set()
@@ -394,19 +399,39 @@ class SimCloudLauncher:
         return LaunchResult(sid, "sim")
 
     def send(self, slot: str, task_id: str, session_id: str | None, message: str, kind: str = "rework") -> None:
-        s = self.by_id.get(session_id or "")
-        if s is None:
+        group = self.groups.get(session_id or "")
+        if group is None:
             raise LaunchError(f"no such session {session_id}")
         repo, lk = self.slot_repo(slot)
+        if kind == "task":
+            b = f"{self.cfg.repo.branch_prefix}{task_id}"
+            if f"READY: {task_id}" not in message or b not in message or "origin/main" not in message:
+                raise LaunchError("task message lacks the READY: message, the branch name or origin/main")
+            first = next(iter(group.values()))
+            s = SimSession(task_id, session_id, self.cfg, self.clock, self.oracle,
+                           random.Random(f"{self.seed}-{task_id}"), first.halt,
+                           startup_mean_s=self.sim_followup_startup()).bind(repo, lk)
+            with self._lock:
+                self.sessions[task_id] = s
+                group[task_id] = s
+                self.messages.append((slot, task_id, kind))
+            self._spawn(f"sim-{session_id}-{task_id}", s.run_first)
+            return
+        s = group.get(task_id)
+        if s is None:
+            raise LaunchError(f"session {session_id} never had task {task_id}")
         s.bind(repo, lk)
         with self._lock:
             self.messages.append((slot, task_id, kind))
         self._spawn(f"sim-{session_id}-{kind}", s.run_message, kind)
 
+    def sim_followup_startup(self) -> float:
+        return self.cfg.sim.followup_startup_mean_s
+
     def stop(self, session_id: str | None) -> None:
         s = self.by_id.get(session_id or "")
         if s is not None:
-            s.halt.set()
+            s.halt.set()          # the group's SimSessions share one halt event
 
     def stop_all(self, orch=None) -> None:
         self.stop_ev.set()

@@ -46,6 +46,7 @@ PHASES = {
                                 start_schedule=[], first_task="", probe_followup=False, reviewers=k, **_SESS)
        for n in (1, 12) for k in (1, 3)},
 }
+SESSION_PER = ("slot", "task")          # [launcher] session_per
 SWEEP_REVIEWERS = (1, 3)                # PLAN-v6 section 6.1: `run` refuses a sweep config with another K
 WORKER_MODEL = "claude-haiku-4-5"       # PLAN-v4 section 2 (model id string: UNVERIFIED until the CLI check)
 REVIEWER_MODEL = "claude-opus-5-5"
@@ -237,8 +238,16 @@ class LauncherCfg:
     stop_command: list = dc.field(default_factory=list)   # optional; {session_id}; none is documented
     verified: bool = False              # launch_command + session_id_regex + detach checked at T0
     followup_verified: bool = False     # followup_command checked at T0
-    worker_prompt: str = "prompts/worker.md"   # per-task session prompt (template)
+    worker_prompt: str = "prompts/worker.md"   # a session's first prompt: its first task (template)
     rework_prompt: str = "prompts/rework.md"   # follow-up message after a bounce (template)
+    # Worker model (harness README "Worker model"). "task": one cloud session per task (PLAN-v4/v5, T0-T1).
+    # "slot": one session per slot, launched with the slot's first task; each later task goes to the SAME
+    # session as a follow-up message (next_task_prompt), because every session costs about $0.50 to provision
+    # however little it does (T0d, 2026-09-29). A slot's session is retired, and a fresh one launched for the
+    # slot's next task, after tasks_per_session tasks, a session timeout or a failed follow-up delivery.
+    session_per: str = "task"
+    tasks_per_session: int = 8
+    next_task_prompt: str = "prompts/next-task.md"   # follow-up message handing a session its next task
     # mode = "routine": the short per-task prompt stored on the routine, and the rules written to main as
     # [repo] harness_file_name by reset (a model copies the routine prompt at every re-arm: keep it short)
     routine_prompt: str = "prompts/routine-worker.md"
@@ -280,6 +289,8 @@ class SimCfg:
     p_false_reject: float = 0.15
     p_catch_visible_fail: float = 0.9
     p_review_crash: float = 0.02
+    # one session per slot: a follow-up task's start-up (read the message, fetch, branch, push; no provisioning)
+    followup_startup_mean_s: float = 10
 
 
 @dc.dataclass
@@ -350,6 +361,10 @@ def phase_problems(cfg: Config) -> list[str]:
             v = float(v)
         if have != v:
             probs.append(f"[run] {k} = {getattr(rc, k)!r}, but phase {rc.phase!r} is pre-registered with {want[k]!r}")
+    if cfg.launcher.session_per not in SESSION_PER:
+        probs.append(f"[launcher] session_per = {cfg.launcher.session_per!r}: one of {SESSION_PER}")
+    if not (isinstance(cfg.launcher.tasks_per_session, int) and cfg.launcher.tasks_per_session >= 1):
+        probs.append(f"[launcher] tasks_per_session = {cfg.launcher.tasks_per_session!r}: an integer >= 1")
     if rc.kind == "sweep" and cfg.reviewer.parallel not in SWEEP_REVIEWERS:
         probs.append(f"[reviewer] parallel = {cfg.reviewer.parallel!r}: a sweep window runs K = 1 or 3 reviewers")
     if not (isinstance(cfg.reviewer.parallel, int) and cfg.reviewer.parallel >= 1):

@@ -6,7 +6,8 @@ T1b (like T1) runs one slot, then all twelve (``start_schedule = [[0, 1], [90, 1
 in each phase (phase A: launched before the second start_schedule minute; phase B: at or after it):
 
 * **start-up** = the task's branch first pushed (``claim``) minus the routine's ``run_once_at`` (from the task's
-  first ``launch_detail … run_once_at=…`` note), or minus its ``session_launch`` if that note is missing;
+  first ``launch_detail … run_once_at=…`` note), or minus its ``session_launch`` if that note is missing, or,
+  with one session per slot, minus its ``session_message kind=task`` for a task handed out by follow-up;
 * **coding** = its first READY (``submit`` with attempt_no 1, before window_end) minus the ``claim``.
 
 The statistic is the ratio of geometric means, many slots over one, with a Welch 90% interval on the log scale
@@ -291,6 +292,11 @@ def task_legs(run: dict, events: list[dict]) -> list[dict]:
             r = rows.setdefault(e["task"], {})
             r.setdefault("launch", t)
             r.setdefault("slot", e["slot"])
+        elif ty == "session_message" and e.get("kind") == "task":   # one session per slot: a follow-up hand-out
+            r = rows.setdefault(e["task"], {})
+            r.setdefault("launch", t)
+            r.setdefault("slot", e["slot"])
+            r["followup"] = True
         elif ty == "claim":
             rows.setdefault(e["task"], {}).setdefault("claim", t)
         elif ty == "submit" and e.get("attempt_no") == 1:
@@ -299,9 +305,10 @@ def task_legs(run: dict, events: list[dict]) -> list[dict]:
     for task, r in rows.items():
         if "launch" not in r or "claim" not in r:
             continue
-        up = r["claim"] - max(r["launch"], once.get(task, r["launch"]))
+        up = r["claim"] - (r["launch"] if r.get("followup") else max(r["launch"], once.get(task, r["launch"])))
         code = r["ready"] - r["claim"] if "ready" in r and r["ready"] <= we else None
-        out.append(dict(task=task, slot=r.get("slot"), launch=r["launch"], startup_s=up if up > 0 else None,
+        out.append(dict(task=task, slot=r.get("slot"), launch=r["launch"], followup=bool(r.get("followup")),
+                        startup_s=up if up > 0 else None,
                         coding_s=code if code is not None and code > 0 else None))
     return out
 
@@ -352,6 +359,12 @@ def throttle_report(run_dir: Path, skip_min: float = SKIP_MIN, exclude: list[str
     code = welch_log_ratio([x["coding_s"] for x in A if x["coding_s"]], [x["coding_s"] for x in B if x["coding_s"]],
                            level)
     dec, flag = decide(up, code, tol)
+    # One session per slot: the phases mix launch start-ups (provisioning + clone) and follow-up start-ups in
+    # different proportions, so the follow-up-only and launch-only ratios are reported beside the rule.
+    up_f = welch_log_ratio([x["startup_s"] for x in A if x["startup_s"] and x["followup"]],
+                           [x["startup_s"] for x in B if x["startup_s"] and x["followup"]], level)
+    up_l = welch_log_ratio([x["startup_s"] for x in A if x["startup_s"] and not x["followup"]],
+                           [x["startup_s"] for x in B if x["startup_s"] and not x["followup"]], level)
 
     def med(xs):
         xs = [x for x in xs if x]
@@ -370,7 +383,9 @@ def throttle_report(run_dir: Path, skip_min: float = SKIP_MIN, exclude: list[str
                       "else INCONCLUSIVE; coding interval wholly above it is a flag"),
                 decision=dec, coding_flag=flag, tolerance=tol, level=level, split_min=split_min,
                 excluded=excl, excluded_source=("operator worker_down" if auto else "--exclude"),
-                startup=rnd(up), coding=rnd(code), phases=phases, activity=act)
+                startup=rnd(up), coding=rnd(code), phases=phases, activity=act,
+                followup_tasks=sum(1 for x in legs if x["followup"]),
+                startup_followup_only=rnd(up_f), startup_launch_only=rnd(up_l))
 
 
 def format_report(r: dict) -> str:
@@ -390,6 +405,10 @@ def format_report(r: dict) -> str:
          + ("  FLAG: coding interval wholly above the tolerance (reported beside SCALE, not a stop)"
             if r["coding_flag"] else ""),
          f"  tolerance {r['tolerance']}: {r['decision']}"]
+    if r.get("followup_tasks"):
+        L.append(f"  one session per slot: {r['followup_tasks']} tasks handed out by follow-up; start-up ratio, "
+                 f"follow-ups only {iv(r['startup_followup_only'])}, launches only {iv(r['startup_launch_only'])} "
+                 "(reported only)")
     act = r.get("activity") or {}
     if "phases" in act:
         L.append(format_activity(act))

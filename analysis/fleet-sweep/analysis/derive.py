@@ -55,15 +55,19 @@ listed in README.md):
 **One cloud session per task (harness README "Worker model"; README decisions 39-43).** The harness runs N
 *slots*; each runs one session at a time, and a session works on one task and its rework. `worker_start`
 marks a slot opening; `slot_busy` / `slot_idle` mark a session occupying it; `session_launch`,
-`session_message` (kind rework / probe) and `session_timeout` record the sessions. Accounting:
+`session_message` (kind rework / probe / task) and `session_timeout` record the sessions. With one session per
+slot (`[launcher] session_per = "slot"`, from 2026-09-29) a slot's session is launched with its first task and
+later tasks reach the same session as `session_message kind=task`; a hand-out is either. Accounting:
 
 * worker-hours = **slot-open hours** (busy + idle) after warm-up, down-time excluded, as before; lambda =
   first submissions per slot-hour. A slot is idle only between a READY and the next hand-out (seconds) or
   when there is nothing left to hand out (supply exhaustion, which truncates the counting window anyway),
   so slot-open time is the fleet-size exposure the rivals' N x hours assumes. `slot_busy_hours` and
   `slot_busy_share` (busy / open, over the same counting window) are reported beside it.
-* start-up time = a task's first `session_launch` -> its branch first seen (`claim`, the session's first
-  push; the prompt tells it to push the branch before any work). Older logs: first claim - worker start.
+* start-up time = a task's hand-out (its first `session_launch`, or its `session_message kind=task`) -> its
+  branch first seen (`claim`, the session's first push; the prompt tells it to push the branch before any
+  work). A follow-up task's start-up has no provisioning in it; `startup_launch_min_mean` and
+  `startup_followup_min_mean` report the two kinds apart. Older logs: first claim - worker start.
 * supply exhaustion = the end of the task list: the harness's `tasks_exhausted` note (logged when the last
   task is handed to a slot), else the `session_launch` that brings the distinct launched tasks to the supply,
   else (older logs) the claim that does.
@@ -152,7 +156,8 @@ def derive_window(run, events, supply=None, supply_source=None):
     cur_review = {}           # reviewer id -> (t of first review_start, key) of the review it is on
     slot_busy_iv = defaultdict(list)
     slot_busy_since = {}
-    launch_t = {}             # task -> first session_launch time
+    launch_t = {}             # task -> first session_launch (or, one session per slot, kind=task message) time
+    task_msgs = []            # (t, task) of kind=task hand-outs (one session per slot)
     launches = []             # (t, task)
     first_claim_task = {}     # task -> first claim (branch first pushed)
     timeouts = []             # (t, task)
@@ -214,6 +219,10 @@ def derive_window(run, events, supply=None, supply_source=None):
         if typ == "session_message":
             if e["kind"] == "rework":
                 rework_msgs.append((t, e["task"]))
+            elif e["kind"] == "task":        # one session per slot: a later task handed out by follow-up
+                launch_t.setdefault(e["task"], t)
+                launches.append((t, e["task"]))
+                task_msgs.append((t, e["task"]))
             continue
         if typ == "claim":
             first_claim.setdefault(e["worker"], t)
@@ -463,9 +472,14 @@ def derive_window(run, events, supply=None, supply_source=None):
     resolved_first = [p for p in prs if p["resolved"]]
     if launch_t:
         startup = [first_claim_task[k] - launch_t[k] for k in first_claim_task if k in launch_t]
+        followup_tasks = {k for _, k in task_msgs}
+        st_follow = [first_claim_task[k] - launch_t[k] for k in first_claim_task if k in launch_t and k in followup_tasks]
+        st_launch = [first_claim_task[k] - launch_t[k] for k in first_claim_task if k in launch_t
+                     and k not in followup_tasks]
         startup_source = "session_launch -> branch first pushed"
     else:
         startup = [first_claim[w] - worker_start_t[w] for w in first_claim if w in worker_start_t]
+        st_follow, st_launch = [], startup
         startup_source = "worker_start -> first claim" if startup else None
     slot_h_post = sum(_overlap(a, b, warm, t_count_end) for iv in slot_busy_iv.values() for a, b in iv) / 3600
     submitted = {task for task, row in tasks.items() if row["submits"]}
@@ -529,10 +543,13 @@ def derive_window(run, events, supply=None, supply_source=None):
         worker_tokens_per_hour={w: usage_tokens[w] / (sum(b - a for a, b in worker_iv[w]) / 3600)
                                 for w in usage_tokens if sum(b - a for a, b in worker_iv[w]) > 0},
         usage_cost_usd=usage_cost, startup_min_mean=(sum(startup) / len(startup) / 60) if startup else math.nan,
+        startup_launch_min_mean=(sum(st_launch) / len(st_launch) / 60) if st_launch else math.nan,
+        startup_followup_min_mean=(sum(st_follow) / len(st_follow) / 60) if st_follow else math.nan,
+        task_handoffs=len(task_msgs),
         startup_source=startup_source, n_startup=len(startup),
         slot_busy_hours=slot_h_post if slot_busy_iv else math.nan,
         slot_busy_share=(slot_h_post / worker_h_post) if slot_busy_iv and worker_h_post > 0 else math.nan,
-        session_launches=len(launches), tasks_launched=len(launch_t), session_timeouts=len(timeouts),
+        session_launches=len(launches) - len(task_msgs), tasks_launched=len(launch_t), session_timeouts=len(timeouts),
         timeouts_before_submit=sum(1 for t, task in timeouts if task not in first_sub_t or first_sub_t[task] > t),
         abandoned_after_submit=sum(1 for p in prs if p["abandoned"]),
         rework_messages=len(rework_msgs),

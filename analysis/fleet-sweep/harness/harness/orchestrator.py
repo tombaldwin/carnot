@@ -1,7 +1,11 @@
 """Slots and sessions, watcher, review queue, merge queue and window control.
 
-Worker model (harness README, "Worker model: one cloud session per task"): N **slots**, each running one
-cloud session at a time. A session works on exactly one task, whose text is in its launch prompt.
+Worker model (harness README, "Worker model"): N **slots**, each running one piece of work at a time.
+``[launcher] session_per = "task"``: a session works on exactly one task, whose text is in its launch prompt.
+``session_per = "slot"``: each slot has one session, launched with the slot's first task; later tasks go to the
+same session as follow-up messages (``kind=task``) until it is retired (after ``tasks_per_session`` tasks, a
+session timeout or a failed follow-up) and a fresh one is launched. Rework always goes to the session that did
+the task. Either way a slot is busy from a hand-out (launch or message) to its READY.
 
 Threads (all share one EventLog and one local clone of the sandbox remote):
 
@@ -39,7 +43,7 @@ from .clock import Clock, iso
 from .config import Config
 from .events import EventLog
 from .gitops import GitError, Repo
-from .launchers import LaunchError, probe_message, rework_message, task_prompt
+from .launchers import LaunchError, next_task_message, probe_message, rework_message, task_prompt
 from .review import ReviewError, ReviewPacket, Reviewer, make_packet
 from .tasks import Task, TestResult, TestRunner
 
@@ -94,6 +98,18 @@ class TaskState:
 
 
 @dc.dataclass
+class SlotSession:
+    """``session_per = "slot"``: one cloud session and the tasks it has been given (first by launch, then by
+    follow-up). Retired: gets no new tasks, but still gets rework for its own tasks while reachable."""
+    key: str                            # harness id: <slot>-<n>
+    slot: str
+    tasks: list = dc.field(default_factory=list)
+    session_id: str | None = None
+    retired: str | None = None          # reason: tasks_per_session | timeout | followup_failed | launch_failed | no_session_id
+    reachable: bool = True
+
+
+@dc.dataclass
 class Slot:
     id: str
     open: bool = False
@@ -103,6 +119,7 @@ class Slot:
     fail_streak: int = 0               # consecutive tasks whose launch failed on this slot
     backoff_until: dt.datetime | None = None   # no new work before this (after a failed launch)
     down: bool = False                 # marked down (worker_down) after too many failed launches
+    ss: SlotSession | None = None      # session_per = "slot": the slot's current (unretired) session
 
 
 @dc.dataclass
@@ -116,6 +133,7 @@ class Session:
     feedback: collections.deque = dc.field(default_factory=collections.deque)   # messages to deliver
     probe_sent_at: dt.datetime | None = None
     id_pending: bool = False            # routine mode: the session id is still being looked up
+    ss: SlotSession | None = None       # session_per = "slot": the session that holds this task
 
 
 class Orchestrator:
@@ -135,6 +153,7 @@ class Orchestrator:
         self.states: dict[str, TaskState] = {}
         self.branch_heads: dict[str, str] = {}       # attributed claude/* branch -> last seen sha
         self.unattributed: set[str] = set()
+        self.unlaunched_noted: set[str] = set()
         self.inflight: dict[str, list[str]] = {}     # task -> files; submitted, not merged, not abandoned
         self.prep_q: collections.deque[Change] = collections.deque()
         self.review_q: collections.deque[Change] = collections.deque()
@@ -164,6 +183,12 @@ class Orchestrator:
         self.window_start: dt.datetime | None = None
         self.window_end: dt.datetime | None = None
         self.launch_failures: collections.deque = collections.deque()   # (time, slot) of failed launches
+        if cfg.launcher.session_per not in ("slot", "task"):
+            raise ValueError(f"[launcher] session_per must be 'slot' or 'task', not {cfg.launcher.session_per!r}")
+        self.slot_mode = cfg.launcher.session_per == "slot"
+        self.tasks_per_session = max(1, int(cfg.launcher.tasks_per_session))
+        self.slot_sessions: list[SlotSession] = []      # every slot session started (slot mode)
+        self.n_launched = 0                              # sessions launched (either mode): cost per task
         self.dispatch_paused_until: dt.datetime | None = None
 
     # ------------------------------------------------------------------ helpers
@@ -301,7 +326,10 @@ class Orchestrator:
                 if now - sl.since > limit and sess is not None and sess.status in ("starting", "working"):
                     self.log.emit("session_timeout", slot=sl.id, task=sl.task, session_id=sess.session_id)
                     self._abandon(sl.task, f"timeout {self.cfg.run.task_timeout_min:g} min")
-                    self._stop_session(sess)
+                    if sess.ss is not None:
+                        self._retire(sess.ss, "timeout")     # still reachable: may get rework for its tasks
+                    else:
+                        self._stop_session(sess)
                     self._free(sl)
             if self.phase != "window" or self.launcher is None:
                 return
@@ -317,7 +345,7 @@ class Orchestrator:
                     if now < sl.backoff_until:
                         continue
                     sl.backoff_until = None
-                task = self._next_rework()
+                task = self._next_rework(sl)
                 if task is not None:
                     sess = self.sessions[task]
                     msg = sess.feedback.popleft()
@@ -326,15 +354,43 @@ class Orchestrator:
                     self._run_thread(f"send-{sl.id}-{task}", self._do_send, sl.id, task, msg, "rework")
                     continue
                 if not self.pending:
+                    if self.slot_mode:
+                        continue            # another slot's own session may still have rework waiting
                     break
                 task = self.pending.popleft()
                 sess = Session(task, sl.id, sl.id)
                 self.sessions[task] = sess
+                ss = sl.ss
+                if self.slot_mode and ss is not None and not ss.retired:
+                    if len(ss.tasks) >= self.tasks_per_session:
+                        self._retire(ss, "tasks_per_session")
+                    elif ss.session_id is None:
+                        self._retire(ss, "no_session_id")
+                if self.slot_mode and sl.ss is not None:
+                    # hand the task to the slot's session as a follow-up
+                    ss = sl.ss
+                    ss.tasks.append(task)
+                    sess.ss, sess.session_id, sess.status = ss, ss.session_id, "working"
+                    self._occupy(sl, task, "task")
+                    self._note_exhausted()
+                    t = self.tasks.get(task) or Task(task, "", "(task not in catalogue)", [])
+                    self._run_thread(f"task-{sl.id}-{task}", self._do_send, sl.id, task,
+                                     next_task_message(self.cfg, t), "task")
+                    continue
+                if self.slot_mode:
+                    ss = SlotSession(f"{sl.id}-{sum(1 for x in self.slot_sessions if x.slot == sl.id) + 1}", sl.id,
+                                     [task])
+                    self.slot_sessions.append(ss)
+                    sl.ss, sess.ss = ss, ss
                 self._occupy(sl, task, "launch")
                 self._note_exhausted()
                 self._run_thread(f"launch-{sl.id}-{task}", self._do_launch, sl.id, task)
 
-    def _next_rework(self) -> str | None:
+    def _next_rework(self, sl: Slot | None = None) -> str | None:
+        """The first queued rework that can go out on free slot ``sl`` now. Slot mode: a task's rework goes to
+        the session that did it, which must be idle: either ``sl``'s own session, or a retired one not busy on
+        any slot. Rework for the current session of another slot waits for that slot; rework for an unreachable
+        session is abandoned."""
         for task in list(self.rework_q):
             sess = self.sessions.get(task)
             if sess is None or sess.status == "abandoned" or not sess.feedback:
@@ -344,9 +400,32 @@ class Orchestrator:
                 continue
             if sess.id_pending:            # routine mode: its session id is not known yet; keep it queued
                 continue
+            ss = sess.ss
+            if ss is not None:
+                if not ss.reachable:
+                    self.rework_q.remove(task)
+                    self._abandon(task, f"session {ss.session_id} unreachable")
+                    continue
+                if any(o is not sl and o.ss is ss for o in self.slots.values()):
+                    continue               # queued in its session, which belongs to another slot
+                if any(o.task is not None and self.sessions.get(o.task) is not None
+                       and self.sessions[o.task].ss is ss for o in self.slots.values()):
+                    continue               # its session is working on another task
             self.rework_q.remove(task)
             return task
         return None
+
+    def _retire(self, ss: SlotSession, why: str, reachable: bool = True) -> None:
+        """(Lock held.) Slot mode: the session gets no new tasks; the slot launches a fresh one next."""
+        if not reachable:
+            ss.reachable = False
+        if ss.retired is None:
+            ss.retired = why
+            self.log.note(f"session_retired slot={ss.slot} session={ss.session_id} tasks={len(ss.tasks)} "
+                          f"reason={why} reachable={str(ss.reachable).lower()}")
+        sl = self.slots.get(ss.slot)
+        if sl is not None and sl.ss is ss:
+            sl.ss = None
 
     def _do_launch(self, slot: str, task: str) -> None:
         t = self.tasks.get(task) or Task(task, "", "(task not in catalogue)", [])
@@ -369,6 +448,9 @@ class Orchestrator:
             with self.lock:
                 self.slots[slot].fail_streak = 0
                 sess.session_id = res.session_id
+                self.n_launched += 1
+                if sess.ss is not None:
+                    sess.ss.session_id = res.session_id
                 if sess.status == "starting":
                     sess.status = "working"
                 self.log.emit("session_launch", slot=slot, task=task, session_id=res.session_id,
@@ -385,6 +467,8 @@ class Orchestrator:
             return
         with self.lock:
             self._abandon(task, "launch failed")
+            if sess.ss is not None:
+                self._retire(sess.ss, "launch_failed", reachable=False)
             sl = self.slots[slot]
             if sl.task == task:
                 self._free(sl)
@@ -446,6 +530,8 @@ class Orchestrator:
             sess.id_pending = False
             if sid and sess.session_id is None:
                 sess.session_id = sid
+                if sess.ss is not None and sess.ss.session_id is None:
+                    sess.ss.session_id = sid
             took = (self.clock.now() - t0).total_seconds()
             if sid:
                 self.log.note(f"launch_detail slot={slot} task={task} session_id_found=true session_id={sid} "
@@ -480,6 +566,18 @@ class Orchestrator:
                 return
             self.log.note(f"followup_failed slot={slot} task={task} kind={kind} session={sess.session_id} "
                           f"error={err[:300]}")
+            if kind == "task" and task in sess.ss.tasks:
+                sess.ss.tasks.remove(task)          # it never reached the session
+            if sess.ss is not None:
+                self._retire(sess.ss, "followup_failed", reachable=False)
+            if kind == "task":
+                # The task never started: back to the front of the list, for a fresh session on this slot.
+                self.sessions.pop(task, None)
+                self.pending.appendleft(task)
+                self.log.note(f"task_requeued task={task} reason=followup_failed")
+                if sl.task == task:
+                    self._free(sl)
+                return
             if kind == "rework":
                 print(f"\n*** REWORK NOT DELIVERED: task {task} (session {sess.session_id}) on {slot}; task "
                       f"abandoned. Error: {err[:200]}\n", flush=True)
@@ -545,7 +643,12 @@ class Orchestrator:
                 self.states[task] = st
                 return
             if sess is None:
-                self.log.note(f"branch {branch}: task {task} was never launched in this window; ignored")
+                if branch not in self.unlaunched_noted:
+                    self.unlaunched_noted.add(branch)
+                    self.log.note(f"branch {branch}: task {task} was never launched in this window; ignored")
+                # not remembered, so the push counts as the claim once the task is handed out (a task whose
+                # follow-up hand-out failed goes back to the list and may be relaunched)
+                self.branch_heads.pop(branch, None)
                 return
             st = TaskState(task, branch, sess.last_slot, last_head=main)
             self.states[task] = st
@@ -917,6 +1020,9 @@ class Orchestrator:
             if self.phase != "window":
                 self.log.note(f"task {ch.task}: bounce {cause} after window end; rework not sent")
                 return
+            if sess.ss is not None and not sess.ss.reachable:
+                self._abandon(ch.task, f"session {sess.ss.session_id} unreachable")
+                return
             sess.feedback.clear()          # only the newest feedback matters
             sess.feedback.append(text)
             if sess.status != "probe":
@@ -962,7 +1068,8 @@ class Orchestrator:
         self.log.note("window_start")
         self.log.note(f"task_supply n={len(self.supply_ids)}")
         self.log.note(f"slots n={rc.n_workers} task_timeout_min={rc.task_timeout_min:g} "
-                      f"task_budget_min={rc.task_budget_min:g}")
+                      f"task_budget_min={rc.task_budget_min:g} session_per={self.cfg.launcher.session_per}"
+                      + (f" tasks_per_session={self.tasks_per_session}" if self.slot_mode else ""))
         self.log.note(f"reviewers n={self.n_reviewers} ids={','.join(self.reviewer_ids)}")
         self.start_threads(dispatch=True)
         self._open_scheduled_slots()
@@ -1004,6 +1111,7 @@ class Orchestrator:
             # Not counted by the analysis, and neither is that reviewer's busy time after it began (derive.py
             # grace-end correction, per reviewer).
             self.log.note(f"review_open_at_grace_end task={open_ch.task} head={open_ch.head} reviewer={rid}")
+        self.log.note(f"session_summary {self.session_summary()}")
         self.log.note("grace_end")
         self.shutdown()
         self._check_claude_dir()
@@ -1052,15 +1160,29 @@ class Orchestrator:
         except GitError as e:
             self.log.note(f".claude/ check failed: {e}")
 
+    def session_summary(self) -> str:
+        """Sessions launched and tasks per session (cost per task = credit meter delta / tasks)."""
+        with self.lock:
+            if self.slot_mode:
+                per = [len(x.tasks) for x in self.slot_sessions if x.session_id is not None]
+            else:
+                per = [1] * self.n_launched
+            handed = sum(per)
+        mean = f"{handed / len(per):.2f}" if per else "na"
+        return (f"session_per={self.cfg.launcher.session_per} sessions_launched={self.n_launched} "
+                f"tasks_handed_out={handed} tasks_per_session_mean={mean} "
+                f"tasks_per_session={','.join(map(str, per)) or '-'}")
+
     def write_run_json(self) -> dict:
         notes = [self.cfg.run.notes] if self.cfg.run.notes else []
         if self.cfg.run.phase:
             notes.append(f"phase={self.cfg.run.phase}")
-        notes.append("worker_model_design=session-per-task")
+        notes.append(f"worker_model_design=session-per-{self.cfg.launcher.session_per}")
         reset = self.run_dir / "reset.json"
         if reset.exists():
             r = json.loads(reset.read_text())
             notes.append(f"tasks_commit={r.get('tasks_commit')}")
+        notes.append(self.session_summary())
         notes += [f"VOID: {v}" for v in self.void_reasons]
         if self.errors:
             notes.append(f"harness errors: {len(self.errors)} (see events note lines)")

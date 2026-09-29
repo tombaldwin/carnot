@@ -54,7 +54,7 @@ EVENT_FIELDS: dict[str, dict[str, str]] = {
 ENUMS = {
     ("review_end", "verdict"): {"approve", "request_changes"},
     ("bounce", "cause"): {"review", "rebase_conflict", "visible_fail", "escaped_defect", "integration_failure"},
-    ("session_message", "kind"): {"rework", "probe"},
+    ("session_message", "kind"): {"rework", "probe", "task"},
 }
 
 RUN_FIELDS: dict[str, str] = {
@@ -208,6 +208,11 @@ def validate_events(path: Path | str, semantic: bool = True, n_reviewers: int | 
         elif typ == "session_launch":
             if not busy.get(ev["slot"]):
                 errs.append(f"line {i}: session_launch on slot {ev['slot']} without slot_busy")
+            launched.add(ev["task"])
+        elif typ == "session_message" and ev.get("kind") == "task":
+            # one session per slot: a later task handed to the slot's session as a follow-up (its launch)
+            if not busy.get(ev["slot"]):
+                errs.append(f"line {i}: session_message on slot {ev['slot']} without slot_busy")
             launched.add(ev["task"])
         elif typ in ("session_message", "session_timeout"):
             if ev["task"] not in launched:

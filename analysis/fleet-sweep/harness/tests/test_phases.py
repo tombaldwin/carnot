@@ -38,6 +38,9 @@ def test_shipped_phase_configs_match_their_phase(phase, fname):
     assert config_mod.repo_slug(r.source_url) == "tombaldwin/carnot-sandbox"
     assert "{instruction}" in r.runner and "RemoteTrigger" in r.runner and r.slot_routines == {}
     assert cfg.run.task_timeout_min == 25 and cfg.run.task_budget_min == 20
+    # one session per slot (T0d, 2026-09-29: about $0.50 per session provisioned); later tasks by follow-up
+    assert cfg.launcher.session_per == "slot" and cfg.launcher.tasks_per_session == 8
+    assert cfg.path(cfg.launcher.next_task_prompt).exists()
 
 
 def _without_run_and_k(d):
@@ -114,7 +117,8 @@ def test_run_prints_banner_and_needs_confirmation(tmp_path, capsys, monkeypatch)
     out = capsys.readouterr()
     assert rc == 2 and "not confirmed" in out.err
     for s in ("phase sweep-n12-k3", "kind           sweep", "N (slots)      12", "window         45 min (warm-up 5",
-              "timeout 25 min", "claude-haiku-4-5", "claude-opus-5-5", "sandbox-v1", "K = 3 in parallel"):
+              "timeout 25 min", "claude-haiku-4-5", "claude-opus-5-5", "sandbox-v1", "K = 3 in parallel",
+              "one per slot (up to 8 tasks each"):
         assert s in out.out, s
     monkeypatch.setattr(cli, "input_fn", lambda prompt: "sweep-n12-k3")
     rc = cli.main(["run", "--config", str(p), "--run-id", "x"])

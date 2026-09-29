@@ -329,6 +329,10 @@ def task_legs(run, events):
         elif ty == "session_launch":
             rows.setdefault(e["task"], {}).setdefault("launch", t)
             rows[e["task"]].setdefault("slot", e["slot"])
+        elif ty == "session_message" and e.get("kind") == "task":   # one session per slot: a follow-up hand-out
+            rows.setdefault(e["task"], {}).setdefault("launch", t)
+            rows[e["task"]].setdefault("slot", e["slot"])
+            rows[e["task"]]["followup"] = True
         elif ty == "claim":
             rows.setdefault(e["task"], {}).setdefault("claim", t)
         elif ty == "submit" and e["attempt_no"] == 1:
@@ -337,7 +341,7 @@ def task_legs(run, events):
     for task, r in rows.items():
         if "launch" not in r or "claim" not in r:
             continue
-        up = r["claim"] - max(r["launch"], once.get(task, r["launch"]))
+        up = r["claim"] - (r["launch"] if r.get("followup") else max(r["launch"], once.get(task, r["launch"])))
         code = r["ready"] - r["claim"] if "ready" in r and r["ready"] <= we else None
         out.append(dict(slot=r.get("slot"), launch=r["launch"], startup_s=up if up > 0 else None, coding_s=code))
     return out
