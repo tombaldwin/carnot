@@ -20,3 +20,11 @@ What to do now, on the same branch `{branch}`:
 4. Commit with a message starting `READY: {task_id}`, push `{branch}`, then stop.
 
 Do not ask questions; nobody will answer. Time budget: about {budget_min} minutes.
+
+## Rules that always apply (re-read these before every commit, even if your earlier context was summarised)
+
+- Every commit that finishes work on a task must have a message starting `READY: {task_id}`. Without it the harness never sees the work.
+- Push only the task's own branch, `claude/task-{task_id}`. Never push `main`, never force-push, never rebase.
+- Never open, comment on or merge a pull request. The harness reviews and merges; pull requests are not used.
+- Never edit `TASKS.json`. Never ask questions; nobody will answer.
+

@@ -107,7 +107,7 @@ rework_prompt = "prompts/rework.md"
 # session that did the task. A fresh session after tasks_per_session tasks, a timeout or a failed follow-up.
 # "task" = one session per task (T0-T1).
 session_per = "slot"
-tasks_per_session = 8
+tasks_per_session = 4       # T0e 2026-09-29: a session auto-compacted during its 6th task, lost the rules and never sent READY
 next_task_prompt = "prompts/next-task.md"
 prompt_dir = "/Users/tom/git/carnot-sandbox-tasks/work/prompts"   # private (work/ is gitignored in the tasks repo)
 

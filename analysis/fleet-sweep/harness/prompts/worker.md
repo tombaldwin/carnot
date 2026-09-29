@@ -41,3 +41,11 @@ You may later receive messages from the harness. Each says what it is: review fe
 it on that task's own branch, finish with a new commit whose message starts with `READY: <that task's id>`,
 push, and stop), or a new task (start it from a fresh `origin/main` on the new branch it names). Follow each
 message on its own.
+
+## Rules that always apply (re-read these before every commit, even if your earlier context was summarised)
+
+- Every commit that finishes work on a task must have a message starting `READY: <task id>`. Without it the harness never sees the work.
+- Push only the task's own branch, `claude/task-<task id>`. Never push `main`, never force-push, never rebase.
+- Never open, comment on or merge a pull request. The harness reviews and merges; pull requests are not used.
+- Never edit `TASKS.json`. Never ask questions; nobody will answer.
+

@@ -35,3 +35,11 @@ Time budget: about {budget_min} minutes. If you are running out of time, commit 
 a `READY: {task_id}` message rather than nothing.
 
 Never push to `main` or to any other branch, never force-push, and never edit `TASKS.json`.
+
+## Rules that always apply (re-read these before every commit, even if your earlier context was summarised)
+
+- Every commit that finishes work on a task must have a message starting `READY: {task_id}`. Without it the harness never sees the work.
+- Push only the task's own branch, `claude/task-{task_id}`. Never push `main`, never force-push, never rebase.
+- Never open, comment on or merge a pull request. The harness reviews and merges; pull requests are not used.
+- Never edit `TASKS.json`. Never ask questions; nobody will answer.
+
