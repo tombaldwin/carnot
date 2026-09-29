@@ -15,7 +15,9 @@ With N agents working in parallel:
 - Finished changes per day:
   `U(N) = (1 − r(N)) × min(λ·X(N), cap)`
 
-The best fleet size is the N that maximises U. Rule of thumb, with q = cap ÷ λ (review capacity in single-agent outputs): `N ≈ q / (1 − αq − βq²)`, but never more than `(1 − α) / (p + √β)` (if αq + βq² ≥ 1, review never binds and the cap decides). Finished work ≈ (1 − b) × cap when review binds, where b is the share of reviews that send a change back and cap counts re-reviews too (b ≈ r when rework is caught at review); else ≈ (1 − r₀) × λN / (2 + αN). Tested over 1,050 combinations (α 0.02–0.4, β 0.001–0.035, p 0–0.05, q 0.5 to unlimited): within one agent of the best in 91% of cases; running at the rule's size gets at least 92% of the best output in every case and 98% in nine out of ten; the finished-work estimate is within 15% in three cases out of four.
+The best fleet size is the N that maximises U. Sizing formula, with q = cap ÷ λ (review capacity in single-agent outputs): `N ≈ q / (1 − αq − βq²)`, but never more than `(1 − α) / (p + √β)` (if αq + βq² ≥ 1, review never binds and the cap decides). Finished work ≈ (1 − r) × cap when review binds, where r = r(N) is the share of changes that come back and cap counts re-reviews too; else it is (1 − r)·λX(N) at that size. Tested over 1,050 combinations (α 0.02–0.4, β 0.001–0.035, p 0–0.05, q 0.5 to unlimited): within one agent of the best in 91% of cases; running at the formula's size gets at least 91% of the best output in every case and 98% in nine out of ten.
+
+Rule of thumb: one agent per reviewer ÷ the share of checking still done by people, at most five per codebase. It is tested against the model in [`analysis/rule-of-thumb`](https://github.com/tombaldwin/carnot/tree/main/analysis/rule-of-thumb): within 10% of the best output for 84% of simulated single-codebase teams, and close to the best without spare agents for 67% (54–57% for teams with two or three codebases).
 
 ## Parameters
 
@@ -23,7 +25,7 @@ The best fleet size is the N that maximises U. Rule of thumb, with q = cap ÷ λ
 |---|---|---|---|
 | r₀ | Share of changes needing rework at N = 1 | 0.40 (agents) | ~0.07–0.11 human changes (Capers Jones; Śliwerski et al. 2005); ~0.5 of test-passing agent PRs not mergeable (METR 2026) |
 | p | Chance a pair of changes open at the same time collides badly enough to need rework | 0.01 | Textual conflicts are common (0.198 same-agent / 0.417 cross-agent for agent PRs open together, Xu et al.; Uber 5% real conflicts for two changes to the same area) but rarely force a redo: the pre-registered AIDev test (analysis/aidev in this repo) found p ≈ 0–0.004 |
-| α | Share of work that must happen one at a time | 0.10 | 0.12 (Khailo 2026 fit); ~0.37 implied by Cursor's lock-based fleet |
+| α | Share of work that must happen one at a time | 0.10 | 0.12 (Khailo 2026, estimated from one developer's history); ~0.37 implied by Cursor's lock-based fleet |
 | β | Coordination cost per pair of agents | 0.01 | 0.002–0.035 (0.032 in Khailo's fit, measured across separate repos) |
 | λ | Changes one agent submits per day | 6 | measure it |
 | rate | Lines a reviewer can check properly per hour | 200 | Quality falls above 200 (Kemerer & Paulk 2009); sharp drop above ~500 (SmartBear/Cisco) |

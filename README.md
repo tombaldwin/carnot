@@ -50,8 +50,9 @@ With the default values and two reviewers:
 Best fleet size: 4 agents, finishing about 9.31 changes/day (2.59× one agent).
 Limited by review. Rework at that size: 42%.
 
-Rule of thumb q ÷ (1 − αq − βq²), capped at (1 − α) ÷ (p + √β): 4.0 agents,
-about 9.6 finished/day.
+Sizing formula q ÷ (1 − αq − βq²), capped at (1 − α) ÷ (p + √β): 4.0 agents,
+about 9.31 finished/day. Rule of thumb (one agent per reviewer, more with
+automated checks, at most five per codebase): 4.
 
 Estimate: 120 changes with 4 agents ≈ 12.9 working days
 (51.5 agent-days; one agent: 33.3 days).
@@ -79,9 +80,13 @@ r(N) = 1 − (1 − r₀)(1 − p)^(N−1)          rework rises with concurrent
 U(N) = (1 − r(N)) × min(λ·X(N), V / h)     finished changes per day, capped by review capacity V
 ```
 
-Rule of thumb, with q = what reviewers can check per day ÷ what one agent produces per day: **agents ≈ q ÷ (1 − αq − βq²)**, but never more than **(1 − α) ÷ (p + √β)**; finished work ≈ (1 − b) × what reviewers can check, where b is the share of reviews that send a change back. In words: enough agents to keep reviewers busy, a few more for drag, and stop there.
+The rule of thumb, for anyone: **up to five agents per codebase, and no more than your reviewers can check**, which is about one agent per reviewer, two if tests and tools do half the checking, three or four if they do most of it ([how it was tested](analysis/rule-of-thumb/README.md)).
 
-The collision term has been tested once, on 48,000 agent pull requests, with a pre-registered analysis: see [`analysis/aidev`](analysis/aidev/RESULTS.md). It mostly failed, which is why the default collision chance is 1% and the rule leads with review capacity.
+The sizing formula, for engineers, with q = what reviewers can check per day ÷ what one agent produces per day: **agents ≈ q ÷ (1 − αq − βq²)**, but never more than **(1 − α) ÷ (p + √β)**; finished work ≈ (1 − r) × what reviewers can check, where r is the share of changes that come back. In words: enough agents to keep reviewers busy, a few more for drag, and stop there.
+
+The paper explains both: [The Heat Death of the Codebase?](https://www.poly.io/writing/heat-death-of-the-codebase/)
+
+The collision term has been tested once, on 48,000 agent pull requests, with a pre-registered analysis: see [`analysis/aidev`](analysis/aidev/RESULTS.md). It mostly failed, which is why the default collision chance is 1% and the formula leads with review capacity.
 
 Parameters, defaults and their sources are in [`reference/model.md`](plugins/carnot/skills/carnot/reference/model.md). α and β can't be read reliably from history. To fit them, run 1, 2, 4 and 8 agents on comparable work and use `carnot.py fit`.
 
