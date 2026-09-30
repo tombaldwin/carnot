@@ -129,6 +129,24 @@ class Truth:
     throttle_startup: bool = True     # v6: whether the throttle also slows start-up (False: coding / rework only)
     drag_startup: bool = False        # v6: False (default): coordination drag stretches only the work (coding, rework),
                                       # by enough that the per-agent cycle scales as N / X(N); True: every leg / (X / N)
+    # ---- PLAN-v7 process: `claude --cloud` command launcher, ONE SESSION PER SLOT (T0d / T0e, 2026-09-29). All
+    # defaults leave v4-v6 behaviour and their random streams unchanged.
+    v7: bool = False                  # one session per slot: a slot's session gets tasks_per_session tasks, then retires
+    tasks_per_session: int = 4        # v7: [launcher] tasks_per_session (4 since T0e's compaction at the 6th task)
+    messages_per_session: int = 0     # v7: [launcher] messages_per_session: retire once the session has had this many
+                                      # messages (launch prompt, kind=task and rework messages); 0 = off
+    launch_delay_s: float = 4.1       # v7: slot freed -> session_launch (the launch command returns the session id)
+    followup_delay_s: float = 1.6     # v7: slot freed -> session_message kind=task (the follow-up command returns)
+    startup_launch_median_s: float = 28.7   # v7: session_launch -> branch pushed (provisioning, clone, first push)
+    startup_launch_logsd: float = 0.05
+    startup_follow_median_s: float = 15.0   # v7: session_message kind=task -> branch pushed (no provisioning)
+    startup_follow_logsd: float = 0.05
+    stall_p: float = 0.0              # v7: a hand-out that never reaches READY (e.g. context compaction, a mis-named branch): the session timeout
+    throttle_launch_only: bool = False  # v7: the throttle slows only launches (provisioning under concurrency)
+    task_time_sd: float = 0.0         # v7: per-task log-sd of a coding / rework time multiplier (the same task is slower
+                                      # or faster in every window that uses it; tasks are reused across windows)
+    follow_code_factor: float = 1.0   # v7: coding time of a follow-up task (positions 2.. in its session) x this factor
+                                      # (shared context: T0e's follow-ups coded in 62 s against T0d's 95 s, n = 5)
 
     def X(self, n):
         if self.family in ("carnot", "usl"):
@@ -222,6 +240,44 @@ V6_TRUTH["service_quantiles"] = _load_t1_quantiles()
 def make_truth_v6(name="carnot", **overrides) -> Truth:
     kw = dict(V6_TRUTH)
     kw.update(V6_FAMILIES[name])
+    kw.update(overrides)
+    return Truth(**kw)
+
+
+# PLAN-v7 process (design-search/DESIGN-SEARCH-v7.md), calibrated on the command-launcher trials T0d and T0e
+# (2026-09-29; design-search/t0de_params_public.json, from t0de_params.py, numbers only). One session per slot: the
+# slot's session is launched with its first task (launch command 4.1 s, then 28.7 s to the first push: provisioning
+# and clone), later tasks go to it as follow-up messages (1.6 s, then 15.0 s to the first push), and it retires after
+# tasks_per_session = 4 tasks. Coding (pushed -> READY) lognormal median 82 s (log-sd 0.44; T0d + T0e, T1 83 s);
+# rework (message -> READY) median 48 s (0.37); rework goes to the session that did the task. Review: the pooled
+# T1 + T0c + T0d + T0e durations (168 reviews, median 20.5 s); 41% of reviews request changes (69 / 168: T1 0.39,
+# T0d / T0e 0.44), escapes about 3% of approvals. Start-up log-sds: measured 0.02 (launches) and 0.04 (follow-ups) at
+# one slot; 0.05 assumed (0.25 as a sensitivity; the measured figures are the 15-s watcher poll's quantisation, not the
+# sessions' spread: PLAN-v7 rule 1). A session also retires after 6 messages of any kind (launch prompt, kind=task,
+# rework; PLAN-v7 rule 6: T0e compacted after 8). Session timeout 10 min (PLAN-v7 rule 6; was 25). lambda at N = 1
+# comes out at about 23 first submissions per slot-hour (T0d, every task a launch: 21.3; T0e before its stall: faster).
+def _load_t0de():
+    f = Path(__file__).resolve().parent / "design-search" / "t0de_params_public.json"
+    try:
+        d = json.loads(f.read_text())
+        q = d["review_pooled_all_quantiles_s"]
+        return tuple(float(q[f"p{i}"]) for i in range(0, 101, 5))
+    except Exception:
+        return V6_TRUTH["service_quantiles"]
+
+
+V7_TRUTH = dict(V6_TRUTH, v7=True, service_quantiles=_load_t0de(), tasks_per_session=4, messages_per_session=6,
+                launch_delay_s=4.1, followup_delay_s=1.6, rework_msg_s=1.6,
+                startup_launch_median_s=28.7, startup_launch_logsd=0.05,
+                startup_follow_median_s=15.0, startup_follow_logsd=0.05,
+                work_median_s=82.0, work_logsd=0.44, rework_median_s=48.0, rework_logsd=0.37,
+                false_reject=0.285, task_timeout_min=10.0)
+V7_FAMILIES = V6_FAMILIES
+
+
+def make_truth_v7(name="carnot", **overrides) -> Truth:
+    kw = dict(V7_TRUTH)
+    kw.update(V7_FAMILIES[name])
     kw.update(overrides)
     return Truth(**kw)
 
@@ -583,6 +639,9 @@ def simulate(truth: Truth, n_workers: int, *, seed: int, window_min=90.0, warmup
 
     def slot_free(t, w):
         w["busy"], w["token"] = None, None
+        if truth.v7 and w.get("busy_sess") is not None:
+            w["busy_sess"]["busy"] = False
+            w["busy_sess"] = None
         emit(t, "slot_idle", slot=w["id"])
         dispatch(t)
 
@@ -603,9 +662,100 @@ def simulate(truth: Truth, n_workers: int, *, seed: int, window_min=90.0, warmup
         ch["abandoned"] = True
         if ch["attempt"] == 0 or not any(x == task_id for x in reviewq):
             ch["inflight"] = False
+        if truth.v7:   # the session is retired (still reachable for its earlier tasks' rework); the slot's next task
+            s = sessions[ch["session"]]     # goes to a fresh session
+            if w.get("sess") is s:
+                v7_retire(t, w, "timeout")
         slot_free(t, w)
 
+    # ---------------------------------------------------------------- v7: one session per slot
+    sessions = {}
+
+    def v7_retire(t, w, reason):
+        s = w.get("sess")
+        if s is None:
+            return
+        s["slot"] = None
+        w["sess"] = None
+        emit(t, "note", text=f"session_retired slot={w['id']} session={s['id']} tasks={s['n']} reason={reason} reachable=true")
+
+    def v7_dispatch(t):
+        for w in workers:
+            if not (w["start"] <= t < w["end"]) or w.get("busy") or not w.get("open"):
+                continue
+            while rework_q and changes[rework_q[0]].get("abandoned"):
+                rework_q.popleft()
+            pick = None
+            for i, tid in enumerate(rework_q):
+                ch = changes[tid]
+                if ch.get("abandoned"):
+                    continue
+                s = sessions[ch["session"]]
+                if s["slot"] is w or (s["slot"] is None and not s["busy"]):
+                    pick = i
+                    break
+            if pick is not None:
+                tid = rework_q[pick]
+                del rework_q[pick]
+                s = sessions[changes[tid]["session"]]
+                s["m"] = s.get("m", 0) + 1
+                tok = occupy(t, w, tid)
+                s["busy"] = True
+                w["busy_sess"] = s
+                at(t + truth.rework_msg_s, v6_rework, w, tid, tok)
+                continue
+            if ptr[0] >= len(order):
+                continue
+            task = order[ptr[0]]
+            ptr[0] += 1
+            s = w.get("sess")
+            by_msgs = (s is not None and truth.messages_per_session > 0 and s.get("m", 0) >= truth.messages_per_session
+                       and s["n"] < truth.tasks_per_session)
+            launch = s is None or s["n"] >= truth.tasks_per_session or by_msgs
+            if launch:
+                if s is not None:
+                    v7_retire(t, w, "messages_per_session" if by_msgs else "tasks_per_session")
+                s = dict(id=f"session_{_hex(rng, 8)}", slot=w, n=0, m=0, busy=False)
+                sessions[s["id"]] = s
+                w["sess"] = s
+            s["n"] += 1
+            s["m"] = s.get("m", 0) + 1
+            changes[task.id] = dict(task=task, owner=w, attempt=0, head=None, inflight=False, defective=False,
+                                    collided=False, merged=False, depth=0, session=s["id"])
+            tok = occupy(t, w, task.id)
+            s["busy"] = True
+            w["busy_sess"] = s
+            if ptr[0] == len(order):
+                emit(t, "note", text=f"tasks_exhausted n={len(order)}")
+            at(t + (truth.launch_delay_s if launch else truth.followup_delay_s), v7_handout, w, task.id, tok, launch)
+
+    def v7_handout(t, w, task_id, token, launch):
+        if w.get("token") != token or t >= w["end"]:
+            return
+        ch = changes[task_id]
+        if launch:
+            emit(t, "session_launch", slot=w["id"], task=task_id, session_id=ch["session"], attempt_no=1)
+            up = lognorm(truth.startup_launch_median_s, truth.startup_launch_logsd) * v6_slow(t, startup="launch")
+        else:
+            emit(t, "session_message", slot=w["id"], task=task_id, session_id=ch["session"], kind="task")
+            up = lognorm(truth.startup_follow_median_s, truth.startup_follow_logsd) * v6_slow(t, startup="follow")
+        ch["base"] = t
+        if truth.stall_p > 0 and rng.random() < truth.stall_p:
+            return     # the session never pushes or sends READY: the session timeout frees the slot
+        t_up = t + up
+        at(t_up, session_branch, w, task_id, token)
+        cf = 1.0 if launch else truth.follow_code_factor
+        at(t_up + lognorm(truth.work_median_s, truth.work_logsd) * v6_slow(t) * task_f(task_id) * cf, do_submit, w, task_id, token)
+
+    def task_f(task_id):
+        if truth.task_time_sd <= 0:
+            return 1.0
+        task = changes[task_id]["task"]
+        return math.exp(truth.task_time_sd * random.Random(f"{task.id}|{task.logit:.12f}").gauss(0.0, 1.0))
+
     def dispatch(t):
+        if truth.v7:
+            return v7_dispatch(t)
         for w in workers:
             if not (w["start"] <= t < w["end"]) or w.get("busy") or not w.get("open"):
                 continue
@@ -657,6 +807,11 @@ def simulate(truth: Truth, n_workers: int, *, seed: int, window_min=90.0, warmup
     e_up = truth.startup_median_s * math.exp(truth.startup_logsd ** 2 / 2)
     P_work = truth.work_median_s * math.exp(truth.work_logsd ** 2 / 2) + legs * truth.rework_median_s * math.exp(truth.rework_logsd ** 2 / 2)
     C_cyc = truth.rearm_s + e_up + legs * truth.rework_msg_s + P_work
+    if truth.v7:   # one session per slot: 1 launch in tasks_per_session hand-outs, the rest follow-ups
+        fl = 1.0 / max(truth.tasks_per_session, 1)
+        e_ho = (fl * (truth.launch_delay_s + truth.startup_launch_median_s * math.exp(truth.startup_launch_logsd ** 2 / 2))
+                + (1 - fl) * (truth.followup_delay_s + truth.startup_follow_median_s * math.exp(truth.startup_follow_logsd ** 2 / 2)))
+        C_cyc = e_ho + legs * truth.rework_msg_s + P_work
 
     def work_stretch(g):
         if truth.drag_startup or g >= 1.0:
@@ -674,7 +829,8 @@ def simulate(truth: Truth, n_workers: int, *, seed: int, window_min=90.0, warmup
         else:
             f *= work_stretch(g)
         if truth.throttle_factor != 1.0 and n_active(t) > 1 and (not startup or truth.throttle_startup):
-            f *= truth.throttle_factor
+            if not truth.throttle_launch_only or startup == "launch":
+                f *= truth.throttle_factor
         return f
 
     def v6_launch(t, w, task_id, token):
@@ -693,7 +849,7 @@ def simulate(truth: Truth, n_workers: int, *, seed: int, window_min=90.0, warmup
         ch = changes[task_id]
         emit(t, "session_message", slot=w["id"], task=task_id, session_id=ch["session"], kind="rework")
         ch["base"] = t
-        at(t + lognorm(truth.rework_median_s, truth.rework_logsd) * v6_slow(t), do_submit, w, task_id, token)
+        at(t + lognorm(truth.rework_median_s, truth.rework_logsd) * v6_slow(t) * task_f(task_id), do_submit, w, task_id, token)
 
     def session_branch(t, w, task_id, token):
         if w.get("token") == token and t < w["end"]:
@@ -738,6 +894,10 @@ def simulate(truth: Truth, n_workers: int, *, seed: int, window_min=90.0, warmup
            "notes": "synth.py truth: " + json.dumps(dataclasses.asdict(truth), sort_keys=True)}
     if tag_rev:
         run["n_reviewers"] = K
+    if truth.v7:
+        tps = [s["n"] for s in sessions.values()]
+        run["notes"] = (f"session_per=slot sessions_launched={len(tps)} tasks_handed_out={sum(tps)} "
+                        f"tasks_per_session={','.join(map(str, tps))}; " + run["notes"])
     return run, [e for _, e in out]
 
 
@@ -816,6 +976,34 @@ def simulate_study_v6(family="measured", *, seed: int, cells=None, window_min=No
     return runs
 
 
+def simulate_study_v7(family="measured", *, seed: int, budget="400", cells=None, window_min=None, warmup_min=None,
+                      with_t1b=True, **overrides):
+    """PLAN-v7: T1b (one slot for 30 min, then twelve for 15 min, K = K_hi, one session per slot) and the chosen design's
+    (N, K) cells in v6_order, 15-min windows. One task pool reused by every window, each with its own order (the
+    real sweep's reset). Returns a list of (run_json, events)."""
+    from v7 import DESIGNS_V7, T1B_V7, v6_order, cells_of
+    D = DESIGNS_V7[budget]
+    cells = cells_of(cells or D["cells"])
+    L = window_min or D["window_min"]
+    W = D["warmup_min"] if warmup_min is None else warmup_min
+    t0 = T0 + (seed % 100000) * 86400.0
+    runs = []
+    base = make_truth_v7(family, **overrides)
+    pool = make_task_pool(base, seed * 31 + 5)
+    if with_t1b:
+        L1, L2 = T1B_V7["one_slot_min"], T1B_V7["twelve_slot_min"]
+        sched = [(0.0, L1 + L2)] + [(L1, L1 + L2)] * 11
+        truth = make_truth_v7(family, n_reviewers=T1B_V7["K"], **overrides)
+        runs.append(simulate(truth, 12, seed=seed * 1000 + 1, window_min=L1 + L2, warmup_min=0, grace_min=10,
+                             schedule=sched, task_pool=pool, run_id=f"synth-{seed}-T1b", kind="trial", t0=t0))
+    for i, (n, k) in enumerate(v6_order(cells)):
+        truth = make_truth_v7(family, n_reviewers=k, **overrides)
+        runs.append(simulate(truth, n, seed=seed * 1000 + 10 + i, window_min=L, warmup_min=W, grace_min=10,
+                             task_pool=pool, run_id=f"synth-{seed}-N{n}K{k}-w{i + 1}", kind="sweep",
+                             t0=t0 + (6 + 1.0 * i) * 3600))
+    return runs
+
+
 def v5_order(sizes, reps):
     """Sweep order for unequal replicates (PLAN-v5 section 5): windows of every size spread evenly through the
     sequence, the largest size never first or last, starting and ending with the smallest. reps: dict size -> windows,
@@ -877,6 +1065,10 @@ def main():
                          "sweep sizes / reps / window from --sizes --reps-v5 --window-min (defaults: the recommended design)")
     ap.add_argument("--v6", action="store_true",
                     help="PLAN-v6 process (T1-calibrated, K reviewers) and design: T1b + the (N, K) cells of v6.DESIGN_V6")
+    ap.add_argument("--v7", action="store_true",
+                    help="PLAN-v7 process (T0d / T0e-calibrated, one session per slot, K reviewers) and design: T1b + the "
+                         "cells of v7.DESIGNS_V7[--budget]")
+    ap.add_argument("--budget", default="400", choices=["300", "400", "500"], help="--v7: which design (default 400)")
     ap.add_argument("--family", default=None, choices=["linear", "mild", "amdahl", "usl", "carnot", "measured"],
                     help="--v5 / --v6: worker truth (default carnot for v5, measured for v6)")
     ap.add_argument("--reps-v5", nargs="*", default=None, metavar="N=R", help="--v5 only: windows per size, e.g. 1=8 12=3")
@@ -892,7 +1084,9 @@ def main():
         ov[k] = _coerce(v)
     if a.sessions:
         ov["per_task_sessions"] = True
-    if a.v6:
+    if a.v7:
+        runs = simulate_study_v7(a.family or "measured", seed=a.seed, budget=a.budget, **ov)
+    elif a.v6:
         runs = simulate_study_v6(a.family or "measured", seed=a.seed, **ov)
     elif a.v5:
         from v5 import DESIGN_V5

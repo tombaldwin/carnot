@@ -7,8 +7,8 @@
 # warm-up / grace / start schedule / session timeout / first task / models differ from the phase's pre-registered shape
 # (harness/config.py PHASES), prints them, and asks for confirmation (or --yes).
 # Everything marked UNVERIFIED must be checked before a real run; `run` refuses to start while a
-# template it needs still has verified = false. Only [run] and [reviewer] parallel differ between the
-# phase files (t0, t1, t2, t1b, sweep-n1-k1, sweep-n1-k3, sweep-n12-k1, sweep-n12-k3).
+# template it needs still has verified = false. Only [run] and [reviewer] parallel / max_downtime_min differ between
+# the phase files (t0, t1, t2: historical; t1b, sweep-n1-k1, sweep-n1-k5, sweep-n12-k1, sweep-n12-k5: PLAN-v7).
 
 [run]
 phase = "t0"
@@ -26,7 +26,7 @@ task_order_seed = 1234          # pass --seed per window to `reset`; the seed us
 worker_model = "claude-haiku-4-5"     # Haiku 4.5 (model id string UNVERIFIED)
 reviewer_model = "claude-opus-5-5"    # Opus 5.5 (model id string UNVERIFIED)
 output_dir = "/Users/tom/git/carnot-sandbox-tasks/work/runs"   # private until the study ends (review reasons describe tasks)
-poll_interval_s = 15
+poll_interval_s = 2            # 2026-09-30: a 15-s poll quantised every start-up leg; a fetch every 2 s is cheap
 end_grace_early_when_idle = false   # real windows always run the full grace period
 grace_reviews = true            # reviews of already-submitted changes continue during grace
 
@@ -108,6 +108,7 @@ rework_prompt = "prompts/rework.md"
 # "task" = one session per task (T0-T1).
 session_per = "slot"
 tasks_per_session = 4       # T0e 2026-09-29: a session auto-compacted during its 6th task, lost the rules and never sent READY
+messages_per_session = 6    # also retire after 6 messages of any kind (launch prompt, next tasks, rework): T0e compacted after 8
 next_task_prompt = "prompts/next-task.md"
 prompt_dir = "/Users/tom/git/carnot-sandbox-tasks/work/prompts"   # private (work/ is gitignored in the tasks repo)
 

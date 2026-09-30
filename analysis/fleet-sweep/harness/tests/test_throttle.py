@@ -9,7 +9,7 @@ import json
 import pytest
 
 from harness import cli
-from harness.throttle import activity_report, t_ppf, throttle_report, welch_log_ratio
+from harness.throttle import activity_report, t_ppf, task_legs, throttle_report, welch_log_ratio
 
 W0 = dt.datetime(2026, 10, 1, 9, 0, tzinfo=dt.timezone.utc)
 
@@ -213,10 +213,81 @@ def test_cli(tmp_path, capsys):
     d = _rule_log(tmp_path, up_b=140.0)
     assert cli.main(["throttle", str(d), "--json", str(tmp_path / "r.json")]) == 0
     out = capsys.readouterr().out
-    assert "tolerance 1.25: STOP" in out and "Activity (the PLAN-v4 measure" in out
+    assert "tolerance 1.25 on the every-hand-out start-up: STOP" in out and "Activity (the PLAN-v4 measure" in out
     r = json.loads((tmp_path / "r.json").read_text())
     assert r["decision"] == "STOP" and r["excluded"] == []
     assert cli.main(["throttle", str(d), "--exclude", "s2,s3", "--split-min", "90"]) == 0
     assert "excluded slots: s2,s3 (--exclude)" in capsys.readouterr().out
     assert cli.main(["throttle", str(_t1_log(tmp_path, every_12=10.0))]) == 0     # old-style log still reads
     assert "THROTTLED under the retired 0.8 rule" in capsys.readouterr().out
+
+
+def _slot_log(tmp_path, up_follow_b=15.0, up_launch_b=29.0, code_b=80.0, n_a=10, per_slot_b=4, seed=2, late_slow=False):
+    """A T1b-style slot-mode log (PLAN-v7): s1 alone for 30 min, then s1..s12 for 15; every 4th task of a slot is a
+    session_launch (start-up ~29 s), the rest session_message kind=task (~15 s)."""
+    rng = random.Random(seed)
+    ev = [dict(t=_iso(0), type="note", text="window_start"),
+          dict(t=_iso(0), type="note", text="start_schedule minute=0 slots=s1"),
+          dict(t=_iso(30), type="note", text="start_schedule minute=30 slots=s2,s3,s4,s5,s6,s7,s8,s9,s10,s11,s12")]
+    k = [0]
+    count = {}
+
+    def task(slot, m, up_f, up_l, code):
+        k[0] += 1
+        tid = f"T{k[0]:03d}"
+        n = count.get(slot, 0)
+        count[slot] = n + 1
+        launch = n % 4 == 0
+        ev.append(dict(t=_iso(m), type="slot_busy", slot=slot))
+        if launch:
+            ev.append(dict(t=_iso(m), type="session_launch", slot=slot, task=tid, session_id=f"s-{slot}-{n}", attempt_no=1))
+        else:
+            ev.append(dict(t=_iso(m), type="session_message", slot=slot, task=tid, session_id=f"s-{slot}", kind="task"))
+        u = (up_l if launch else up_f) * math.exp(rng.gauss(0, 0.2))
+        c = code * math.exp(rng.gauss(0, 0.2))
+        ev.append(dict(t=_iso(m + u / 60), type="claim", worker=slot, task=tid, branch=f"claude/task-{tid}"))
+        ev.append(dict(t=_iso(m + (u + c) / 60), type="submit", worker=slot, task=tid, branch="b", head=f"h{k[0]}",
+                       attempt_no=1, lines_changed=5, files=["a.py"], k=0, m=0))
+        ev.append(dict(t=_iso(m + (u + c) / 60), type="slot_idle", slot=slot))
+    ev.append(dict(t=_iso(0), type="worker_start", worker="s1", session_id=None))
+    for i in range(n_a):
+        task("s1", 0.5 + i * 29.0 / n_a, 15.0, 29.0, 80.0)
+    for w in range(2, 13):
+        ev.append(dict(t=_iso(30), type="worker_start", worker=f"s{w}", session_id=None))
+    for j in range(per_slot_b):
+        for w in range(1, 13):
+            m = 30.5 + j * 3.2
+            slow = late_slow and m > 39
+            task(f"s{w}", m, up_follow_b, up_launch_b, code_b * (4.0 if slow else 1.0))
+    ev.append(dict(t=_iso(45), type="note", text="window_end"))
+    ev.sort(key=lambda e: e["t"])
+    d = tmp_path / f"slot{seed}{up_follow_b}{up_launch_b}{code_b}{late_slow}"
+    d.mkdir()
+    (d / "events.jsonl").write_text("".join(json.dumps(e) + "\n" for e in ev))
+    (d / "run.json").write_text(json.dumps(dict(run_id="T1b", kind="trial", n_workers=12, window_start=_iso(0),
+                                                window_end=_iso(45))))
+    return d
+
+
+def test_slot_mode_decides_on_follow_ups(tmp_path):
+    r = throttle_report(_slot_log(tmp_path))
+    assert r["measure"] == "followup" and r["decision"] == "CLEAR" and not r["launch_flag"]
+    assert r["startup_followup_only"]["n_a"] >= 6 and r["startup_followup_only"]["n_b"] >= 30
+    r = throttle_report(_slot_log(tmp_path, up_follow_b=30.0))
+    assert r["decision"] == "STOP"
+    # launches 2x slower at twelve slots: a flag, not a stop
+    r = throttle_report(_slot_log(tmp_path, up_launch_b=60.0, n_a=24))
+    assert r["decision"] == "CLEAR" and r["launch_flag"] is True
+    out = __import__("harness.throttle", fromlist=["format_report"]).format_report(r)
+    assert "<- rule 1" in out and "FLAG: launch interval" in out
+
+
+def test_coding_legs_cut_off_5_min_before_window_end(tmp_path):
+    # tasks handed out in the last minutes are slow; without the cut-off only the fast ones would be counted
+    d = _slot_log(tmp_path, late_slow=True)
+    r = throttle_report(d)
+    legs = task_legs(json.loads((d / "run.json").read_text()),
+                     [json.loads(x) for x in (d / "events.jsonl").read_text().splitlines()])
+    late = [x for x in legs if x["launch"] > 40 * 60]
+    assert late and all(x["coding_s"] is None for x in late)
+    assert r["coding_cutoff_s"] == 300

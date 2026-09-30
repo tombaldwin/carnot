@@ -44,7 +44,7 @@ from .config import Config
 from .events import EventLog
 from .gitops import GitError, Repo
 from .launchers import LaunchError, next_task_message, probe_message, rework_message, task_prompt
-from .review import ReviewError, ReviewPacket, Reviewer, make_packet
+from .review import ReviewError, ReviewPacket, ReviewRateLimited, Reviewer, is_rate_limit_text, make_packet
 from .tasks import Task, TestResult, TestRunner
 
 FEEDBACK_FILE = "FEEDBACK.md"   # no longer written; still excluded from diffs and from main, defensively
@@ -105,8 +105,10 @@ class SlotSession:
     slot: str
     tasks: list = dc.field(default_factory=list)
     session_id: str | None = None
-    retired: str | None = None          # reason: tasks_per_session | timeout | followup_failed | launch_failed | no_session_id
+    retired: str | None = None          # reason: tasks_per_session | messages_per_session | timeout | followup_failed |
+                                        # launch_failed | no_session_id
     reachable: bool = True
+    messages: int = 0                   # messages the session has had: its launch prompt, kind=task and rework
 
 
 @dc.dataclass
@@ -187,6 +189,7 @@ class Orchestrator:
             raise ValueError(f"[launcher] session_per must be 'slot' or 'task', not {cfg.launcher.session_per!r}")
         self.slot_mode = cfg.launcher.session_per == "slot"
         self.tasks_per_session = max(1, int(cfg.launcher.tasks_per_session))
+        self.messages_per_session = max(0, int(cfg.launcher.messages_per_session))
         self.slot_sessions: list[SlotSession] = []      # every slot session started (slot mode)
         self.n_launched = 0                              # sessions launched (either mode): cost per task
         self.dispatch_paused_until: dt.datetime | None = None
@@ -349,6 +352,8 @@ class Orchestrator:
                 if task is not None:
                     sess = self.sessions[task]
                     msg = sess.feedback.popleft()
+                    if sess.ss is not None:
+                        sess.ss.messages += 1
                     sess.slot, sess.last_slot, sess.status = sl.id, sl.id, "working"
                     self._occupy(sl, task, "rework")
                     self._run_thread(f"send-{sl.id}-{task}", self._do_send, sl.id, task, msg, "rework")
@@ -364,12 +369,15 @@ class Orchestrator:
                 if self.slot_mode and ss is not None and not ss.retired:
                     if len(ss.tasks) >= self.tasks_per_session:
                         self._retire(ss, "tasks_per_session")
+                    elif self.messages_per_session and ss.messages >= self.messages_per_session:
+                        self._retire(ss, "messages_per_session")
                     elif ss.session_id is None:
                         self._retire(ss, "no_session_id")
                 if self.slot_mode and sl.ss is not None:
                     # hand the task to the slot's session as a follow-up
                     ss = sl.ss
                     ss.tasks.append(task)
+                    ss.messages += 1
                     sess.ss, sess.session_id, sess.status = ss, ss.session_id, "working"
                     self._occupy(sl, task, "task")
                     self._note_exhausted()
@@ -379,7 +387,7 @@ class Orchestrator:
                     continue
                 if self.slot_mode:
                     ss = SlotSession(f"{sl.id}-{sum(1 for x in self.slot_sessions if x.slot == sl.id) + 1}", sl.id,
-                                     [task])
+                                     [task], messages=1)
                     self.slot_sessions.append(ss)
                     sl.ss, sess.ss = ss, ss
                 self._occupy(sl, task, "launch")
@@ -568,6 +576,7 @@ class Orchestrator:
                           f"error={err[:300]}")
             if kind == "task" and task in sess.ss.tasks:
                 sess.ss.tasks.remove(task)          # it never reached the session
+                sess.ss.messages -= 1
             if sess.ss is not None:
                 self._retire(sess.ss, "followup_failed", reachable=False)
             if kind == "task":
@@ -601,9 +610,39 @@ class Orchestrator:
                 self.cv.wait(0.2)
 
     # ------------------------------------------------------------------ watcher
+    def task_for_branch(self, branch: str) -> tuple[str | None, str]:
+        """The task a `claude/task-<id>...` branch belongs to: the known task id matching the rest of the name exactly,
+        ignoring case, or followed by a separator and any suffix (`claude/task-t066-fix` -> T066). Returns (task,
+        how): how = "exact" | "case" | "suffix" | "ambiguous" (two or more known ids match; task None) | "unknown" (no
+        known id matches; task = the rest of the name, as before) | "" (not a task branch)."""
+        if branch.lower().startswith(self.pfx.lower()):
+            rest = branch[len(self.pfx):]
+        else:
+            return None, ""
+        known = set(self.tasks) | set(self.sessions)
+        if rest in known:
+            return rest, "exact"
+        low = rest.lower()
+        hits = sorted({t for t in known if t.lower() == low})
+        if len(hits) == 1:
+            return hits[0], "case"
+        if len(hits) > 1:
+            return None, "ambiguous"
+        hits = sorted({t for t in known if low.startswith(t.lower()) and low[len(t)] in "-_./+"})
+        if len(hits) == 1:
+            return hits[0], "suffix"
+        if len(hits) > 1:
+            return None, "ambiguous"
+        return rest, "unknown"
+
     def _task_of(self, branch: str, sha: str, main: str) -> str | None:
-        if branch.startswith(self.pfx):
-            return branch[len(self.pfx):]
+        task, how = self.task_for_branch(branch)
+        if how in ("exact", "case", "suffix", "unknown"):
+            return task
+        if how == "ambiguous":
+            if branch not in self.unattributed:
+                self.log.note(f"ambiguous branch {branch}: its name matches more than one task id; not attributed")
+            return None
         if not self.cfg.repo.accept_other_claude_branches:
             return None
         for c in self.repo.out("rev-list", sha, "^" + main).split():
@@ -627,7 +666,7 @@ class Orchestrator:
                     self.unattributed.add(branch)
                     self.log.note(f"unattributed branch {branch}: no task id in its name or in a READY: commit")
                 continue
-            if first and not branch.startswith(self.pfx):
+            if first and branch != f"{self.pfx}{task}":
                 self.log.note(f"task {task} pushed on branch {branch}, not {self.pfx}{task}")
             self._branch_seen(task, branch, sha, main, first)
 
@@ -698,9 +737,20 @@ class Orchestrator:
             if sl is not None and sl.kind == "probe":
                 self._free(sl)
 
+    def merged_main(self, head: str) -> bool:
+        """Whether the submitted branch contains a merge of main: a merge commit (not on main) one of whose later
+        parents is on origin/main (the prompts' "merge origin/main into your branch")."""
+        for c in self.repo.out("rev-list", "--merges", head, "^origin/main").split():
+            parents = self.repo.out("rev-list", "--parents", "-n", "1", c).split()[2:]
+            for p in parents:
+                if self.repo.run("merge-base", "--is-ancestor", p, "origin/main", check=False).returncode == 0:
+                    return True
+        return False
+
     def _submit(self, st: TaskState, head: str, worker: str) -> None:
         base = self.repo.out("merge-base", "origin/main", head)
         lines, files = self._diffstat(base, head)
+        mm = self.merged_main(head)
         with self.lock:
             others = {t: f for t, f in self.inflight.items() if t != st.task}
             k = len(others)
@@ -711,7 +761,7 @@ class Orchestrator:
             st.last_head = head
             self.inflight[st.task] = files
             self.log.emit("submit", worker=worker, task=st.task, branch=st.branch, head=head,
-                          attempt_no=st.submits, lines_changed=lines, files=files, k=k, m=m)
+                          attempt_no=st.submits, lines_changed=lines, files=files, k=k, m=m, merged_main=mm)
             ch = Change(st.task, worker, st.branch, head, st.submits, files, self.clock.now())
             self.prep_q.append(ch)
             for i, old in enumerate(self.review_q):
@@ -816,6 +866,9 @@ class Orchestrator:
                 except Exception as e:  # ReviewError or anything unexpected
                     msg = str(e) if isinstance(e, ReviewError) else f"{type(e).__name__}: {e}"
                     self.log.emit("review_error", task=ch.task, head=ch.head, error=msg[:1000], reviewer=rid)
+                    if isinstance(e, ReviewRateLimited) or is_rate_limit_text(msg):
+                        self.log.note(f"reviewer_rate_limited reviewer={rid} task={ch.task} head={ch.head[:12]} "
+                                      f"error={' '.join(msg.split())[:200]}")
                     with self.lock:
                         self._down_since.setdefault(rid, t0)
                     continue
@@ -1069,7 +1122,8 @@ class Orchestrator:
         self.log.note(f"task_supply n={len(self.supply_ids)}")
         self.log.note(f"slots n={rc.n_workers} task_timeout_min={rc.task_timeout_min:g} "
                       f"task_budget_min={rc.task_budget_min:g} session_per={self.cfg.launcher.session_per}"
-                      + (f" tasks_per_session={self.tasks_per_session}" if self.slot_mode else ""))
+                      + (f" tasks_per_session={self.tasks_per_session} messages_per_session={self.messages_per_session}"
+                         if self.slot_mode else "") + f" poll_interval_s={rc.poll_interval_s:g}")
         self.log.note(f"reviewers n={self.n_reviewers} ids={','.join(self.reviewer_ids)}")
         self.start_threads(dispatch=True)
         self._open_scheduled_slots()

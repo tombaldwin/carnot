@@ -5,7 +5,7 @@ Anything marked UNVERIFIED depends on product facts not yet checked on the payin
 start while a template it needs has ``verified = false``.
 
 Real windows use one config per study phase (PLAN-v4 section 7; PLAN-v6 section 6): config.t0.toml,
-config.t1.toml, config.t2.toml, config.t1b.toml and the four sweep cells config.sweep-n{1,12}-k{1,3}.toml.
+config.t1.toml, config.t2.toml, config.t1b.toml and the four sweep cells config.sweep-n{1,12}-k{1,5}.toml (PLAN-v7).
 ``[run] phase`` names the phase, and ``PHASES`` below is the pre-registered shape of each; `run` refuses a
 config whose kind / N (slots) / window / warm-up / grace / start schedule / session timeout / first task /
 parallel reviewers (``[reviewer] parallel``) do not match its phase.
@@ -30,6 +30,10 @@ from typing import Any
 # not part of the pilot) starts with a fixed task and sends one probe follow-up after the first READY.
 T0_FIRST_TASK = "T145"   # small (about 20 lines), one file, no textual conflict with any other task
 _SESS = dict(task_timeout_min=25, task_budget_min=20)
+# PLAN-v7: keys with a dot are checked against another section ([reviewer], [launcher]).
+_V7 = dict(task_timeout_min=10, task_budget_min=5, poll_interval_s=2, **{
+    "reviewer.max_downtime_min": 3, "launcher.session_per": "slot", "launcher.tasks_per_session": 4,
+    "launcher.messages_per_session": 6})
 PHASES = {
     "t0": dict(kind="trial", n_workers=1, window_min=45, warmup_min=0, grace_min=10, start_schedule=[],
                first_task=T0_FIRST_TASK, probe_followup=True, **_SESS),
@@ -37,17 +41,20 @@ PHASES = {
                start_schedule=[[0, 1], [30, 12]], first_task="", probe_followup=False, **_SESS),
     "t2": dict(kind="pilot", n_workers=1, window_min=60, warmup_min=10, grace_min=10, start_schedule=[],
                first_task="", probe_followup=False, **_SESS),
-    # PLAN-v6: T1b (abort rule 1: one slot for 90 min, then twelve for 30 min, three reviewers) and the sweep's
-    # four cells, fleet size N in {1, 12} x parallel reviewers K in {1, 3}, 45-min windows. The PLAN-v4/v5
-    # sweep phases (sweep-n1 / sweep-n12, 90 min, one reviewer) are retired.
-    "t1b": dict(kind="trial", n_workers=12, window_min=120, warmup_min=0, grace_min=10,
-                start_schedule=[[0, 1], [90, 12]], first_task="", probe_followup=False, reviewers=3, **_SESS),
-    **{f"sweep-n{n}-k{k}": dict(kind="sweep", n_workers=n, window_min=45, warmup_min=5, grace_min=10,
-                                start_schedule=[], first_task="", probe_followup=False, reviewers=k, **_SESS)
-       for n in (1, 12) for k in (1, 3)},
+    # PLAN-v7 (section 6, after its review): T1b (abort rules 1-3: one slot for 30 min, then twelve for 15 min, five
+    # reviewers) and the sweep's cells, fleet size N in {1, 12} x parallel reviewers K in {1, 5}, 15-min windows
+    # (sweep-n1-k1 and sweep-n12-k1 only in the 500-task design). Every v7 phase: one session per slot, retired after
+    # 4 tasks or 6 messages, a 10-min session timeout with a 5-min budget in the prompt, the watcher polling every 2 s
+    # (a 15-s poll quantised every start-up leg), and a window VOID after 3 min of reviewer downtime (summed / K).
+    # The PLAN-v6 phases (T1b 90 + 30, K in {1, 3}, 45-min windows) and the PLAN-v4/v5 sweep phases are retired.
+    "t1b": dict(kind="trial", n_workers=12, window_min=45, warmup_min=0, grace_min=10,
+                start_schedule=[[0, 1], [30, 12]], first_task="", probe_followup=False, reviewers=5, **_V7),
+    **{f"sweep-n{n}-k{k}": dict(kind="sweep", n_workers=n, window_min=15, warmup_min=3, grace_min=10,
+                                start_schedule=[], first_task="", probe_followup=False, reviewers=k, **_V7)
+       for n in (1, 12) for k in (1, 5)},
 }
 SESSION_PER = ("slot", "task")          # [launcher] session_per
-SWEEP_REVIEWERS = (1, 3)                # PLAN-v6 section 6.1: `run` refuses a sweep config with another K
+SWEEP_REVIEWERS = (1, 5)                # PLAN-v7 section 6.1: `run` refuses a sweep config with another K
 WORKER_MODEL = "claude-haiku-4-5"       # PLAN-v4 section 2 (model id string: UNVERIFIED until the CLI check)
 REVIEWER_MODEL = "claude-opus-5-5"
 
@@ -70,7 +77,8 @@ class RunCfg:
     worker_model: str = WORKER_MODEL
     reviewer_model: str = REVIEWER_MODEL
     output_dir: str = "runs"            # runs/<run_id>/
-    poll_interval_s: float = 15         # git fetch cadence (virtual seconds)
+    poll_interval_s: float = 2          # git fetch cadence (virtual seconds). Event times are poll times: a 15-s poll
+                                        # quantised every start-up leg (PLAN-v7 review), so 2 s since 2026-09-30
     end_grace_early_when_idle: bool = True
     grace_reviews: bool = True          # keep reviewing already-submitted changes during grace
     notes: str = ""
@@ -247,6 +255,9 @@ class LauncherCfg:
     # slot's next task, after tasks_per_session tasks, a session timeout or a failed follow-up delivery.
     session_per: str = "task"
     tasks_per_session: int = 8
+    # Retire the session also once it has had this many messages of any kind (its launch prompt, kind=task and rework
+    # messages): context, not tasks, drives compaction (T0e compacted after 6 tasks + 2 reworks). 0 = off.
+    messages_per_session: int = 0
     next_task_prompt: str = "prompts/next-task.md"   # follow-up message handing a session its next task
     # mode = "routine": the short per-task prompt stored on the routine, and the rules written to main as
     # [repo] harness_file_name by reset (a model copies the routine prompt at every re-arm: keep it short)
@@ -352,6 +363,13 @@ def phase_problems(cfg: Config) -> list[str]:
                 probs.append(f"[reviewer] parallel = {cfg.reviewer.parallel!r}, but phase {rc.phase!r} is "
                              f"pre-registered with {v!r} reviewers")
             continue
+        if "." in k:
+            sec, field = k.split(".", 1)
+            have = getattr(getattr(cfg, sec), field)
+            same = float(have) == float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else have == v
+            if not same:
+                probs.append(f"[{sec}] {field} = {have!r}, but phase {rc.phase!r} is pre-registered with {v!r}")
+            continue
         have = getattr(rc, k)
         if k == "start_schedule":
             have = [list(map(float, x)) for x in have]
@@ -363,10 +381,12 @@ def phase_problems(cfg: Config) -> list[str]:
             probs.append(f"[run] {k} = {getattr(rc, k)!r}, but phase {rc.phase!r} is pre-registered with {want[k]!r}")
     if cfg.launcher.session_per not in SESSION_PER:
         probs.append(f"[launcher] session_per = {cfg.launcher.session_per!r}: one of {SESSION_PER}")
+    if not (isinstance(cfg.launcher.messages_per_session, int) and cfg.launcher.messages_per_session >= 0):
+        probs.append(f"[launcher] messages_per_session = {cfg.launcher.messages_per_session!r}: an integer >= 0")
     if not (isinstance(cfg.launcher.tasks_per_session, int) and cfg.launcher.tasks_per_session >= 1):
         probs.append(f"[launcher] tasks_per_session = {cfg.launcher.tasks_per_session!r}: an integer >= 1")
     if rc.kind == "sweep" and cfg.reviewer.parallel not in SWEEP_REVIEWERS:
-        probs.append(f"[reviewer] parallel = {cfg.reviewer.parallel!r}: a sweep window runs K = 1 or 3 reviewers")
+        probs.append(f"[reviewer] parallel = {cfg.reviewer.parallel!r}: a sweep window runs K = 1 or 5 reviewers")
     if not (isinstance(cfg.reviewer.parallel, int) and cfg.reviewer.parallel >= 1):
         probs.append(f"[reviewer] parallel = {cfg.reviewer.parallel!r}: must be an integer >= 1")
     if cfg.launcher.mode == "command" and cfg.launcher.detach not in ("on_id", "after_s", "exit"):
@@ -392,7 +412,7 @@ def phase_problems(cfg: Config) -> list[str]:
 
 def routine_group(phase: str) -> str:
     """The phase name the slot routines are named after: the sweep's K variants of one fleet size share
-    them (sweep-n12-k1 and sweep-n12-k3 both use carnot-study2-sweep-n12-s<k>); windows never overlap."""
+    them (sweep-n12-k1 and sweep-n12-k5 both use carnot-study2-sweep-n12-s<k>); windows never overlap."""
     m = re.fullmatch(r"(sweep-n\d+)-k\d+", phase or "")
     return m.group(1) if m else phase
 

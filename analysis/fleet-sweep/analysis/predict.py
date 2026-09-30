@@ -1,7 +1,19 @@
 #!/usr/bin/env python3
-"""Point predictions and the pre-registration table. Default: PLAN-v6; `--plan v5` / `--plan v4` give the superseded tables.
+"""Point predictions and the pre-registration table. Default: PLAN-v7; `--plan v6` / `v5` / `v4` give the superseded tables.
 
-PLAN-v6 (the default; v6.py holds the codings):
+PLAN-v7 (the default; v7.py holds the design and codings; the tests are v6's):
+
+    python predict.py --md prediction.md --json prediction.json        # the recommended 400-task design
+    python predict.py --budget 300                                     # the 300- or 500-task design
+    python predict.py --usd-per-task 0.52 --balance 214 --tasks-per-slot-hour 27   # abort rule 2 after T1b
+
+  The budget is counted in cloud tasks (hand-outs: a first attempt with its rework, about $0.45 of credits each,
+  T0d / T0e), T1b included. Printed: the design (cells, 15-min windows, order), the tasks per window and in all with
+  the dollar cost at $0.30 / 0.45 / 0.60 per task, which design fits a given cost per task and balance (rule 2),
+  the Opus reviews needed (plan usage), the model's prediction per cell at lambda 23, review 21.6 s, b_review 0.41,
+  the abort rules and the operating characteristics.
+
+PLAN-v6 (superseded; `--plan v6`):
 
     python predict.py --md prediction.md --json prediction.json        # the recommended 2 x 2 design (N x reviewers K)
     python predict.py --lambda-pilot 14 --review-s 21 --burn 2.10 --balance 249 --session-h-per-day 24
@@ -807,11 +819,107 @@ def main_v6(a):
         Path(a.json).write_text(json.dumps(out, indent=2, default=str) + "\n")
 
 
+# ---------------------------------------------------------------------- PLAN-v7
+def to_markdown_v7(rows, design, costs, reviews, choice, a):
+    import v5
+    import v7
+    cells = design["cells"]
+    L = ["## Point predictions and design (pre-registration, PLAN-v7)\n"]
+    L.append(f"Design (PLAN-v7 section 5, the {design['name']}-task design): cells N x K = " +
+             ", ".join(f"{n}x{k}: {w}" for (n, k), w in sorted(cells.items())) +
+             f"; {design['window_min']:g}-min windows ({design['warmup_min']:g} min warm-up, 10 min grace); order " +
+             ", ".join(f"{n}K{k}" for n, k in v7.v6_order(cells)) + f". Before the sweep: T1b (one slot for "
+             f"{v7.T1B_V7['one_slot_min']:g} min, then twelve for {v7.T1B_V7['twelve_slot_min']:g} min, K = {v7.T1B_V7['K']}, "
+             f"one session per slot) for abort rules 1 and 2. Constants alpha = {a.alpha}, beta = {a.beta}, p = {a.p}; "
+             f"over-dispersion CV {CV_OVERDISPERSION} per window.\n")
+    L.append("### Budget (cloud tasks)\n")
+    L.append(f"A task is one hand-out (a first attempt with its rework): about ${v7.USD_PER_TASK['central']:.2f} of cloud-session "
+             f"credits (T0d $0.50, T0e $0.43; range ${v7.USD_PER_TASK['low']:.2f}-{v7.USD_PER_TASK['high']:.2f}). "
+             f"${v7.BALANCE_USD:.0f} left, ${v7.FLOOR_USD:.0f} floor: ${v7.SPENDABLE_USD:.0f} to spend. Hand-outs per slot-hour "
+             f"{a.tph:g} (K_hi) and {a.tph * v7.TASKS_PER_SLOT_HOUR_K1 / v7.TASKS_PER_SLOT_HOUR:.0f} (N_hi, K = 1).\n")
+    L.append("| design | cells | T1b tasks | sweep tasks | total tasks | $ at 0.30 / 0.45 / 0.60 | Opus reviews |")
+    L.append("|---|---|---|---|---|---|---|")
+    for name, c in costs.items():
+        L.append(f"| {name}{' (this)' if name == design['name'] else ''} | {', '.join(f'{n}x{k}: {w}' for (n, k), w in sorted(c['cells'].items()))} | "
+                 f"{c['t1b_tasks']:.0f} | {c['sweep_tasks']:.0f} | {c['total_tasks']:.0f} | ${c['usd']['low']:.0f} / ${c['usd']['central']:.0f} / "
+                 f"${c['usd']['high']:.0f} | {c['reviews']:.0f} |")
+    if choice is not None:
+        L.append(f"\nRule 2 at ${a.usd_per_task:.2f} per task, balance ${a.balance:.0f}"
+                 + (f" less T1b's predicted ${a.spent_t1b:.0f}" if a.spent_t1b else "") + f" (floor ${v7.FLOOR_USD:.0f}): "
+                 f"**{('run the ' + choice + '-task design') if choice else 'stop: report T1b'}**.")
+    L.append("\n### Opus reviews per cell (the owner's Max plan, not credits)\n")
+    L.append("| cell | windows | reviews per window | reviews |\n|---|---|---|---|")
+    for (n, k), r in sorted(reviews.items()):
+        L.append(f"| {n}x{k} | {r['windows']} | {r['per_window']:.0f} | {r['total']:.0f} |")
+    L.append("\n### What the model predicts per cell (U = (1 - r) min(lambda X(N), cap))\n")
+    L.append("| Rival | N | K | reviews demanded /h | reviewer capacity /h | reviewer util | binds | finished / window | 95% | "
+             "uncapped | ceiling |")
+    L.append("|---|---|---|---|---|---|---|---|---|---|---|")
+    for x in rows:
+        L.append(f"| {v5.RIVAL_LABEL_V5[x['rival']]} | {x['N']} | {x['K']} | {x['reviews_demand_per_hour']:.0f} | "
+                 f"{x['reviewer_capacity_per_hour']:.0f} | {x['reviewer_util']:.2f} | {'yes' if x['binds'] else 'no'} | "
+                 f"{x['finished']:.1f} | {x['finished_95'][0]}-{x['finished_95'][1]} | {x['uncapped']:.1f} | {x['ceiling']:.1f} |")
+    L.append("\n### Abort rules (PLAN-v7 section 5.4)\n")
+    for t in v7.ABORT_V7:
+        L.append(f"- {t}")
+    L.append("")
+    L += v7.oc_statement_v7()
+    return "\n".join(L)
+
+
+def main_v7(a):
+    import v7
+    name = a.budget or "400"
+    D = dict(v7.DESIGNS_V7[name])
+    cells = ({tuple(int(x) for x in k.split("x")): int(v) for k, v in (c.split("=") for c in a.cells)} if a.cells
+             else v7.cells_of(D["cells"]))
+    wmin = a.window_min if a.window_min is not None else D["window_min"]
+    wu = D["warmup_min"]
+    lam = a.lambda_pilot if a.lambda_pilot is not None else 23.0
+    comp = a.completion if a.completion is not None else 0.88
+    brev = a.b_review if a.b_review is not None else 0.41
+    rs = a.review_s if a.review_s is not None else 21.6
+    a.tph = a.tasks_per_slot_hour or v7.TASKS_PER_SLOT_HOUR
+    k1 = a.tph * v7.TASKS_PER_SLOT_HOUR_K1 / v7.TASKS_PER_SLOT_HOUR
+    rows = v7.predictions_v7(cells, wmin, wu, lam, comp, brev, 0.11, rs, a.alpha, a.beta, a.p)
+    costs = {}
+    for nm, dd in v7.DESIGNS_V7.items():
+        cc = cells if nm == name else v7.cells_of(dd["cells"])
+        c = v7.design_tasks(cc, wmin if nm == name else dd["window_min"], tph=a.tph, tph_k1=k1)
+        rv = v7.reviews_estimate(cc, wmin if nm == name else dd["window_min"], lam, brev, rs)
+        costs[nm] = dict(c, cells=cc, reviews=sum(r["total"] for r in rv.values()) + v7.T1B_V7["reviews"])
+    reviews = v7.reviews_estimate(cells, wmin, lam, brev, rs)
+    choice = None
+    if a.usd_per_task is not None:
+        # --balance: the meter now (after T1b). Without it: the balance before T1b less T1b's predicted cost.
+        spent = 0.0 if a.balance is not None else v7.T1B_V7["tasks"] * a.usd_per_task
+        a.balance = a.balance if a.balance is not None else v7.BALANCE_USD
+        a.spent_t1b = spent
+        choice = v7.choose_design(a.usd_per_task, a.balance, spent_t1b=spent, tasks_per_slot_hour=a.tph) or ""
+    design = dict(name=name, cells=cells, window_min=wmin, warmup_min=wu)
+    md = to_markdown_v7(rows, design, costs, reviews, choice, a)
+    out = dict(plan="PLAN-v7", design=dict(name=name, cells={f"{n}x{k}": w for (n, k), w in cells.items()}, window_min=wmin,
+                                           warmup_min=wu, t1b=v7.T1B_V7),
+               predictions=rows, costs={k: dict(v, cells={f"{n}x{kk}": w for (n, kk), w in v["cells"].items()}) for k, v in costs.items()},
+               reviews={f"{n}x{k}": v for (n, k), v in reviews.items()}, rule2_choice=choice,
+               assumptions=dict(lambda_per_slot_hour=lam, completion=comp, b_review=brev, review_s=rs, tasks_per_slot_hour=a.tph,
+                                usd_per_task=v7.USD_PER_TASK, alpha=a.alpha, beta=a.beta, p=a.p),
+               abort_rules=list(v7.ABORT_V7), operating_characteristics=v7.V7_OC)
+    print(md)
+    if a.md:
+        Path(a.md).write_text(md + "\n")
+    if a.json:
+        Path(a.json).write_text(json.dumps(out, indent=2, default=str) + "\n")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--plan", choices=["v6", "v5", "v4"], default="v6",
-                    help="v6 (default): PLAN-v6 predictions; v5 / v4: the superseded tables")
-    ap.add_argument("--cells", nargs="*", default=None, metavar="NxK=W", help="v6: windows per cell, e.g. 1x1=6 1x3=6 12x3=3 12x1=2")
+    ap.add_argument("--plan", choices=["v7", "v6", "v5", "v4"], default="v7",
+                    help="v7 (default): PLAN-v7 predictions; v6 / v5 / v4: the superseded tables")
+    ap.add_argument("--budget", choices=["300", "400", "500"], default=None, help="v7: which design (tasks in all; default 400)")
+    ap.add_argument("--usd-per-task", type=float, default=None, help="v7: measured $ per task (T1b); prints rule 2's choice")
+    ap.add_argument("--tasks-per-slot-hour", type=float, default=None, help="v7: hand-outs per slot-hour (default 25, simulated)")
+    ap.add_argument("--cells", nargs="*", default=None, metavar="NxK=W", help="v6 / v7: windows per cell, e.g. 1x1=6 1x3=6 12x3=3 12x1=2")
     ap.add_argument("--session-h-per-day", type=float, default=None, help="v6: plan-usage allowance in session-hours per day (budget b)")
     ap.add_argument("--reps-v5", nargs="*", default=None, metavar="N=R", help="v5: windows per size, e.g. 1=8 12=3")
     ap.add_argument("--review-s", type=float, default=None, help="mean review seconds (v6 default 21, T1; v5 default 20)")
@@ -834,13 +942,17 @@ def main():
                     help="calibration-review log (JSONL or CSV; README 'Calibration-review log'), for abort rule 4 only")
     ap.add_argument("--calibration-job", default=None, help="review-job version in the calibration log (default: the last row's)")
     ap.add_argument("--burn", type=float, default=None, help="$ per worker session-hour measured in T1/T2")
-    ap.add_argument("--balance", type=float, default=None, help="credits left before the sweep, $ (abort rule 5)")
+    ap.add_argument("--balance", type=float, default=None, help="credits left before the sweep, $ (abort rule 5; v7: rule 2)")
     ap.add_argument("--v3-gate", action="store_true",
                     help="SUPERSEDED: also print PLAN-v3's q-gate and budget rule (reference only; PLAN-v4 has no gate)")
     ap.add_argument("--pilot-spend", type=float, default=None, help="--v3-gate only: $ spent on T1 + T2")
     ap.add_argument("--md", default=None)
     ap.add_argument("--json", default=None)
     a = ap.parse_args()
+    if a.plan == "v7":
+        import v7
+        a.p = v7.P_V7 if a.p is None else a.p
+        return main_v7(a)
     if a.plan == "v6":
         import v6
         a.p = v6.P_V6 if a.p is None else a.p

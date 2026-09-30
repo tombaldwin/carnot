@@ -100,6 +100,8 @@ def check_event(ev: dict) -> list[str]:
     if not isinstance(ev.get("t"), str) or not T_RE.match(ev["t"]):
         errs.append(f"{typ}: bad t {ev.get('t')!r}")
     spec = dict(EVENT_FIELDS[typ])
+    if typ == "submit" and "merged_main" in ev:      # PLAN-v7: optional (absent in older logs)
+        spec["merged_main"] = BOOL
     if typ in REVIEWER_FIELD_TYPES and "reviewer" in ev:
         spec["reviewer"] = STR
         if isinstance(ev["reviewer"], str) and not REVIEWER_RE.match(ev["reviewer"]):

@@ -5,7 +5,7 @@ section 7; K parallel reviewers and the v6 phases from PLAN-v6 sections 5-6): it
 the workers' git branches, feeds K reviewers (`[reviewer] parallel`, default 1) one change each at a time from one
 FIFO queue, runs the serial merge queue, and writes `runs/<run_id>/events.jsonl` and `run.json` in the
 format SCHEMA.md sets out. Workers are **one cloud session per task** in N slots (below). It also runs the offline reviewer calibration through the live review path
-(`calibrate`) and abort rule 1 (throttling, PLAN-v6's revised rule) on a T1 / T1b log (`throttle`). It needs only the Python 3.11 standard library and git 2.40 or later. pytest is used for its
+(`calibrate`) and abort rule 1 (throttling, PLAN-v7's rule on follow-up start-ups) on a T1 / T1b log (`throttle`). It needs only the Python 3.11 standard library and git 2.40 or later. pytest is used for its
 own tests and for the sandbox's test suites.
 
 Dry runs, and every test, use simulated sessions (`SimCloudLauncher`) and a simulated reviewer against a
@@ -49,8 +49,10 @@ little it does, while an idle session costs nothing and one session doing 8 task
 - **Rework** goes to the session that did the task, as before. The message waits (queued in the harness for
   that session) until the session is idle: its own slot free, or, for a retired session, not busy on any slot.
 - A slot's session is **retired** and a fresh one launched for the slot's next task after `tasks_per_session`
-  tasks (8), or at once after a `session_timeout` or a failed follow-up delivery (`session_retired … reason=…`
-  note). A retired session gets no new tasks but still gets rework for its own tasks while reachable; after a
+  tasks (4 in every phase config) or `messages_per_session` messages of any kind (6: its launch prompt, next tasks
+  and rework messages; context, not tasks, drives compaction: T0e's session compacted after 6 tasks + 2 reworks),
+  whichever comes first, or at once after a `session_timeout` or a failed follow-up delivery
+  (`session_retired … reason=…` note). A retired session gets no new tasks but still gets rework for its own tasks while reachable; after a
   failed follow-up it is unreachable, and a bounce of one of its tasks abandons that task. A `kind=task`
   hand-out that cannot be delivered puts the task back at the front of the list (`task_requeued` note) for the
   fresh session.
@@ -58,9 +60,16 @@ little it does, while an idle session costs nothing and one session doing 8 task
   Start-up of a follow-up task runs from its `session_message kind=task` to its first push (no provisioning).
 - `run.json` notes (and a `session_summary` note at grace end) record `sessions_launched`, `tasks_handed_out`
   and the tasks per session, so cost per task can be read from the credit meter.
-- **Design caveat:** tasks in one session share its context (up to 8 tasks), so an earlier task can help or
-  hinder a later one. This affects N = 1 and N = 12 alike (every slot carries up to 8 tasks per session), so it
-  does not bias the N contrast, but per-task measures are not comparable with the one-session-per-task T0-T1.
+- **Design caveat:** tasks in one session share its context (up to 4 tasks or 6 messages), so an earlier task can
+  help or hinder a later one. This affects N = 1 and N = 12 alike (every slot's sessions carry the same), so it
+  does not bias the N contrast, but per-task measures are not comparable with the one-session-per-task T0-T1. More
+  rework at N = 12 (conflicts) means more messages per task there and so more retirements (and, with a looser
+  limit, more compaction): a harness-specific route to N = 12 looking bent, which the stall and retirement counts
+  per window report.
+- **Prompts** (`worker.md`, `next-task.md`, `rework.md`) require the exact branch name `claude/task-<id>` (nothing
+  appended; T0e's relaunched session pushed `claude/task-t039-<suffix>` and lost its slot for the rest of the window),
+  state a time budget of `task_budget_min` (5 min) and say to push what they have after `task_timeout_min` - 2
+  (8 min), because the harness gives a task up after `task_timeout_min` (10 min) without a READY.
 - `session_per = "task"` (the code default, T0-T1) keeps one session per task: every task is launched, and
   everything below applies per task.
 
@@ -164,14 +173,22 @@ detach from it, is **UNVERIFIED** (T0, below).
   only to `[launcher] prompt_dir` (default `session-prompts/` beside the task file), which must be outside
   this repo (the harness refuses otherwise).
 
-**Watcher** (`orchestrator.poll`, every `poll_interval_s`). It fetches `main` and `claude/*`.
+**Watcher** (`orchestrator.poll`, every `poll_interval_s`: 2 s in every config since 2026-09-30; at 15 s every
+start-up leg of T0-T0e was quantised to the poll, which made rule 1's simulated precision an artefact). It fetches
+`main` and `claude/*`. The fetch holds the local clone's lock, so the merge queue's git commands wait for it; watch
+`mq_timing` in T1b (rule 5 stops at a mean above 30 s per change).
 - A task's branch first seen is logged as `claim` (worker = the slot of its session): the session's first
-  push. The task comes from the branch name `claude/task-<id>`, or, for another `claude/*` branch (a session
-  that named its branch itself; UNVERIFIED, `accept_other_claude_branches = true`), from a `READY: <id>`
-  commit on it, with a note. A branch of a task that was never launched in the window is noted and ignored.
+  push. The task comes from the branch name: `claude/task-<id>` with `<id>` a known task id, ignoring case, or a
+  known id followed by `-`, `_`, `.`, `/` or `+` and any suffix (`claude/task-t039-fix` -> T039; a note records a
+  name that is not exactly `claude/task-<id>`); a name that fits two or more ids is not attributed (`ambiguous
+  branch` note). For another `claude/*` branch (`accept_other_claude_branches = true`), from a `READY: <id>` commit
+  on it, with a note. A branch of a task that was never handed out in the window is noted and ignored (and counted
+  as the task's claim if the task is handed out later).
 - New `READY:` commits on a branch, not reachable from `main`, are logged as a `submit` (worker = the slot).
   If one push holds several, the newest is the submitted head. `attempt_no` counts submissions per task.
-  `lines_changed` and `files` come from the diff against the merge base with `main`.
+  `lines_changed` and `files` come from the diff against the merge base with `main`; `merged_main` says whether the
+  branch contains a merge of `origin/main` (drag shows up as longer coding concentrated in merged-main tasks,
+  throttling as uniformly longer coding).
 - When the last task in the window's list is handed to a slot, the dispatcher logs a `note`
   `tasks_exhausted n=<N>` straight after that slot's `slot_busy`: supply exhaustion is the end of the list.
 - `k` is the number of *other* tasks in flight (submitted at least once, not merged). `m` is how
@@ -279,7 +296,7 @@ since those tests are public; for `review`, the reviewer's reason.
 | `harness/toygen.py` | toy sandbox + 10 toy task templates with hidden tests and reference patches |
 | `harness/validate.py` | task validation: hidden fails on base, hidden and visible pass with reference |
 | `harness/dryrun.py`, `harness/report.py`, `harness/cli.py` | dry-run wiring, event counts, CLI |
-| `config.t0.toml`, `config.t1.toml`, `config.t2.toml`, `config.t1b.toml`, `config.sweep-n{1,12}-k{1,3}.toml` | one real config per phase (PLAN-v4 section 7.4, T0, PLAN-v6 section 5.1); they differ only in `[run]` and `[reviewer] parallel` |
+| `config.t0.toml`, `config.t1.toml`, `config.t2.toml`, `config.t1b.toml`, `config.sweep-n{1,12}-k{1,5}.toml` | one real config per phase (PLAN-v4 section 7.4, T0, PLAN-v7 sections 5-6); they differ only in `[run]` and `[reviewer] parallel` / `max_downtime_min` |
 | `config.dryrun.toml` | dry-run config |
 | `prompts/reviewer.md` | the frozen review job's prompt (checkout job) |
 | `prompts/reviewer-diff.md` | SUPERSEDED diff-only review prompt (`job = "diff"`) |
@@ -378,31 +395,32 @@ also needs a routine id for every slot, from `routines-setup`).
 | `prompts/worker.md`, `prompts/next-task.md`, `prompts/rework.md` | draft | the final wording after the slot-session T0, to be pre-registered |
 | undocumented limits | - | idle timeout of a cloud session (a session waiting for rework may expire), concurrent-session limit (12 needed at T1), shared rate limits (throttling, abort rule 1) |
 
-## Phase configs (PLAN-v4 section 7.4; PLAN-v6 sections 5.1 and 6.1)
+## Phase configs (PLAN-v4 section 7.4; PLAN-v7 sections 5 and 6)
 
 | File | phase | kind | N (slots) | window (warm-up) | K reviewers | start schedule |
 |---|---|---|---|---|---|---|
-| `config.t0.toml` | t0 | trial | 1 | 45 min (0) | 1 | all at 0; `first_task = "T145"`, `probe_followup = true` |
-| `config.t1.toml` | t1 | trial | 12 | 60 min (10) | 1 | `[[0, 1], [30, 12]]`: s1 at minute 0, s2-s12 at minute 30 |
-| `config.t2.toml` | t2 | pilot | 1 | 60 min (10) | 1 | all at 0 (PLAN-v4/v5; v6 has no pilot) |
-| `config.t1b.toml` | t1b | trial | 12 | 120 min (0) | 3 | `[[0, 1], [90, 12]]`: s1 alone for 90 min, then s1-s12 for 30 min |
-| `config.sweep-n1-k1.toml` | sweep-n1-k1 | sweep | 1 | 45 min (5) | 1 | all at 0 |
-| `config.sweep-n1-k3.toml` | sweep-n1-k3 | sweep | 1 | 45 min (5) | 3 | all at 0 |
-| `config.sweep-n12-k1.toml` | sweep-n12-k1 | sweep | 12 | 45 min (5) | 1 | all at 0 |
-| `config.sweep-n12-k3.toml` | sweep-n12-k3 | sweep | 12 | 45 min (5) | 3 | all at 0 |
+| `config.t0.toml` | t0 | trial | 1 | 45 min (0) | 1 | all at 0; `first_task = "T145"`, `probe_followup = true` (historical) |
+| `config.t1.toml` | t1 | trial | 12 | 60 min (10) | 1 | `[[0, 1], [30, 12]]` (historical) |
+| `config.t2.toml` | t2 | pilot | 1 | 60 min (10) | 1 | all at 0 (PLAN-v4/v5; historical) |
+| `config.t1b.toml` | t1b | trial | 12 | 45 min (0) | 5 | `[[0, 1], [30, 12]]`: s1 alone for 30 min, then s1-s12 for 15 min |
+| `config.sweep-n1-k5.toml` | sweep-n1-k5 | sweep | 1 | 15 min (3) | 5 | all at 0 |
+| `config.sweep-n12-k5.toml` | sweep-n12-k5 | sweep | 12 | 15 min (3) | 5 | all at 0 |
+| `config.sweep-n1-k1.toml` | sweep-n1-k1 | sweep | 1 | 15 min (3) | 1 | all at 0 (500-task design only) |
+| `config.sweep-n12-k1.toml` | sweep-n12-k1 | sweep | 12 | 15 min (3) | 1 | all at 0 (500-task design only: CAP) |
 
-The PLAN-v4/v5 sweep configs (`config.sweep-n1.toml`, `config.sweep-n12.toml`: 90 min, one reviewer) are
-retired; the sweep's cell order is `v6.v6_order` (PLAN-v6 section 5.1). `run` refuses a config whose
-`[reviewer] parallel` differs from its phase's K, and any sweep config with K other than 1 or 3. The K variants
-of one fleet size share their slot routines (`config.routine_group`: `sweep-n12-k1` and `sweep-n12-k3` both use
-`carnot-study2-sweep-n12-s<k>`), so `routines-setup` is needed once per N, not per cell.
+The PLAN-v6 phases (T1b 90 + 30 with K = 3, 45-min windows, `sweep-n*-k3`) and the PLAN-v4/v5 sweep configs are
+retired; the sweep's cell order is `v7.v6_order` (PLAN-v7 section 5.1). `run` refuses a config whose
+`[reviewer] parallel` differs from its phase's K, and any sweep config with K other than 1 or 5. The K variants
+of one fleet size share their slot routines (`config.routine_group`), should the routine launcher ever be used again.
 
-All of them: grace 10, session timeout 25 min, time budget 20 min, Haiku 4.5 sessions, Opus 5.5 reviewer,
-`base_ref = "sandbox-v1"`, the checkout review job, `launcher.mode = "routine"` (`verified = false` until the
-T0 repeat; `[launcher.routine]` environment `env_01REHbnKNqfeaJdQr9VjHaX5`, source the sandbox's GitHub URL);
-warm-up as in the table. They differ only in `[run]` and `[reviewer] parallel` (a test checks this). `run`
+The PLAN-v7 phases (t1b and the sweep) also pin, and `run` checks: session timeout 10 min, prompt budget 5 min,
+`poll_interval_s = 2`, `[reviewer] max_downtime_min = 3`, `[launcher] session_per = "slot"`, `tasks_per_session = 4`,
+`messages_per_session = 6`. All configs: grace 10, Haiku 4.5 sessions, Opus 5.5 reviewer, `base_ref = "sandbox-v1"`,
+the checkout review job, `launcher.mode = "command"` (the #81776 workaround); t0, t1 and t2 keep their historical
+timeout (25 min), budget (20 min) and downtime limit (10 min). The files differ only in `[run]` and `[reviewer]
+parallel` / `max_downtime_min` (a test checks this). `run`
 refuses a config whose kind, N, window, warm-up, grace, start schedule, session timeout / budget, first task,
-probe, models, review job or K differ from its named phase (`config.PHASES`), prints them, and starts only when the operator types the
+probe, models, review job, K or (v7) the settings above differ from its named phase (`config.PHASES`), prints them, and starts only when the operator types the
 phase name (or passes `--yes`). With a `start_schedule`, later slots open from a thread at their minute, so
 the window's own timing is never held up by the operator. T0 is a product check, not part of the pilot:
 `derive.py --pilot` refuses a run whose `run.json` notes say `phase=t0`.
@@ -434,19 +452,24 @@ python -m harness calibrate --config config.t2.toml --tasks @ids.txt --variants 
   (20% per extra reviewer is harmless to SCALE but raises rule 4's flag rate).
 - Refuses to run while `[reviewer] verified = false`.
 
-## Throttling on T1b (PLAN-v6 section 5.4; abort rule 1, revised)
+## Throttling on T1b (PLAN-v7 section 5.4; abort rule 1)
 
-`python -m harness throttle runs/<T1b> [--exclude s2,s3 | --exclude none] [--split-min 90] [--json out.json]`.
-For every task launched in the one-slot phase (before the second `start_schedule` minute) and in the
-twelve-slot phase: **start-up** = branch first pushed (`claim`) minus the routine's `run_once_at` (from the task's
-`launch_detail` note; its `session_launch` if missing), and **coding** = first READY minus `claim`. The statistic
-is the ratio of geometric means (twelve slots over one) with a Welch 90% interval on the log scale; tolerance
-1.25. **STOP** if the start-up interval lies wholly above 1.25, **CLEAR** if wholly below, else **INCONCLUSIVE**
-(proceed; report the ratio beside SCALE). A coding interval wholly above 1.25 is a flag, not a stop. Slots lost to
+`python -m harness throttle runs/<T1b> [--exclude s2,s3 | --exclude none] [--split-min 30] [--json out.json]`.
+For every task handed out in the one-slot phase (before the second `start_schedule` minute) and in the
+twelve-slot phase: **start-up** = branch first pushed (`claim`) minus the hand-out (`session_message kind=task` for a
+follow-up; `session_launch`, or the routine's `run_once_at`, for a launch), and **coding** = first READY minus
+`claim`, counted only for hand-outs at least 5 min before window end (both phases; otherwise the slow tasks handed out
+late in the short twelve-slot phase are dropped and a slowdown is masked). The statistic is the ratio of geometric
+means (twelve slots over one) with a Welch 90% interval on the log scale; tolerance 1.25. In a slot-mode log (any
+follow-ups) the rule reads **follow-up start-ups only** (like with like: the phases mix launches and follow-ups in
+different proportions): **STOP** if their interval lies wholly above 1.25, **CLEAR** if wholly below, else
+**INCONCLUSIVE** (proceed; report the ratio beside SCALE). The launch-only ratio gives a **launch flag**, the coding
+ratio a **coding flag** (interval wholly above 1.25); flags are not stops. A log without follow-ups (one session per
+task, T1) decides on every hand-out, as PLAN-v6 did. Slots lost to
 operator-logged failures unrelated to the service are excluded first: `--exclude s2,s3`, or by default every slot
 with an operator `worker_down` (reason starting `operator`); `--exclude none` keeps all. Pure Python (the same
-statistic as `analysis/v6.py` `throttle_v6`). On T1 (`runs/T1-2026-09-28`, s2 and s3 excluded) it reads start-up
-1.13 (90% 0.98-1.31), coding 1.16 (0.87-1.54): INCONCLUSIVE.
+statistic as `analysis/v7.py` `throttle_v7`). On T1 (`runs/T1-2026-09-28`, s2 and s3 excluded, no follow-ups) it
+reads start-up 1.13 (90% 0.98-1.31), coding 1.17 (0.88-1.55): INCONCLUSIVE.
 
 Reported beside it (no longer the rule): the PLAN-v4 activity measure (session launches + READY per slot-minute,
 one-slot phase against twelve-slot phase, the old 0.8 threshold's reading, an approximate interval, the median
@@ -495,7 +518,7 @@ plan-usage page (M0).
 
 Before T1:
 1. Set `[repo]`, `[tasks]`, `[tests]` and `[launcher] launch_dir` / `prompt_dir` in all phase configs
-   (the same values). Run `python -m harness validate-tasks --config config.sweep-n12-k3.toml` against the GitHub
+   (the same values). Run `python -m harness validate-tasks --config config.sweep-n12-k5.toml` against the GitHub
    remote; 220/220.
 2. The CLI check (PLAN-v4 section 7.3): fill in the UNVERIFIED reviewer template and set
    `verified = true`, or the harness refuses.
@@ -511,18 +534,26 @@ minute 30. Log `plan_usage` notes before, at minutes 25, 35 and 55,
 and after (`python -m harness log --config config.t1.toml --run-id <T1> --type note --field text="plan_usage pct=37 src=..."`).
 After: meter M1, then `python -m harness throttle runs/<T1>`.
 
-T1b (`config.t1b.toml`, K = 3): as T1, with s1 alone for 90 min and s2-s12 from minute 90 to 120; then
-`python -m harness throttle runs/<T1b>` (with `--exclude` for any slot lost to an operator-logged failure).
+Before T1b (PLAN-v7 rule 4a, free): `calibrate --parallel 5` and `--parallel 1` on the same heads; read the Max
+plan's usage (5-hour and weekly) before and after it and log each reading:
+`python -m harness log --config config.t1b.toml --run-id <T1b> --plan-usage "session=37% week=12% src=claude.ai"`.
 
-For each sweep window (`config.sweep-n{1,12}-k{1,3}.toml`, in the order of PLAN-v6 section 5.1, `v6.v6_order`;
-T2 windows under PLAN-v4/v5 used `config.t2.toml`):
+T1b (`config.t1b.toml`, K = 5): read the credit meter **immediately before the first launch** (`run --meter-start`),
+then `run`; s1 alone for 30 min, s2-s12 from minute 30 to 45. Log `plan_usage` before and after. **10 min after grace
+end**, read the meter again and log it (`--type meter`; if it has not moved, wait 10 min and read again). Then
+`python -m harness throttle runs/<T1b>` (with `--exclude` for any slot lost to an operator-logged failure) and
+`predict.py --usd-per-task <c> --balance <meter after>` for rule 2, with c = (before - after) / T1b's tasks.
+A `reviewer_rate_limited` note in any window means the reviewing account hit a limit (rule 4a).
+
+For each sweep window (`config.sweep-n{1,12}-k5.toml`, and `-k1` in the 500-task design, in the order of PLAN-v7
+section 5.1, `v7.v6_order`, over the pre-registered days; T2 windows under PLAN-v4/v5 used `config.t2.toml`):
 1. Choose `run_id` (e.g. `2026-10-02-N12-r1`) and a seed; the config fixes N.
-2. **Meter before:** read the credits meter.
+2. **Meter before:** read the credits meter immediately before the window's first launch (`run --meter-start`).
 3. `python -m harness reset --config <phase config> --run-id <id> --seed <seed>`. Check that the
    printed `sandbox_commit` is the frozen tag and `branches_deleted` looks right.
 4. `python -m harness run --config <phase config> --run-id <id> --meter-start <credits>`. Check the
    printed phase, kind, N, window, session timeout and models, and type the phase name to start. The harness
-   launches one session per task (re-arming the slot routines) and sends rework as follow-ups. Keep the terminal open; it logs every event.
+   launches one session per slot (`claude --cloud`), hands later tasks to it by follow-up, retires it after 4 tasks or 6 messages, and sends rework as follow-ups. Keep the terminal open; it logs every event.
 5. During the window:
    - The harness marks a slot down itself after 3 failed launches in a row (`worker_down`, printed as
      `SLOT sK DOWN`); it stays down for the window. Otherwise, a slot whose sessions keep failing to launch for
@@ -532,11 +563,12 @@ T2 windows under PLAN-v4/v5 used `config.t2.toml`):
 6. At "WINDOW END" the harness disables the slot routines (disable any it lists as failed by hand); stop
    every open session. The harness hands out no more work and
    finishes reviews and merges through the grace period.
-7. **Meter after:** `python -m harness log --config <phase config> --run-id <id> --type meter --field credits_left_usd=<x> --field source=operator`.
+7. **Meter after**, 10 min after grace end: `python -m harness log --config <phase config> --run-id <id> --type meter --field credits_left_usd=<x> --field source=operator`.
 8. `python -m harness validate-log runs/<id>`, then `python -m harness status --config <phase config> --run-id <id>`.
    Check `notes` in `run.json` for `VOID:`. A voided window is rerun under a new id, never spliced.
-9. Before the next window, check that the predicted balance after the rest of the chosen design stays above
-   $50 (PLAN-v4 section 7.2).
+9. Before the next window, rule 2 (PLAN-v7): the cumulative cost per task, c = (meter before T1b - meter now) / every
+   hand-out since T1b began, must let the rest of the chosen design fit above $50 (`v7.rule2_before_window`); if
+   not, drop windows in the pre-registered order.
 
 ## Decisions made where PLAN-v3 / SCHEMA.md were silent
 

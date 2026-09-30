@@ -406,8 +406,8 @@ GRADES_V6 = {"SCALE": (CONFIRMATORY, "primary"), "SCALE-nf": (CONFIRMATORY, "pri
              "EFFORT": (DESCRIPTIVE, None)}
 
 
-def _res(id_, statement, value, rule, code, note=""):
-    g, role = GRADES_V6[id_]
+def _res(id_, statement, value, rule, code, note="", grades=None):
+    g, role = (grades or GRADES_V6)[id_]
     return dict(id=id_, grade=g, counts_as=g, role=role, statement=statement, value=value, rule=rule, code=code, note=note)
 
 
@@ -484,13 +484,20 @@ def _oc(path, key, default=None):
     return d if d is not None else default
 
 
-def code_outcomes_v6(R):
+def code_outcomes_v6(R, oc=None, grades=None, order=None):
+    """oc / grades / order: the operating characteristics, grades and result order to print (default PLAN-v6's;
+    PLAN-v7 passes its own)."""
+    oc = V6_OC if oc is None else oc
+    _res_ = globals()["_res"]
+
+    def _res(*a, **k):
+        return _res_(*a, grades=grades, **k)
     O = []
     nlo, nhi, khi, klo = R["N_low"], R["N_high"], R["K_hi"], R["K_lo"]
     sc = R["scale"]
     code = "N/A" if sc["p"] != sc["p"] else ("BEND" if sc["p"] < ALPHA_TEST else "LINEAR-NOT-REJECTED")
     ci = sc.get("per_agent_ratio_ci") or [math.nan, math.nan]
-    so = V6_OC.get("SCALE") or {}
+    so = oc.get("SCALE") or {}
     O.append(_res("SCALE", f"Agent-side scaling: with {khi} reviewers (review not binding), per-agent finished output at "
                   f"N = {nhi} is lower than at N = {nlo}", dict(p=sc["p"], per_agent_ratio=sc["per_agent_ratio"], ci95=ci),
                   f"one-sided NB LR test of gamma < 0 on the N = {nhi}, K = {khi} windows and every N = {nlo} window "
@@ -510,7 +517,7 @@ def code_outcomes_v6(R):
     O.append(_res("SCALE-nf", "SCALE without the windows that ran out of tasks more than 10 min before their end",
                   None if s2 is None else dict(p=s2["p"], per_agent_ratio=s2["per_agent_ratio"]), "as SCALE", c2, n2))
     cp = R.get("cap")
-    co = V6_OC.get("CAP") or {}
+    co = oc.get("CAP") or {}
     if cp is None or cp.get("p") != cp.get("p"):
         O.append(_res("CAP", f"The review ceiling: at N = {nhi}, fewer reviewers finish less", None,
                       "needs N_high windows at two reviewer counts", "N/A", "not in this design"))
@@ -526,7 +533,7 @@ def code_outcomes_v6(R):
                       f"{_f(co.get('power_linear'))} (linear workers) / {_f(co.get('power_amdahl'))} (Amdahl); "
                       f"under USL workers the model predicts no ceiling (rate {_f(co.get('rate_usl'))})"))
     c = R["collision"]
-    c_oc = V6_OC.get("COLL") or {}
+    c_oc = oc.get("COLL") or {}
     if not c["fit_ok"]:
         cc = "NOT-DETECTED" if c["events"] < v5.MIN_COLLISIONS_V5 else "N/A"
         nc = f"{c['events']} collisions in {c['n']} first merge-queue passes: not modelled, coded as not detected"
@@ -557,7 +564,7 @@ def code_outcomes_v6(R):
                             f"(attainment {_f(v['attainment'])}, reviewers busy {_f(v['reviewer_util_mean'])})"
                             for k, v in cf.items() if v)))
     e = R["escape"]
-    eo = V6_OC.get("ESC_N") or {}
+    eo = oc.get("ESC_N") or {}
     if not e["trend_fit_ok"]:
         ce, ne = "N/A", f"{e['events']} escapes (< {v5.MIN_ESCAPES_V5}) or one size only: not modelled"
     else:
@@ -622,7 +629,7 @@ def code_outcomes_v6(R):
     else:
         O.append(_res("EFFORT", "Escapes by review effort (post-hoc max-effort re-review)", ef["matched"], "descriptive", "REPORTED",
                       "; ".join(f"{eff}: {v['heads']} heads, agreement {_f(v['agreement'])}" for eff, v in ef["matched"].items())))
-    rank = {k: i for i, k in enumerate(V6_ORDER)}
+    rank = {k: i for i, k in enumerate(order or V6_ORDER)}
     return sorted(O, key=lambda o: rank.get(o["id"], len(rank)))
 
 

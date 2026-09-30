@@ -1,7 +1,7 @@
 """python -m harness {reset,run,routines-setup,calibrate,throttle,dry-run,status,log,validate-tasks,validate-log,make-toy} --config FILE
 
 Real phases use config.t0.toml, config.t1.toml, config.t2.toml, config.t1b.toml or one of the sweep cells
-config.sweep-n{1,12}-k{1,3}.toml (PLAN-v4 section 7, PLAN-v6 sections 5-6); there is no default real config, so
+config.sweep-n{1,12}-k{1,5}.toml (PLAN-v4 section 7, PLAN-v7 sections 5-6); there is no default real config, so
 --config is required."""
 from __future__ import annotations
 
@@ -244,6 +244,19 @@ def cmd_log(args) -> int:
     """Operator entries: meter readings, notes, worker_down / worker_restart (worker = slot id, s1..sN)."""
     cfg = _cfg(args)
     run_dir = cfg.path(cfg.run.output_dir) / args.run_id
+    if args.plan_usage is not None:
+        # PLAN-v7 rule 4a: the Max plan's usage indicator (the local Opus reviewers bill it), read by the operator
+        text = " ".join(args.plan_usage.split())
+        if not text:
+            print("not logged: --plan-usage needs the readings, e.g. \"session=37% week=12% src=claude.ai\"",
+                  file=sys.stderr)
+            return 2
+        ev = EventLog(run_dir / "events.jsonl", Clock(1.0)).note(f"plan_usage {text}")
+        print(json.dumps(ev))
+        return 0
+    if args.type is None:
+        print("not logged: give --type (or --plan-usage)", file=sys.stderr)
+        return 2
     fields = {}
     for kv in args.field or []:
         k, _, v = kv.partition("=")
@@ -341,7 +354,7 @@ def main(argv=None) -> int:
         else:
             p.add_argument("--config", required=True,
                            help="a phase config: config.t0.toml, config.t1.toml, config.t2.toml, config.t1b.toml, "
-                                "config.sweep-n{1,12}-k{1,3}.toml")
+                                "config.sweep-n{1,12}-k{1,5}.toml")
         p.set_defaults(fn=fn)
         return p
 
@@ -387,8 +400,10 @@ def main(argv=None) -> int:
     p.add_argument("--run-id")
     p = add("log", cmd_log)
     p.add_argument("--run-id", required=True)
-    p.add_argument("--type", required=True, choices=sorted(EVENT_FIELDS))
+    p.add_argument("--type", choices=sorted(EVENT_FIELDS))
     p.add_argument("--field", action="append", help="key=value (value parsed as JSON if possible)")
+    p.add_argument("--plan-usage", metavar="READINGS",
+                   help="log a `note plan_usage <READINGS>` (PLAN-v7 rule 4a), e.g. \"session=37%% week=12%% src=claude.ai\"")
     add("validate-tasks", cmd_validate_tasks)
     p = sub.add_parser("validate-log")
     p.add_argument("run_dir")

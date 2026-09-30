@@ -19,12 +19,14 @@ What to do now, on the same branch `{branch}`:
 3. Run the visible tests, `{visible_cmd}`, and make them pass.
 4. Commit with a message starting `READY: {task_id}`, push `{branch}`, then stop.
 
-Do not ask questions; nobody will answer. Time budget: about {budget_min} minutes.
+Do not ask questions; nobody will answer. Time budget: about {budget_min} minutes; if you have spent more than
+{stop_min}, push what you have with a `READY: {task_id}` message (after {timeout_min} minutes without one the harness
+gives the task up). Push only to `{branch}`, exactly that name.
 
 ## Rules that always apply (re-read these before every commit, even if your earlier context was summarised)
 
 - Every commit that finishes work on a task must have a message starting `READY: {task_id}`. Without it the harness never sees the work.
-- Push only the task's own branch, `claude/task-{task_id}`. Never push `main`, never force-push, never rebase.
+- Push only the task's own branch, exactly `claude/task-{task_id}` (that exact name, nothing appended). Never push `main`, never force-push, never rebase.
 - Never open, comment on or merge a pull request. The harness reviews and merges; pull requests are not used.
 - Never edit `TASKS.json`. Never ask questions; nobody will answer.
 

@@ -43,6 +43,19 @@ class ReviewError(RuntimeError):
     pass
 
 
+class ReviewRateLimited(ReviewError):
+    """The reviewer call failed on a rate or usage limit of the reviewing account (the owner's Max plan): logged as
+    a `reviewer_rate_limited` note beside the review_error, so plan-usage exhaustion is visible (PLAN-v7 rule 4a)."""
+
+
+_RATE_LIMIT = re.compile(r"rate[ _-]?limit|usage limit|limit reached|too many requests|\b429\b|overloaded|"
+                         r"quota|try again (later|in)|resets? at", re.I)
+
+
+def is_rate_limit_text(text: str) -> bool:
+    return bool(_RATE_LIMIT.search(text or ""))
+
+
 @dc.dataclass
 class ReviewPacket:
     task: Task
@@ -214,7 +227,9 @@ class CommandReviewer(Reviewer):
                                    lambda e, n: ReviewError(f"reviewer did not start ({n} attempts): {e}"),
                                    lambda e: ReviewError(f"reviewer timed out after {rc.timeout_s}s"))
         if p.returncode != 0:
-            raise ReviewError(f"reviewer exit {p.returncode}: {(p.stderr or p.stdout).strip()[:500]}")
+            detail = (p.stderr or p.stdout or "").strip()
+            cls = ReviewRateLimited if is_rate_limit_text(detail) else ReviewError
+            raise cls(f"reviewer exit {p.returncode}: {detail[:500]}")
         text, tin, tout = p.stdout, None, None
         if rc.output_format == "json":
             try:
@@ -222,6 +237,8 @@ class CommandReviewer(Reviewer):
             except json.JSONDecodeError as e:
                 raise ReviewError(f"reviewer output is not JSON: {e}")
             text = obj.get("result") or ""
+            if obj.get("is_error") and is_rate_limit_text(str(text) + " " + str(obj.get("subtype") or "")):
+                raise ReviewRateLimited(f"reviewer rate-limited: {str(text).strip()[:300]}")
             usage = obj.get("usage") or {}
             tin = usage.get("input_tokens")
             tout = usage.get("output_tokens")

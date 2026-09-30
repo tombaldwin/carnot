@@ -16,7 +16,8 @@ from harness.events import read_events
 
 HERE = Path(__file__).resolve().parent.parent
 PHASE_FILES = {"t0": "config.t0.toml", "t1": "config.t1.toml", "t2": "config.t2.toml", "t1b": "config.t1b.toml",
-               **{f"sweep-n{n}-k{k}": f"config.sweep-n{n}-k{k}.toml" for n in (1, 12) for k in (1, 3)}}
+               **{f"sweep-n{n}-k{k}": f"config.sweep-n{n}-k{k}.toml" for n in (1, 12) for k in (1, 5)}}
+V7_PHASES = ("t1b", "sweep-n1-k1", "sweep-n1-k5", "sweep-n12-k1", "sweep-n12-k5")
 
 
 @pytest.mark.parametrize("phase,fname", sorted(PHASE_FILES.items()))
@@ -37,7 +38,11 @@ def test_shipped_phase_configs_match_their_phase(phase, fname):
     assert r.environment_id.startswith("env_") and r.model == cfg.run.worker_model and r.lead_s == 30
     assert config_mod.repo_slug(r.source_url) == "tombaldwin/carnot-sandbox"
     assert "{instruction}" in r.runner and "RemoteTrigger" in r.runner and r.slot_routines == {}
-    assert cfg.run.task_timeout_min == 25 and cfg.run.task_budget_min == 20
+    if phase in V7_PHASES:    # PLAN-v7 rule 6 and the prompt's budget below it
+        assert cfg.run.task_timeout_min == 10 and cfg.run.task_budget_min == 5
+        assert cfg.launcher.messages_per_session == 6
+    else:
+        assert cfg.run.task_timeout_min == 25 and cfg.run.task_budget_min == 20
     # one session per slot (T0d, 2026-09-29: about $0.50 per session provisioned); later tasks by follow-up
     assert cfg.launcher.session_per == "slot" and cfg.launcher.tasks_per_session == 4
     assert cfg.path(cfg.launcher.next_task_prompt).exists()
@@ -45,7 +50,7 @@ def test_shipped_phase_configs_match_their_phase(phase, fname):
 
 def _without_run_and_k(d):
     d = {k: v for k, v in d.items() if k != "run"}
-    d["reviewer"] = {k: v for k, v in d["reviewer"].items() if k != "parallel"}
+    d["reviewer"] = {k: v for k, v in d["reviewer"].items() if k not in ("parallel", "max_downtime_min")}
     return d
 
 
@@ -57,9 +62,15 @@ def test_phase_files_differ_only_in_run_and_reviewers():
     shapes = {p: (d["run"]["kind"], d["run"]["n_workers"], d["run"]["window_min"], d["run"]["warmup_min"],
                   d["run"]["grace_min"], d["reviewer"]["parallel"]) for p, d in data.items()}
     assert shapes == {"t0": ("trial", 1, 45, 0, 10, 1), "t1": ("trial", 12, 60, 10, 10, 1),
-                      "t2": ("pilot", 1, 60, 10, 10, 1), "t1b": ("trial", 12, 120, 0, 10, 3),
-                      **{f"sweep-n{n}-k{k}": ("sweep", n, 45, 5, 10, k) for n in (1, 12) for k in (1, 3)}}
-    assert data["t1b"]["run"]["start_schedule"] == [[0, 1], [90, 12]]
+                      "t2": ("pilot", 1, 60, 10, 10, 1), "t1b": ("trial", 12, 45, 0, 10, 5),
+                      **{f"sweep-n{n}-k{k}": ("sweep", n, 15, 3, 10, k) for n in (1, 12) for k in (1, 5)}}
+    assert data["t1b"]["run"]["start_schedule"] == [[0, 1], [30, 12]]
+    for p in V7_PHASES:   # PLAN-v7: 10-min timeout, 5-min budget, 2-s poll, 3 min of reviewer downtime
+        r = data[p]["run"]
+        assert (r["task_timeout_min"], r["task_budget_min"], r["poll_interval_s"],
+                data[p]["reviewer"]["max_downtime_min"]) == (10, 5, 2, 3), p
+    assert all(d["run"]["poll_interval_s"] <= 3 for d in data.values())   # no config polls every 15 s any more
+    assert not (HERE / "config.sweep-n1-k3.toml").exists() and not (HERE / "config.sweep-n12-k3.toml").exists()
     assert not (HERE / "config.sweep-n1.toml").exists() and not (HERE / "config.sweep-n12.toml").exists()   # v5
     assert data["t0"]["run"]["first_task"] == "T145" and data["t0"]["run"]["probe_followup"] is True
     assert all(d["run"]["first_task"] == "" and d["run"]["probe_followup"] is False for p, d in data.items() if p != "t0")
@@ -92,13 +103,16 @@ def _write(tmp_path, fname, **run):
 @pytest.mark.parametrize("fname,field,value", [
     ("config.t2.toml", "kind", "sweep"),          # a T2 window run as a sweep would never enter the pilot
     ("config.t2.toml", "n_workers", 3),
-    ("config.sweep-n12-k3.toml", "window_min", 90),
+    ("config.sweep-n12-k5.toml", "window_min", 45),
+    ("config.sweep-n1-k5.toml", "poll_interval_s", 15),
+    ("config.sweep-n12-k5.toml", "task_budget_min", 20),
     ("config.sweep-n1-k1.toml", "worker_model", "claude-sonnet-5"),
     ("config.sweep-n12-k1.toml", "warmup_min", 10),
-    ("config.t1b.toml", "start_schedule", [[0, 1], [30, 12]]),
+    ("config.t1b.toml", "start_schedule", [[0, 1], [90, 12]]),
+    ("config.t1b.toml", "window_min", 40),
     ("config.t1.toml", "start_schedule", [[0, 12]]),
     ("config.t2.toml", "phase", "t3"),
-    ("config.sweep-n12-k3.toml", "task_timeout_min", 40),
+    ("config.sweep-n12-k5.toml", "task_timeout_min", 25),
     ("config.t0.toml", "first_task", "T001"),
     ("config.t0.toml", "probe_followup", False),
 ])
@@ -111,16 +125,16 @@ def test_run_refuses_config_not_matching_its_phase(tmp_path, capsys, fname, fiel
 
 
 def test_run_prints_banner_and_needs_confirmation(tmp_path, capsys, monkeypatch):
-    p = _write(tmp_path, "config.sweep-n12-k3.toml")
+    p = _write(tmp_path, "config.sweep-n12-k5.toml")
     monkeypatch.setattr(cli, "input_fn", lambda prompt: "yes")     # must type the phase name
     rc = cli.main(["run", "--config", str(p), "--run-id", "x"])
     out = capsys.readouterr()
     assert rc == 2 and "not confirmed" in out.err
-    for s in ("phase sweep-n12-k3", "kind           sweep", "N (slots)      12", "window         45 min (warm-up 5",
-              "timeout 25 min", "claude-haiku-4-5", "claude-opus-5-5", "sandbox-v1", "K = 3 in parallel",
+    for s in ("phase sweep-n12-k5", "kind           sweep", "N (slots)      12", "window         15 min (warm-up 3",
+              "timeout 10 min", "claude-haiku-4-5", "claude-opus-5-5", "sandbox-v1", "K = 5 in parallel",
               "one per slot (up to 4 tasks each"):
         assert s in out.out, s
-    monkeypatch.setattr(cli, "input_fn", lambda prompt: "sweep-n12-k3")
+    monkeypatch.setattr(cli, "input_fn", lambda prompt: "sweep-n12-k5")
     rc = cli.main(["run", "--config", str(p), "--run-id", "x"])
     assert rc == 2 and "run `python -m harness reset" in capsys.readouterr().err   # confirmed; stops at reset.json
 
@@ -165,10 +179,10 @@ def test_start_schedule_starts_groups_at_their_minute(tmp_path):
 
 
 @pytest.mark.parametrize("fname,k,msg", [
-    ("config.sweep-n12-k3.toml", 1, "pre-registered with 3 reviewers"),
-    ("config.sweep-n1-k1.toml", 3, "pre-registered with 1 reviewers"),
-    ("config.sweep-n12-k1.toml", 2, "a sweep window runs K = 1 or 3 reviewers"),
-    ("config.t1b.toml", 1, "pre-registered with 3 reviewers"),
+    ("config.sweep-n12-k5.toml", 1, "pre-registered with 5 reviewers"),
+    ("config.sweep-n1-k1.toml", 5, "pre-registered with 1 reviewers"),
+    ("config.sweep-n12-k1.toml", 3, "a sweep window runs K = 1 or 5 reviewers"),
+    ("config.t1b.toml", 3, "pre-registered with 5 reviewers"),
 ])
 def test_run_refuses_wrong_reviewer_count(tmp_path, capsys, fname, k, msg):
     p = _write(tmp_path, fname)
@@ -179,6 +193,6 @@ def test_run_refuses_wrong_reviewer_count(tmp_path, capsys, fname, k, msg):
 
 
 def test_sweep_k_variants_share_slot_routines():
-    assert config_mod.routine_group("sweep-n12-k1") == config_mod.routine_group("sweep-n12-k3") == "sweep-n12"
-    assert config_mod.routine_group("sweep-n1-k3") == "sweep-n1"
+    assert config_mod.routine_group("sweep-n12-k1") == config_mod.routine_group("sweep-n12-k5") == "sweep-n12"
+    assert config_mod.routine_group("sweep-n1-k5") == "sweep-n1"
     assert config_mod.routine_group("t1b") == "t1b" and config_mod.routine_group("t1") == "t1"

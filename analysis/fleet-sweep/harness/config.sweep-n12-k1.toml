@@ -1,28 +1,28 @@
-# Sweep cell N = 12, K = 1 (PLAN-v6 s5.1): 45-min window (5 min warm-up, 10 min grace), 1 parallel reviewer; order v6.v6_order.
+# Sweep cell N = 12, K = 1 (PLAN-v7 s5.1): 15-min window (3 min warm-up, 10 min grace), 1 parallel reviewer; order v7.v6_order. Only in the 500-task design (the 2 x 2 and CAP).
 # One config per phase; `python -m harness run` refuses a config whose kind / n_workers / window /
 # warm-up / grace / start schedule / session timeout / first task / models differ from the phase's pre-registered shape
 # (harness/config.py PHASES), prints them, and asks for confirmation (or --yes).
 # Everything marked UNVERIFIED must be checked before a real run; `run` refuses to start while a
-# template it needs still has verified = false. Only [run] and [reviewer] parallel differ between the
-# phase files (t0, t1, t2, t1b, sweep-n1-k1, sweep-n1-k3, sweep-n12-k1, sweep-n12-k3).
+# template it needs still has verified = false. Only [run] and [reviewer] parallel / max_downtime_min differ between
+# the phase files (t0, t1, t2: historical; t1b, sweep-n1-k1, sweep-n1-k5, sweep-n12-k1, sweep-n12-k5: PLAN-v7).
 
 [run]
 phase = "sweep-n12-k1"
 kind = "sweep"
 n_workers = 12
-window_min = 45
-warmup_min = 5
+window_min = 15
+warmup_min = 3
 grace_min = 10
 start_schedule = []
-task_timeout_min = 25          # no READY this long after a launch / rework message: abandoned
-task_budget_min = 20           # stated in the session prompt
+task_timeout_min = 10          # PLAN-v7 rule 6: no READY this long after a hand-out / rework message: timed out, session retired
+task_budget_min = 5            # stated in the prompt ("about 5 minutes; after 8, push what you have"): below the timeout
 first_task = ""
 probe_followup = false
 task_order_seed = 1234          # pass --seed per window to `reset`; the seed used is recorded
 worker_model = "claude-haiku-4-5"     # Haiku 4.5 (model id string UNVERIFIED)
 reviewer_model = "claude-opus-5-5"    # Opus 5.5 (model id string UNVERIFIED)
 output_dir = "/Users/tom/git/carnot-sandbox-tasks/work/runs"   # private until the study ends (review reasons describe tasks)
-poll_interval_s = 15
+poll_interval_s = 2            # PLAN-v7: a 15-s poll quantised every start-up leg (rule 1); a fetch every 2 s is cheap
 end_grace_early_when_idle = false   # real windows always run the full grace period
 grace_reviews = true            # reviews of already-submitted changes continue during grace
 
@@ -64,8 +64,8 @@ prompt_template = "prompts/reviewer.md"
 timeout_s = 900
 retries = 1
 retry_backoff_s = 60
-max_downtime_min = 10           # summed downtime of the K reviewers / K; more voids the window
-parallel = 1                    # K reviewer threads r1..rK on one FIFO queue (PLAN-v6 section 6)
+max_downtime_min = 3            # PLAN-v7: summed downtime of the K reviewers / K; more voids a 15-min window
+parallel = 1                    # K reviewer threads r1..rK on one FIFO queue (PLAN-v7: K in {1, 5})
 
 [launcher]
 # Sessions (harness README, "Worker model"): one per slot, below. command: the `claude --cloud` template below,
@@ -104,6 +104,7 @@ rework_prompt = "prompts/rework.md"
 # "task" = one session per task (T0-T1).
 session_per = "slot"
 tasks_per_session = 4       # T0e 2026-09-29: a session auto-compacted during its 6th task, lost the rules and never sent READY
+messages_per_session = 6    # also retire after 6 messages of any kind (launch prompt, next tasks, rework): T0e compacted after 8
 next_task_prompt = "prompts/next-task.md"
 prompt_dir = "/Users/tom/git/carnot-sandbox-tasks/work/prompts"   # private (work/ is gitignored in the tasks repo)
 

@@ -95,6 +95,12 @@ def require_verified(cfg: Config) -> None:
 
 
 # ----------------------------------------------------------------------------- prompts
+def _limits(cfg: Config) -> dict:
+    """{timeout_min}: the session timeout; {stop_min}: when the prompt says to push what it has (2 min before it)."""
+    t = cfg.run.task_timeout_min
+    return dict(timeout_min=f"{t:g}", stop_min=f"{max(1.0, t - 2):g}")
+
+
 def _template(cfg: Config, rel: str) -> str:
     return _COMMENT.sub("", cfg.path(rel).read_text(), count=1)
 
@@ -110,7 +116,7 @@ def task_prompt(cfg: Config, task: Task) -> str:
     crit = "\n".join(f"- {c}" for c in task.acceptance) or "- (none given)"
     return _template(cfg, cfg.launcher.worker_prompt).format(
         task_id=task.id, title=task.title, text=task.text.strip(), acceptance=crit,
-        branch=branch_for(cfg, task.id), budget_min=f"{cfg.run.task_budget_min:g}", visible_cmd=VISIBLE_CMD_TEXT)
+        branch=branch_for(cfg, task.id), budget_min=f"{cfg.run.task_budget_min:g}", visible_cmd=VISIBLE_CMD_TEXT, **_limits(cfg))
 
 
 def next_task_message(cfg: Config, task: Task) -> str:
@@ -119,13 +125,13 @@ def next_task_message(cfg: Config, task: Task) -> str:
     crit = "\n".join(f"- {c}" for c in task.acceptance) or "- (none given)"
     return _template(cfg, cfg.launcher.next_task_prompt).format(
         task_id=task.id, title=task.title, text=task.text.strip(), acceptance=crit,
-        branch=branch_for(cfg, task.id), budget_min=f"{cfg.run.task_budget_min:g}", visible_cmd=VISIBLE_CMD_TEXT)
+        branch=branch_for(cfg, task.id), budget_min=f"{cfg.run.task_budget_min:g}", visible_cmd=VISIBLE_CMD_TEXT, **_limits(cfg))
 
 
 def harness_doc(cfg: Config) -> str:
     """HARNESS.md for routine mode (reset writes it to main)."""
     return _template(cfg, cfg.launcher.harness_doc).format(
-        budget_min=f"{cfg.run.task_budget_min:g}", visible_cmd=VISIBLE_CMD_TEXT).lstrip("\n")
+        budget_min=f"{cfg.run.task_budget_min:g}", visible_cmd=VISIBLE_CMD_TEXT, **_limits(cfg)).lstrip("\n")
 
 
 def rework_message(cfg: Config, task_id: str, attempt_no: int, head: str, cause: str, cause_text: str,
@@ -134,7 +140,7 @@ def rework_message(cfg: Config, task_id: str, attempt_no: int, head: str, cause:
     return _template(cfg, cfg.launcher.rework_prompt).format(
         task_id=task_id, attempt_no=attempt_no, head_short=head[:12], cause=cause, cause_text=cause_text,
         details=details, branch=branch_for(cfg, task_id), budget_min=f"{cfg.run.task_budget_min:g}",
-        visible_cmd=VISIBLE_CMD_TEXT)
+        visible_cmd=VISIBLE_CMD_TEXT, **_limits(cfg))
 
 
 def probe_message(cfg: Config, task_id: str) -> str:

@@ -95,6 +95,8 @@ def check_event(ev):
     if not isinstance(ev.get("t"), str) or not T_RE.match(ev["t"]):
         errs.append(f"{typ}: bad t {ev.get('t')!r}")
     spec = dict(FIELDS[typ])
+    if typ == "submit" and "merged_main" in ev:      # PLAN-v7: whether the branch merged origin/main (optional)
+        spec["merged_main"] = B
     if typ in REVIEWER_FIELD_TYPES and "reviewer" in ev:
         spec["reviewer"] = S
     extra = set(ev) - set(spec) - {"t", "type"}

@@ -22,6 +22,8 @@ Acceptance criteria:
 1. Run `git fetch origin`, create the branch `{branch}` from `origin/main`, and push it at once, before any
    other work: `git checkout -b {branch} origin/main && git push -u origin {branch}`. Work only on this
    branch.
+   The branch name must be exactly `{branch}`: these characters in this case, nothing added before or after
+   it. The harness finds your work only under that exact name.
 2. Implement the task. Change only what the task needs.
 3. Run the visible tests, `{visible_cmd}`, and make them pass.
 4. Commit. Your final commit message must start with `READY: {task_id}` (for example
@@ -32,8 +34,9 @@ Acceptance criteria:
 6. Push the branch (`git push origin {branch}`), then stop. Do not wait for a review and do not start
    anything else.
 
-Time budget: about {budget_min} minutes. If you are running out of time, commit and push what you have with
-a `READY: {task_id}` message rather than nothing.
+Time budget: about {budget_min} minutes. If you have spent more than {stop_min} minutes, commit and push what you
+have at once with a `READY: {task_id}` message rather than nothing: after {timeout_min} minutes without a READY
+the harness gives the task up.
 
 Never push to `main` or to any other branch, never force-push, and never edit `TASKS.json`.
 
@@ -45,7 +48,7 @@ message on its own.
 ## Rules that always apply (re-read these before every commit, even if your earlier context was summarised)
 
 - Every commit that finishes work on a task must have a message starting `READY: <task id>`. Without it the harness never sees the work.
-- Push only the task's own branch, `claude/task-<task id>`. Never push `main`, never force-push, never rebase.
+- Push only the task's own branch, exactly `claude/task-<task id>` (that exact name, nothing appended). Never push `main`, never force-push, never rebase.
 - Never open, comment on or merge a pull request. The harness reviews and merges; pull requests are not used.
 - Never edit `TASKS.json`. Never ask questions; nobody will answer.
 

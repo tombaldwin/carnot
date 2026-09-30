@@ -6,7 +6,7 @@ only this file plus `runs/<run_id>/run.json`. Times are UTC ISO 8601 with millis
 ## run.json
 
 `n_workers` is the number of **slots** (harness README "Worker model"); `notes` carries
-`phase=<t0|t1|t2|t1b|sweep-n1-k1|sweep-n1-k3|sweep-n12-k1|sweep-n12-k3>` (PLAN-v4/v5 logs: `sweep-n1|sweep-n12`),
+`phase=<t0|t1|t2|t1b|sweep-n1-k5|sweep-n12-k5|sweep-n1-k1|sweep-n12-k1>` (PLAN-v6 plans: `-k3`; PLAN-v4/v5 logs: `sweep-n1|sweep-n12`),
 `worker_model_design=session-per-slot` (from 2026-09-29; `session-per-task` for T0-T1 and `[launcher] session_per =
 "task"`) and `session_per=<slot|task> sessions_launched=<n> tasks_handed_out=<n> tasks_per_session_mean=<x>
 tasks_per_session=<n,n,…>` (one count per session launched), so cost per task can be read from the credit meter
@@ -42,7 +42,7 @@ time).
 | `session_timeout` | slot, task, session_id | no READY within `task_timeout_min` (25) of the task's hand-out (launch or `kind=task` message) or of the last rework message: the task is abandoned, never handed out again in the window, and its slot freed. One session per slot: the session is retired (it still gets rework for its earlier tasks) and the slot's next task goes to a fresh session |
 | `claim` | worker, task, branch | the task's branch first seen on the remote (its session's first push); worker = the slot. Branch `claude/task-<id>`, or another `claude/*` branch whose `READY: <id>` commit names the task |
 | `claim_race` | worker, task | RETIRED: no claims with one session per task; never logged by the current harness, accepted for older logs |
-| `submit` | worker, task, branch, head, attempt_no, lines_changed, files, k, m | a `READY: <id>` push; worker = the slot the session held. attempt_no = 1 for the first submission of the task, 2+ for re-submissions. k = changes in flight at this moment (submitted, not finished or censored), m = those sharing a file with this change. k, m are logged on every submit but analysed on attempt_no = 1 |
+| `submit` | worker, task, branch, head, attempt_no, lines_changed, files, k, m, merged_main | a `READY: <id>` push; worker = the slot the session held. `merged_main` (PLAN-v7; absent in older logs): whether the branch contains a merge of `origin/main` (a merge commit, not on main, with a later parent on main), for the drag-versus-throttling descriptive (coding time at N = 12 vs N = 1 split by merged main or not). attempt_no = 1 for the first submission of the task, 2+ for re-submissions. k = changes in flight at this moment (submitted, not finished or censored), m = those sharing a file with this change. k, m are logged on every submit but analysed on attempt_no = 1 |
 | `review_start` | task, head, queue_depth, reviewer | reviewer handed this change; queue_depth = changes waiting for review, excluding every change under review (this one included) |
 | `review_end` | task, head, verdict (`approve`/`request_changes`), reason, tokens_in, tokens_out, duration_s, reviewer | |
 | `review_error` | task, head, error, reviewer | reviewer call failed (retried once; after that the change goes back to the front of the queue, for any reviewer, and this reviewer backs off) |
@@ -55,7 +55,7 @@ time).
 | `reviewer_idle` / `reviewer_busy` | reviewer | that reviewer's state changes (for V per busy hour; per reviewer since PLAN-v6) |
 | `usage` | worker, tokens_in, tokens_out, cost_usd_est | per-worker usage increment, if a product token source exists (none is known; PLAN-v4 section 7.5). If logged in T1, `harness throttle` uses it for abort rule 1 |
 | `meter` | credits_left_usd, source | credit meter reading entered by the operator |
-| `note` | text | anything else. Operator readings for abort rule 1 use `plan_usage pct=<%> src=<where read>` (PLAN-v4 section 7.5); the harness's own prefixes are listed in harness/README.md |
+| `note` | text | anything else. Operator readings of the Max plan's usage (PLAN-v7 rule 4a: before and after the 4a calibration and T1b; the local reviewers bill the plan) are `plan_usage <readings>`, e.g. `plan_usage session=37% week=12% src=claude.ai`, logged with `harness log --plan-usage "<readings>"` (PLAN-v4 section 7.5 used `plan_usage pct=<%> src=<where read>`); the harness's own prefixes are listed below and in harness/README.md |
 
 Harness `note` lines for sessions (not events): `slots n=… task_timeout_min=… task_budget_min=…`,
 `tasks_exhausted n=<N>` (logged when the last task in the list is handed to a slot), `launch_detail …`
@@ -63,7 +63,11 @@ Harness `note` lines for sessions (not events): `slots n=… task_timeout_min=�
 `session_id_found=true|false session_id=<cse_…> after_s=<s>` when the lookup ends),
 `session_launch_failed …` (routine mode: the re-arm failed or was not confirmed), `routine_disabled …` /
 `routine_disable_failed …` (window end), `routine_rate_wait …`, `routine_budget_refund trigger=… reason=not_started`,
-`routine_list_runs_failed …`, `followup_failed …`, `session_retired slot=… session=… tasks=<n> reason=<tasks_per_session|timeout|followup_failed|launch_failed|no_session_id> reachable=<true|false>`
+`routine_list_runs_failed …`, `followup_failed …`, `session_retired slot=… session=… tasks=<n> reason=<tasks_per_session|messages_per_session|timeout|followup_failed|launch_failed|no_session_id> reachable=<true|false>`
+(`messages_per_session`: the session has had `[launcher] messages_per_session` (6) messages of any kind: its launch
+prompt, next tasks and rework), `reviewer_rate_limited reviewer=… task=… head=… error=…` (beside a `review_error` whose
+call failed on a rate or usage limit of the reviewing account), `ambiguous branch … not attributed` (a
+`claude/task-…` branch whose name fits two task ids)
 (one session per slot: the session gets no new tasks; an unreachable one gets no rework either, and its tasks'
 bounces abandon them), `task_requeued task=… reason=followup_failed` (a `kind=task` hand-out could not be
 delivered: the task goes back to the front of the list for a fresh session), `session_summary …` (at grace end:
@@ -81,8 +85,8 @@ submissions per slot-open hour), start-up time (the task's hand-out, `session_la
 kind=task`, -> claim), slot busy share, timeouts.
 
 **Design caveat (one session per slot):** a slot's tasks share one session's context (up to `tasks_per_session`,
-8), so a later task can be helped or hindered by what the session saw on earlier ones. This applies to N = 1 and
-N = 12 alike (every slot's session carries up to 8 tasks), so it does not bias the N contrast, but per-task
+4, and `messages_per_session`, 6), so a later task can be helped or hindered by what the session saw on earlier ones. This applies to N = 1 and
+N = 12 alike (every slot's session carries up to 4 tasks, or 6 messages), so it does not bias the N contrast, but per-task
 quantities (start-up, coding time, escapes) are not comparable with the one-session-per-task logs of T0-T1. A
 follow-up task's start-up has no provisioning or clone in it (the session already has the repository); `derive.py`
 reports launch and follow-up start-ups apart.
@@ -94,3 +98,15 @@ it includes the re-arm lead (`[launcher.routine] lead_s`, 30 s, less the ~9 s th
 the routine firing delay (runs start 40-75 s after `run_once_at`, observed 2026-09-28), provisioning and the
 clone. The `run_once_at` in the first `launch_detail` note lets the analysis split off the lead. Runs launched
 with `claude --cloud` (mode `command` / `manual`) are not comparable on this measure.
+
+**Event times and the watcher's poll.** `claim` and `submit` are timestamped when the watcher's poll sees the push,
+not at the push. Until 2026-09-30 every config polled every 15 s, so every start-up and coding leg in T0-T0e is
+quantised to about 16.5 s (fetch included): T0d / T0e's "launch start-up 29 s, log-sd 0.02" and "follow-up 15 s,
+0.04" are the hand-out-to-next-poll distance, not the sessions' speed. All configs now poll every 2 s
+(`[run] poll_interval_s`; PLAN-v7 phases require it).
+
+**Branch attribution.** A branch `claude/task-<rest>` belongs to the known task id equal to `<rest>` ignoring case, or
+to the known id that `<rest>` starts with, followed by `-`, `_`, `.`, `/` or `+` and any suffix (T0e's session pushed
+`claude/task-t039-<suffix>`); a name that fits two or more ids is not attributed (`ambiguous branch` note). The first
+push of such a branch is the task's `claim` (a note records the name). Other `claude/*` branches are attributed only by
+a `READY: <id>` commit, as before.

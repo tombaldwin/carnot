@@ -272,8 +272,13 @@ def decide(startup: dict, coding: dict, tol: float = TOLERANCE) -> tuple[str, bo
     return dec, bool(clo is not None and clo > tol)
 
 
-def task_legs(run: dict, events: list[dict]) -> list[dict]:
-    """Per task: slot, launch (s from window start), start-up s, coding s (as analysis/v6.task_legs)."""
+CODING_CUTOFF_S = 300.0   # PLAN-v7: a coding leg counts only for hand-outs >= 5 min before window end (both phases)
+
+
+def task_legs(run: dict, events: list[dict], coding_cutoff_s: float = CODING_CUTOFF_S) -> list[dict]:
+    """Per task: slot, hand-out (s from window start), start-up s, coding s (as analysis/v7.task_legs_v7). A coding leg
+    counts only for a task handed out at least ``coding_cutoff_s`` before window end, so slow tasks handed out late in
+    a short many-slot phase are not dropped selectively (READY after window end), which would mask a slowdown."""
     t0 = _t(run["window_start"])
     we = (_t(run["window_end"]) - t0).total_seconds()
     rows: dict[str, dict] = {}
@@ -306,7 +311,8 @@ def task_legs(run: dict, events: list[dict]) -> list[dict]:
         if "launch" not in r or "claim" not in r:
             continue
         up = r["claim"] - (r["launch"] if r.get("followup") else max(r["launch"], once.get(task, r["launch"])))
-        code = r["ready"] - r["claim"] if "ready" in r and r["ready"] <= we else None
+        code = (r["ready"] - r["claim"] if "ready" in r and r["ready"] <= we and r["launch"] <= we - coding_cutoff_s
+                else None)
         out.append(dict(task=task, slot=r.get("slot"), launch=r["launch"], followup=bool(r.get("followup")),
                         startup_s=up if up > 0 else None,
                         coding_s=code if code is not None and code > 0 else None))
@@ -358,13 +364,18 @@ def throttle_report(run_dir: Path, skip_min: float = SKIP_MIN, exclude: list[str
                          level)
     code = welch_log_ratio([x["coding_s"] for x in A if x["coding_s"]], [x["coding_s"] for x in B if x["coding_s"]],
                            level)
-    dec, flag = decide(up, code, tol)
-    # One session per slot: the phases mix launch start-ups (provisioning + clone) and follow-up start-ups in
-    # different proportions, so the follow-up-only and launch-only ratios are reported beside the rule.
+    # One session per slot (PLAN-v7 rule 1): the phases mix launch start-ups (provisioning + clone) and follow-up
+    # start-ups in different proportions, so the rule decides on follow-ups only; a launch interval wholly above the
+    # tolerance is a flag. Logs without follow-ups (one session per task) decide on every hand-out, as before.
     up_f = welch_log_ratio([x["startup_s"] for x in A if x["startup_s"] and x["followup"]],
                            [x["startup_s"] for x in B if x["startup_s"] and x["followup"]], level)
     up_l = welch_log_ratio([x["startup_s"] for x in A if x["startup_s"] and not x["followup"]],
                            [x["startup_s"] for x in B if x["startup_s"] and not x["followup"]], level)
+    slot_mode = any(x["followup"] for x in legs)
+    measure = "followup" if slot_mode else "mixed"
+    dec, flag = decide(up_f if slot_mode else up, code, tol)
+    llo = up_l["ci"][0]
+    launch_flag = bool(slot_mode and llo is not None and llo > tol)
 
     def med(xs):
         xs = [x for x in xs if x]
@@ -381,7 +392,8 @@ def throttle_report(run_dir: Path, skip_min: float = SKIP_MIN, exclude: list[str
                 rule=(f"abort rule 1 (PLAN-v6): start-up ratio (geometric means, many slots / one), Welch "
                       f"{level:.0%} interval on the log scale; STOP if wholly above {tol}, CLEAR if wholly below, "
                       "else INCONCLUSIVE; coding interval wholly above it is a flag"),
-                decision=dec, coding_flag=flag, tolerance=tol, level=level, split_min=split_min,
+                decision=dec, coding_flag=flag, launch_flag=launch_flag, measure=measure, tolerance=tol, level=level,
+                split_min=split_min, coding_cutoff_s=CODING_CUTOFF_S,
                 excluded=excl, excluded_source=("operator worker_down" if auto else "--exclude"),
                 startup=rnd(up), coding=rnd(code), phases=phases, activity=act,
                 followup_tasks=sum(1 for x in legs if x["followup"]),
@@ -393,22 +405,29 @@ def format_report(r: dict) -> str:
         lo, hi = x["ci"]
         return "n/a" if x["ratio"] is None else f"{x['ratio']:.3f} (90% {lo:.3f}-{hi:.3f})"
     A, B = r["phases"]["A"], r["phases"]["B"]
-    L = [f"Throttling (abort rule 1, PLAN-v6), {r['run_dir']}",
+    L = [f"Throttling (abort rule 1, PLAN-v6 / v7), {r['run_dir']}",
          f"  split at minute {r['split_min']:g}; excluded slots: {','.join(r['excluded']) or 'none'} "
          f"({r['excluded_source']})",
          f"  one slot  : {A['tasks']} tasks; start-up median {A['startup_median_s']} s, coding median "
          f"{A['coding_median_s']} s",
          f"  many slots: {B['tasks']} tasks; start-up median {B['startup_median_s']} s, coding median "
          f"{B['coding_median_s']} s",
-         f"  start-up ratio {iv(r['startup'])}  n = {r['startup']['n_a']} / {r['startup']['n_b']}",
+         f"  start-up ratio, every hand-out {iv(r['startup'])}  n = {r['startup']['n_a']} / {r['startup']['n_b']}"
+         + ("  (reported only)" if r.get("measure") == "followup" else ""),
          f"  coding ratio   {iv(r['coding'])}  n = {r['coding']['n_a']} / {r['coding']['n_b']}"
          + ("  FLAG: coding interval wholly above the tolerance (reported beside SCALE, not a stop)"
             if r["coding_flag"] else ""),
-         f"  tolerance {r['tolerance']}: {r['decision']}"]
+         ]
     if r.get("followup_tasks"):
-        L.append(f"  one session per slot: {r['followup_tasks']} tasks handed out by follow-up; start-up ratio, "
-                 f"follow-ups only {iv(r['startup_followup_only'])}, launches only {iv(r['startup_launch_only'])} "
-                 "(reported only)")
+        f, l = r["startup_followup_only"], r["startup_launch_only"]
+        L.append(f"  one session per slot ({r['followup_tasks']} tasks handed out by follow-up): the rule reads follow-ups")
+        L.append(f"  start-up ratio, follow-ups only {iv(f)}  n = {f['n_a']} / {f['n_b']}  <- rule 1")
+        L.append(f"  start-up ratio, launches only   {iv(l)}  n = {l['n_a']} / {l['n_b']}"
+                 + ("  FLAG: launch interval wholly above the tolerance (reported beside SCALE, not a stop)"
+                    if r.get("launch_flag") else ""))
+    L.append(f"  coding legs only for hand-outs >= {r.get('coding_cutoff_s', 300) / 60:g} min before window end")
+    L.append(f"  tolerance {r['tolerance']} on the {'follow-up' if r.get('measure') == 'followup' else 'every-hand-out'} "
+             f"start-up: {r['decision']}")
     act = r.get("activity") or {}
     if "phases" in act:
         L.append(format_activity(act))

@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
-"""Primary analysis of the fleet sweep. Default: PLAN-v6 (v6.py); `--plan v5` / `v4` / `v3`: the superseded codings.
+"""Primary analysis of the fleet sweep. Default: PLAN-v7 (v7.py); `--plan v6` / `v5` / `v4` / `v3`: the superseded codings.
 
-PLAN-v6 (N x reviewers K; graded in advance, PLAN-v6 section 5, v6.GRADES_V6):
+PLAN-v7 (the v6 tests under a budget in cloud tasks; graded in advance, PLAN-v7 section 5, v7.GRADES_V7): as PLAN-v6
+below with N_hi = 12 and K_hi = 5 (the design's non-binding reviewer count), 15-min windows, CAP only when the design
+has an N_hi, K = 1 window (the 500-task design; N/A otherwise), THROTTLE (rule 1b) on follow-up start-ups only, and
+COST [descriptive] (tasks handed out, sessions and reviews per window).
+
+    python score.py runs/<w1> ... runs/<wn> --out-dir results/ [--effort-log effort.jsonl]
+
+PLAN-v6 (superseded; `--plan v6`; N x reviewers K; graded in advance, PLAN-v6 section 5, v6.GRADES_V6):
   SCALE [confirmatory, primary]      per-agent finished output falls from N = 1 to N = 12 on the K = 3 windows (review
                                      not binding) and every N = 1 window; also SCALE-nf.
   CAP [confirmatory, secondary]      at N = 12, finished output with K = 1 is lower than with K = 3 (the review ceiling).
@@ -1142,14 +1149,22 @@ def main():
     ap.add_argument("--out-dir", default=".")
     ap.add_argument("--rival-rework", choices=list(READINGS), default=PLAN_V4["rival_rework"])
     ap.add_argument("--escape-model", choices=ESCAPE_MODELS, default=PLAN_V4["escape_model"])
-    ap.add_argument("--plan", choices=["v6", "v5", "v4", "v3"], default="v6",
-                    help="v6 (default): PLAN-v6; v5: PLAN-v5; v4: the superseded PLAN-v4.2 codings; v3: PLAN-v3 (design search only)")
+    ap.add_argument("--plan", choices=["v7", "v6", "v5", "v4", "v3"], default="v7",
+                    help="v7 (default): PLAN-v7; v6: PLAN-v6; v5: PLAN-v5; v4: the superseded PLAN-v4.2 codings; v3: PLAN-v3 (design search only)")
     a = ap.parse_args()
     derived = [derive_dir(r) for r in a.runs]
     bad = [d["summary"]["run_id"] for d in derived if d["summary"]["kind"] != "sweep"]
     if bad:
         print(f"warning: non-sweep runs scored: {bad}", file=sys.stderr)
-    if a.plan == "v6":
+    if a.plan == "v7":
+        import v5
+        import v7
+        from derive import load_run
+        effort = v5.load_effort_log(a.effort_log) if a.effort_log else None
+        raw = [load_run(r) for r in a.runs]
+        R = _clean(v7.score_v7(derived, effort_rows=effort, raw=raw))
+        md = v7.render_md_v7(R)
+    elif a.plan == "v6":
         import v5
         import v6
         from derive import load_run

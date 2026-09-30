@@ -1,20 +1,32 @@
 # Fleet sweep (study 2): pre-registered analysis
 
-**Default: PLAN-v6** (`v6.py`; `score.py` / `predict.py` run it unless given `--plan v5` or `--plan v4`). T1 showed one
-serial reviewer binding at N = 12, so v6 crosses fleet size N in {1, 12} with parallel reviewers K in {1, 3}: six 45-min
-windows at each (N = 1, K) cell, three at (12, 3), four at (12, 1), after T1b (one slot 90 min, then twelve 30 min).
-SCALE (per-agent output bends, on the K = 3 and N = 1 windows) is confirmatory primary; CAP (one reviewer caps output at
-N = 12) and COLL confirmatory secondary; the rest descriptive. Design: `design-search/DESIGN-SEARCH-v6.md`; operating
-characteristics: `../OPERATING-CHARACTERISTICS-v6.md` (`v6.V6_OC`); T1 parameters: `t1_params.py` ->
-`design-search/t1_params_public.json` (numbers only; per-task rows go to a private file outside this repo). The v6
-process is `synth.py --v6` (`V6_TRUTH`, K reviewers); `validate_schema.py` and `derive.py` accept `n_reviewers` and the
-`reviewer` field (SCHEMA.md).
+**Default: PLAN-v7** (`v7.py`; `score.py` / `predict.py` run it unless given `--plan v6`, `v5` or `v4`). The harness
+now launches with `claude --cloud` (cloud-session credits, about $0.45 per task in T0d / T0e) and keeps one session per
+slot, so the budget is about 400 tasks. v7 keeps v6's tests (SCALE, CAP, COLL; `v6.py`) in 15-min windows of one
+length: N = 1 x 12 (six at K = 1, six at K = 5) and N = 12 x 3 at K = 5 after T1b (one slot 30 min, then twelve 10 min);
+rule 2 picks the 300-, 400- or 500-task variant (the last adds an N = 12, K = 1 window for CAP) from T1b's cost per
+task. Rule 1 reads follow-up start-ups only (`v7.throttle_v7`). Design: `design-search/DESIGN-SEARCH-v7.md`; operating
+characteristics: `../OPERATING-CHARACTERISTICS-v7.md` (`v7.V7_OC`); T0d / T0e parameters: `t0de_params.py` ->
+`design-search/t0de_params_public.json` (numbers only). The v7 process is `synth.py --v7` (`V7_TRUTH`, one session per
+slot).
 
 ```sh
-$PY predict.py [--session-h-per-day 20] [--cells 1x1=6 1x3=6 12x3=3 12x1=4]   # PLAN-v6 pre-registration table
-$PY score.py ../runs/<w1> ... ../runs/<w19> --out-dir results/                 # PLAN-v6 codings
-$PY -c "import v6, derive; r, e = derive.load_run('<T1b dir>'); print(v6.throttle_v6(r, e, exclude=[]))"   # abort rule 1
-$PY synth.py --v6 --family measured --seed 1 --out /tmp/synth-v6                  # T1b + the v6 sweep, synthetic
+$PY predict.py [--budget 300|400|500] [--usd-per-task 0.45 [--balance <meter after T1b>]]   # PLAN-v7 table, rule 2
+$PY score.py ../runs/<w1> ... ../runs/<w15> --out-dir results/                                # PLAN-v7 codings
+$PY -c "import v7, derive; r, e = derive.load_run('<T1b dir>'); print(v7.throttle_v7(r, e, split_min=30))"   # rule 1
+$PY synth.py --v7 --budget 400 --family measured --seed 1 --out /tmp/synth-v7                  # T1b + the v7 sweep
+```
+
+*Superseded, kept behind `--plan v6`:* PLAN-v6 (`v6.py`). T1 showed one serial reviewer binding at N = 12, so v6
+crossed fleet size N in {1, 12} with parallel reviewers K in {1, 3}: six 45-min windows at each (N = 1, K) cell, three
+at (12, 3), four at (12, 1), after T1b (one slot 90 min, then twelve 30 min). Design: `design-search/DESIGN-SEARCH-v6.md`;
+operating characteristics: `../OPERATING-CHARACTERISTICS-v6.md` (`v6.V6_OC`); T1 parameters: `t1_params.py` ->
+`design-search/t1_params_public.json`. The v6 process is `synth.py --v6` (`V6_TRUTH`, K reviewers); `validate_schema.py`
+and `derive.py` accept `n_reviewers` and the `reviewer` field (SCHEMA.md).
+
+```sh
+$PY predict.py --plan v6 [--session-h-per-day 20] [--cells 1x1=6 1x3=6 12x3=3 12x1=4]   # PLAN-v6 pre-registration table
+$PY score.py --plan v6 ../runs/<w1> ... ../runs/<w19> --out-dir results/                 # PLAN-v6 codings
 ```
 
 *Superseded, kept behind `--plan v5`:* PLAN-v5 (review automated and fast; `v5.py`, decisions 44-53). The v5 design and
@@ -45,7 +57,10 @@ cd /Users/tom/git/carnot/analysis/fleet-sweep/analysis
 | `common.py` | Model curves (USL, Amdahl, linear), timestamps, the negative-binomial likelihood (Poisson with fixed CV 0.3), logistic / conditional-logistic fitters, the model-form collision fit. |
 | `validate_schema.py` | Checks `events.jsonl` (+ `run.json`) against SCHEMA.md: fields, types, enums, timestamps, ordering, serial reviews, attempt numbering, merges only of approved + green heads; for session logs, slot busy/idle pairing, launches and messages only on busy slots, no more busy slots than `n_workers`. Exit 1 on errors. |
 | `derive.py` | Per-window quantities (PLAN-v3 section 6 accounting) and per-PR / per-approval tables, with the task-supply truncation and flag (minute 110) and the grace-end V correction; `--pilot` pools the live T1 + T2 runs (and nothing else) into the pilot parameters, including `review_time_cv` and the flag `review_cv_ok`. |
-| `v5.py` | **PLAN-v5 codings** (default): SCALE (one-sided NB LR, per-agent output vs N), FAMILY (four rivals with free levels), ESC / ESC-N, COLL / COLL-m / COLL-k (collision exposure j), UTIL, LAMBDA, BOUNCE, EFFORT (post-hoc effort log reader and comparison); `score_v5`, `render_md_v5`, `predictions_v5`, `DESIGN_V5`, `GRADES_V5`, `V5_ORDER`, `V5_OC`. |
+| `v7.py` | **PLAN-v7** (default): the three task-budget designs (`DESIGNS_V7`, `T1B_V7`), rule 1 in slot mode (`throttle_v7`, follow-up start-ups; `task_legs_v7`), rule 2 (`choose_design`, `design_tasks`), the budget ledger (`cost_ledger`), `score_v7` / `render_md_v7` (the v6 codings re-graded, `GRADES_V7`, `V7_ORDER`, `V7_OC`), `predictions_v7`, `reviews_estimate`, `ABORT_V7`. |
+| `v6.py` | PLAN-v6 codings (`--plan v6`): SCALE, CAP (`k_test`), K1, CAPFIT, THROTTLE (`throttle_v6`), and the v5 results; `code_outcomes_v6` takes the OC / grade tables to print, so v7 reuses it. |
+| `t0de_params.py` | T0d / T0e event logs -> `design-search/t0de_params_public.json` (numbers only): hand-out delays, launch and follow-up start-ups, coding, rework, reviews, meter per task. |
+| `v5.py` | PLAN-v5 codings (`--plan v5`): SCALE (one-sided NB LR, per-agent output vs N), FAMILY (four rivals with free levels), ESC / ESC-N, COLL / COLL-m / COLL-k (collision exposure j), UTIL, LAMBDA, BOUNCE, EFFORT (post-hoc effort log reader and comparison); `score_v5`, `render_md_v5`, `predictions_v5`, `DESIGN_V5`, `GRADES_V5`, `V5_ORDER`, `V5_OC`. |
 | `predict.py` | Default: the PLAN-v5 pre-registration table (each rival's ratio to N = 1, illustrative counts and reviewer / merge-queue loads, budget and degrade rule, abort rules, OC statement); no pilot input needed. `--plan v4`: the PLAN-v4.1/v4.2 pre-registration table: point predictions for the four rivals at N = 1 and 12 (per window and per three windows), the O2 interval, design-point loads, abort rules 3-5 (rule 4 from the calibration log, `--calibration`), the task-supply check, and the operating-characteristics statement (v4.2 framing, the uncapped-truth footnote, the completion-share bias). `--v3-gate` adds the superseded PLAN-v3 gate for reference. |
 | `score.py` | Default: PLAN-v5 (`v5.score_v5`; `--effort-log` for the post-hoc re-review, `--pilot` optional). `--plan v4`: PLAN-v4.2 (in this order): O2, the primary quantitative test, and P1, the manipulation check (capped vs best uncapped likelihood ratio), each also without the windows flagged for running out of tasks (O2-nf, P1-nf), the reviewer-pace test Vdur (Welch on log review durations; conditional on `review_cv_ok`), and the descriptive S3 (b_review), O3, Vratio, S1r/S2r, four-way ranking, escapes, collisions and bounce causes, each graded; writes `RESULTS-draft.md` and `results.json`. `--plan v3` gives the superseded codings. |
 | `synth.py` | Discrete-event simulation of the harness (workers, FIFO reviewer, serial merge queue, re-reviews, censoring) writing SCHEMA.md logs under a chosen truth, with the harness's `task_supply` / `tasks_exhausted` notes. `--v4` gives PLAN-v4's pilot and sweep layout; `--sessions` the current worker model (one session per task in N slots, rework to the next free slot, 25-min timeout; decision 43). The default is the long-running-worker model the operating characteristics were computed with. |

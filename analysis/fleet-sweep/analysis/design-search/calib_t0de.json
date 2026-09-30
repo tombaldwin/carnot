@@ -1,0 +1,95 @@
+{
+ "reps": 1000,
+ "family": "measured",
+ "measures": {
+  "T0d|first_submissions": {
+   "observed": 16,
+   "sim_median": 16.0,
+   "sim_p5": 9.0,
+   "sim_p95": 25.0,
+   "observed_percentile": 0.515
+  },
+  "T0d|handed_out": {
+   "observed": 16,
+   "sim_median": 17.0,
+   "sim_p5": 10.0,
+   "sim_p95": 26.0,
+   "observed_percentile": 0.44949999999999996
+  },
+  "T0d|reviews": {
+   "observed": 27,
+   "sim_median": 28.0,
+   "sim_p5": 15.0,
+   "sim_p95": 44.0,
+   "observed_percentile": 0.4665
+  },
+  "T0d|request_changes_share": {
+   "observed": 0.48148148148148145,
+   "sim_median": 0.4166666666666667,
+   "sim_p5": 0.25,
+   "sim_p95": 0.5714285714285714,
+   "observed_percentile": 0.748
+  },
+  "T0d|review_s_median": {
+   "observed": 23.522,
+   "sim_median": 20.557250000000003,
+   "sim_p5": 18.531325000000002,
+   "sim_p95": 23.162725000000002,
+   "observed_percentile": 0.972
+  },
+  "T0d|merges": {
+   "observed": 14,
+   "sim_median": 15.0,
+   "sim_p5": 8.0,
+   "sim_p95": 24.0,
+   "observed_percentile": 0.4095
+  },
+  "T0d|startup_launch_median": {
+   "observed": 28.709999918937683,
+   "sim_median": 29.790749967098236,
+   "sim_p5": 19.157799994945528,
+   "sim_p95": 50.339299893379206,
+   "observed_percentile": 0.459
+  },
+  "T0d|coding_median": {
+   "observed": 91.56300008296967,
+   "sim_median": 83.63450002670288,
+   "sim_p5": 51.384275031089786,
+   "sim_p95": 154.2153001248836,
+   "observed_percentile": 0.605
+  },
+  "T0d|rework_median": {
+   "observed": 48.175999879837036,
+   "sim_median": 49.30649995803833,
+   "sim_p5": 30.169999945163728,
+   "sim_p95": 89.44520015716553,
+   "observed_percentile": 0.4694694694694695
+  },
+  "T0e|first_submissions_pre": {
+   "observed": 5,
+   "sim_median": 3.0,
+   "sim_p5": 2.0,
+   "sim_p95": 6.0,
+   "observed_percentile": 0.8625
+  },
+  "T0e|startup_followup_median": {
+   "observed": 15.049000024795532,
+   "sim_median": 15.633249938488007,
+   "sim_p5": 9.670575082302094,
+   "sim_p95": 26.63337512612343,
+   "observed_percentile": 0.457
+  },
+  "T0e|coding_median": {
+   "observed": 65.55400013923645,
+   "sim_median": 84.79899990558624,
+   "sim_p5": 50.570975029468535,
+   "sim_p95": 154.6158251047134,
+   "observed_percentile": 0.215
+  }
+ },
+ "lambda_T0d_sim": {
+  "median": 21.333333333333332,
+  "p5": 12.0,
+  "p95": 33.333333333333336
+ }
+}

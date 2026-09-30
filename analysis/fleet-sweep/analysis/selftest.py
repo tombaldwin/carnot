@@ -581,7 +581,7 @@ def unit_v5(outdir=None):
 def unit_v6(outdir=None):
     """PLAN-v6: K parallel reviewers in synth, validate_schema and derive (per-reviewer busy time); v6_order; the CAP
     K-contrast on constructed windows; revised rule 1 (throttle_v6) on simulated T1b logs; the T1 calibration check;
-    CLI end to end (synth --v6 -> validate -> score, default plan v6 -> predict, default plan v6)."""
+    CLI end to end (synth --v6 -> validate -> score --plan v6 -> predict --plan v6)."""
     import v6
     from synth import make_truth_v6, simulate_study_v6
     out = {}
@@ -649,25 +649,101 @@ def unit_v6(outdir=None):
     out["synth --v6: T1b + the recommended cells, every log valid"] = r.returncode == 0 and ok_v and len(runs) == 1 + sum(
         v6.cells_of(v6.DESIGN_V6["cells"]).values())
     sw = [str(x) for x in runs if "-T1b" not in x.name]
-    r = subprocess.run([PY, str(HERE / "score.py"), *sw, "--out-dir", str(d / "res")], capture_output=True, text=True)
+    r = subprocess.run([PY, str(HERE / "score.py"), "--plan", "v6", *sw, "--out-dir", str(d / "res")], capture_output=True, text=True)
     ok = r.returncode == 0 and (d / "res" / "results.json").exists()
     R = json.loads((d / "res" / "results.json").read_text()) if ok else {}
     ids = [o["id"] for o in R.get("outcomes", [])]
-    out["score (default plan v6): every result graded as v6.GRADES_V6, in v6.V6_ORDER"] = ok and ids == [
+    out["score --plan v6: every result graded as v6.GRADES_V6, in v6.V6_ORDER"] = ok and ids == [
         i for i in v6.V6_ORDER if i in ids] and all(
         (o["grade"], o["role"]) == v6.GRADES_V6[o["id"]] for o in R["outcomes"]) and {"SCALE", "CAP", "COLL"} <= set(ids)
     cap = next((o for o in R.get("outcomes", []) if o["id"] == "CAP"), {})
     out["score v6: CAP codes CAPPED under near-linear workers (T1's rates), K = 1 reviewer busy >= 0.8"] = (
         cap.get("code") == "CAPPED" and R["util"]["12x1"]["reviewer_util_mean"] >= 0.8)
-    r = subprocess.run([PY, str(HERE / "predict.py"), "--json", str(d / "p.json")], capture_output=True, text=True)
+    r = subprocess.run([PY, str(HERE / "predict.py"), "--plan", "v6", "--json", str(d / "p.json")], capture_output=True, text=True)
     P = json.loads((d / "p.json").read_text()) if r.returncode == 0 else {}
     lin = {(x["N"], x["K"]): x for x in P.get("predictions", []) if x["rival"] == "linear"}
-    out["predict (default plan v6): linear binds at N = 12, K = 1 only; budget (a) and (b); abort rules"] = (
+    out["predict --plan v6: linear binds at N = 12, K = 1 only; budget (a) and (b); abort rules"] = (
         r.returncode == 0 and lin.get((12, 1), {}).get("binds") and not lin[(12, 3)]["binds"] and not lin[(1, 1)]["binds"]
         and P["budget_plan_usage"] and len(P["abort_rules"]) == len(v6.ABORT_V6))
     r5 = subprocess.run([PY, str(HERE / "predict.py"), "--plan", "v5"], capture_output=True, text=True)
     out["predict --plan v5 still runs (PLAN-v5 kept)"] = r5.returncode == 0 and "PLAN-v5" in r5.stdout
     return out
+
+def unit_v7(outdir=None):
+    """PLAN-v7: one session per slot in synth (sessions retire after 4 tasks; rework goes to the task's own session;
+    logs valid), rule 1 on follow-up start-ups (throttle_v7) on simulated slot-mode T1b logs, rule 2 (choose_design),
+    the T0d / T0e calibration check, and the CLI end to end (synth --v7 -> validate -> score, default plan v7 -> predict,
+    default plan v7)."""
+    import v7
+    from synth import make_task_pool, make_truth_v7
+    out = {}
+    tr = make_truth_v7("measured", n_reviewers=1)
+    run, ev = simulate(tr, 1, seed=11, window_min=45, warmup_min=0, grace_min=10, task_pool=make_task_pool(tr, 7), run_id="u-v7", t0=T0)
+    errs, _ = validate_schema.validate_events(list(enumerate(ev, 1)), run)
+    launches = [e for e in ev if e["type"] == "session_launch"]
+    follows = [e for e in ev if e["type"] == "session_message" and e.get("kind") == "task"]
+    per = Counter(e["session_id"] for e in launches + follows)
+    sess_of = {e["task"]: e["session_id"] for e in launches + follows}
+    rw = [e for e in ev if e["type"] == "session_message" and e.get("kind") == "rework"]
+    msgs = Counter(e["session_id"] for e in launches + follows + [e for e in ev if e["type"] == "session_message"
+                                                                  and e.get("kind") == "rework"])
+    retired_msgs = sum(1 for e in ev if e["type"] == "note" and "reason=messages_per_session" in e.get("text", ""))
+    out["synth v7: one session per slot, at most 4 tasks per session, retired after 4 tasks or 6 messages, log valid"] = (
+        not errs and not validate_schema.check_run(run) and max(per.values()) <= 4
+        and len(launches) >= -(-(len(launches) + len(follows)) // 4) and len(follows) > 0
+        and all(msgs[sid] <= 6 + 2 for sid in per) and retired_msgs >= 0)
+    out["synth v7: rework goes to the session that did the task"] = bool(rw) and all(e["session_id"] == sess_of[e["task"]] for e in rw)
+    sys.path.insert(0, str(HERE / "design-search"))
+    import dsim7
+    dec = lambda t, s: v7.throttle_v7(*dsim7.t1b_sim(t, 30, 15, 5, s), split_min=30)
+    st = [dec("measured/thr=2", 700 + i) for i in range(20)]
+    cl = [dec("measured", 800 + i) for i in range(20)]
+    la = [dec("measured/thrlaunch=2", 900 + i) for i in range(20)]
+    out["throttle_v7: a 2x service slowdown at twelve slots -> STOP (follow-ups) in >= 18 of 20 simulated T1b"] = sum(
+        r["decision"] == "STOP" for r in st) >= 18
+    out["throttle_v7: no slowdown -> never STOP, CLEAR in >= 18 of 20"] = (all(r["decision"] != "STOP" for r in cl)
+                                                                          and sum(r["decision"] == "CLEAR" for r in cl) >= 18)
+    out["throttle_v7: launch-only 2x slowdown -> follow-up rule never STOPs, launch flag in >= 15 of 20"] = (
+        all(r["decision"] != "STOP" for r in la) and sum(r["launch_flag"] for r in la) >= 15)
+    out["choose_design (rule 2): $0.30 -> 500, $0.45 -> 400, $0.55 -> 300, $0.65 -> stop (T1b's 87 tasks spent)"] = (
+        [v7.choose_design(c, spent_t1b=v7.T1B_V7["tasks"] * c) for c in (0.30, 0.45, 0.55, 0.65)] == ["500", "400", "300", None])
+    r2 = v7.rule2_before_window(236.0, 236.0 - 0.60 * 200, 200, {(1, 5): 8, (12, 5): 2})
+    out["rule 2 before a window: cumulative c, drops N = 1 beyond eight, then N = 12 beyond two, never below"] = (
+        abs(r2["c"] - 0.60) < 1e-9 and all(d == (1, 5) for d in r2["drop"][:0]) and r2["cells"].get((12, 5), 0) >= 2
+        and v7.rule2_before_window(236.0, 200.0, 80, {(1, 5): 10, (12, 5): 3})["fits"])
+    o = v7.v6_order(v7.DESIGN_V7["cells"])
+    out["v7 order: two N = 1 windows first, N = 12 never first or last"] = o[0][0] == 1 and o[1][0] == 1 and o[-1][0] == 1
+    r = subprocess.run([PY, str(HERE / "design-search" / "calib_t0de.py"), "--reps", "200", "--out",
+                        str(Path(tempfile.mkdtemp()) / "c.json")], capture_output=True, text=True)
+    rows = {(x.split()[0], x.split()[1]): float(x.split()[-1]) for x in r.stdout.splitlines()[1:] if x.strip()}
+    out["calib_t0de: T0d lambda and T0e follow-up start-up inside the simulator's 5-95% band"] = (
+        r.returncode == 0 and 0.05 <= rows.get(("T0d", "first_submissions"), -1) <= 0.95
+        and 0.05 <= rows.get(("T0e", "startup_followup_median"), -1) <= 0.95)
+    d = Path(tempfile.mkdtemp(prefix="v7-"))
+    r = subprocess.run([PY, str(HERE / "synth.py"), "--v7", "--family", "measured", "--seed", "5", "--out", str(d / "runs")],
+                       capture_output=True, text=True)
+    runs = sorted((d / "runs").iterdir()) if (d / "runs").exists() else []
+    ok_v = runs and all(subprocess.run([PY, str(HERE / "validate_schema.py"), str(x)], capture_output=True).returncode == 0 for x in runs)
+    out["synth --v7: T1b + the 400-task design's cells, every log valid"] = r.returncode == 0 and bool(ok_v) and len(runs) == 1 + sum(
+        v7.cells_of(v7.DESIGN_V7["cells"]).values())
+    sw = [str(x) for x in runs if "-T1b" not in x.name]
+    r = subprocess.run([PY, str(HERE / "score.py"), *sw, "--out-dir", str(d / "res")], capture_output=True, text=True)
+    ok = r.returncode == 0 and (d / "res" / "results.json").exists()
+    R = json.loads((d / "res" / "results.json").read_text()) if ok else {}
+    ids = [o["id"] for o in R.get("outcomes", [])]
+    out["score (default plan v7): every result graded as v7.GRADES_V7, in v7.V7_ORDER, with the COST ledger"] = (
+        ok and R.get("plan") == "v7" and ids == [i for i in v7.V7_ORDER if i in ids]
+        and all((o["grade"], o["role"]) == tuple(v7.GRADES_V7[o["id"]]) for o in R["outcomes"])
+        and {"SCALE", "COLL", "COST"} <= set(ids) and sum(x["tasks"] for x in R["cost"]) > 0)
+    r = subprocess.run([PY, str(HERE / "predict.py"), "--usd-per-task", "0.45", "--json", str(d / "p.json")], capture_output=True, text=True)
+    P = json.loads((d / "p.json").read_text()) if r.returncode == 0 else {}
+    out["predict (default plan v7): three designs costed in tasks, rule 2 picks 400 at $0.45, abort rules"] = (
+        r.returncode == 0 and P.get("plan") == "PLAN-v7" and set(P.get("costs", {})) == {"300", "400", "500"}
+        and P.get("rule2_choice") == "400" and len(P["abort_rules"]) == len(v7.ABORT_V7))
+    r6 = subprocess.run([PY, str(HERE / "predict.py"), "--plan", "v6"], capture_output=True, text=True)
+    out["predict --plan v6 still runs (PLAN-v6 kept)"] = r6.returncode == 0 and "PLAN-v6" in r6.stdout
+    return out
+
 
 def derive_all(runs):
     return [derive_window(r, e) for r, e in runs]
@@ -868,9 +944,10 @@ def main():
         c = unit_cli(outdir)
         u5 = unit_v5(outdir)
         u6 = unit_v6(outdir)
-        T["unit"] = {**u, **us, **v41, **se, **c, **u5, **u6}
+        u7 = unit_v7(outdir)
+        T["unit"] = {**u, **us, **v41, **se, **c, **u5, **u6, **u7}
         md += ["## U. Unit checks", ""]
-        for k, v in {**u, **us, **v41, **se, **c, **u5, **u6}.items():
+        for k, v in {**u, **us, **v41, **se, **c, **u5, **u6, **u7}.items():
             if k in ("score stderr", "score v5 stderr"):
                 md.append(f"- score stderr: `{v}`")
                 continue
